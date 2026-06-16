@@ -16,8 +16,13 @@ pub enum Popup {
     Search,
 }
 
-pub fn render_table(view: &TableView, area: Rect, buffer: &mut Buffer) {
+pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
+    let viewport_height = visible_row_capacity(view, area);
+    let viewport_width = visible_column_capacity(view, area);
+    view.resize_viewport(viewport_height, viewport_width);
+
     let cursor = view.cursor();
+    let viewport = view.viewport();
     let location = format!(" ({},{}) ", cursor.row + 1, cursor.column + 1);
     buffer.set_string(
         area.x,
@@ -55,30 +60,42 @@ pub fn render_table(view: &TableView, area: Rect, buffer: &mut Buffer) {
         if let Some(header) = view.header() {
             render_row(
                 buffer,
-                area,
-                row_y,
                 header,
-                &widths,
-                Style::default().add_modifier(Modifier::BOLD),
-                None,
+                RowRender {
+                    area,
+                    y: row_y,
+                    widths: &widths,
+                    style: Style::default().add_modifier(Modifier::BOLD),
+                    selected_column: None,
+                    column_offset: viewport.origin.column,
+                },
             );
             row_y += 1;
         }
     }
 
-    for (idx, row) in view.rows().iter().enumerate() {
+    for (idx, row) in view
+        .rows()
+        .iter()
+        .enumerate()
+        .skip(viewport.origin.row)
+        .take(viewport.height)
+    {
         if row_y >= area.y + area.height {
             break;
         }
         let selected_column = (idx == cursor.row).then_some(cursor.column);
         render_row(
             buffer,
-            area,
-            row_y,
             row,
-            &widths,
-            Style::default(),
-            selected_column,
+            RowRender {
+                area,
+                y: row_y,
+                widths: &widths,
+                style: Style::default(),
+                selected_column,
+                column_offset: viewport.origin.column,
+            },
         );
         row_y += 1;
     }
@@ -133,30 +150,55 @@ fn display_rows(view: &TableView) -> Vec<Vec<String>> {
     rows
 }
 
-fn render_row(
-    buffer: &mut Buffer,
+struct RowRender<'a> {
     area: Rect,
     y: u16,
-    row: &[String],
-    widths: &[usize],
+    widths: &'a [usize],
     style: Style,
     selected_column: Option<usize>,
-) {
-    let mut x = area.x;
-    for (column, cell) in row.iter().enumerate() {
-        if x >= area.x + area.width {
+    column_offset: usize,
+}
+
+fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
+    let mut x = render.area.x;
+    for (column, cell) in row.iter().enumerate().skip(render.column_offset) {
+        if x >= render.area.x + render.area.width {
             break;
         }
-        let width = widths.get(column).copied().unwrap_or(1);
-        let style = if selected_column == Some(column) {
-            style.add_modifier(Modifier::REVERSED)
+        let width = render.widths.get(column).copied().unwrap_or(1);
+        let style = if render.selected_column == Some(column) {
+            render.style.add_modifier(Modifier::REVERSED)
         } else {
-            style
+            render.style
         };
         let cell = truncate_cell(cell, width, "…");
-        buffer.set_stringn(x, y, &cell, width, style);
+        buffer.set_stringn(x, render.y, &cell, width, style);
         x = x.saturating_add(width as u16).saturating_add(2);
     }
+}
+
+fn visible_row_capacity(view: &TableView, area: Rect) -> usize {
+    let header_height = usize::from(view.header_visible() && view.header().is_some());
+    usize::from(area.height)
+        .saturating_sub(2)
+        .saturating_sub(header_height)
+        .max(1)
+}
+
+fn visible_column_capacity(view: &TableView, area: Rect) -> usize {
+    let all_rows = display_rows(view);
+    let widths = column_widths(&all_rows, ColumnWidthMode::Max, 2);
+    let mut used = 0usize;
+    let mut columns = 0usize;
+    for width in widths.iter().skip(view.viewport().origin.column) {
+        let required = *width + usize::from(columns > 0) * 2;
+        if columns > 0 && used + required > usize::from(area.width) {
+            break;
+        }
+        used += required;
+        columns += 1;
+    }
+    columns.max(1).min(view.column_count().max(1))
 }
 
 pub fn render_cell_popup(cell: &str, title: &str, area: Rect, buffer: &mut Buffer) -> bool {
@@ -239,13 +281,13 @@ mod tests {
 
     #[test]
     fn renders_initial_header_layout() {
-        let view = TableView::classify(
+        let mut view = TableView::classify(
             rows(&[&["Name", "Value"], &["alpha", "1"]]),
             Viewport::new(10, 4),
         );
         let area = Rect::new(0, 0, 24, 6);
         let mut buffer = Buffer::empty(area);
-        render_table(&view, area, &mut buffer);
+        render_table(&mut view, area, &mut buffer);
         let text = buffer_text(&buffer);
         assert!(text.contains("(1,1)"));
         assert!(text.contains("Name"));
@@ -254,13 +296,34 @@ mod tests {
 
     #[test]
     fn renders_without_header_when_not_classified() {
-        let view = TableView::classify(rows(&[&["1", "2"], &["3", "4"]]), Viewport::new(10, 4));
+        let mut view = TableView::classify(rows(&[&["1", "2"], &["3", "4"]]), Viewport::new(10, 4));
         let area = Rect::new(0, 0, 20, 5);
         let mut buffer = Buffer::empty(area);
-        render_table(&view, area, &mut buffer);
+        render_table(&mut view, area, &mut buffer);
         let text = buffer_text(&buffer);
         assert!(text.contains("1"));
         assert!(text.contains("3"));
+    }
+
+    #[test]
+    fn renders_from_viewport_origin() {
+        let mut view = TableView::classify(
+            rows(&[
+                &["A", "B", "C"],
+                &["r1c1", "r1c2", "r1c3"],
+                &["r2c1", "r2c2", "r2c3"],
+                &["r3c1", "r3c2", "r3c3"],
+            ]),
+            Viewport::new(1, 1),
+        );
+        view.goto(2, 2);
+        let area = Rect::new(0, 0, 16, 4);
+        let mut buffer = Buffer::empty(area);
+        render_table(&mut view, area, &mut buffer);
+        let text = buffer_text(&buffer);
+        assert!(text.contains("(3,3)"));
+        assert!(text.contains("r3c3"));
+        assert!(!text.contains("r1c1"));
     }
 
     #[test]

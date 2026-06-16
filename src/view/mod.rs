@@ -2,6 +2,8 @@ use std::collections::HashMap;
 
 use unicode_width::UnicodeWidthStr;
 
+use crate::ops::sort::{sort_rows, SortDirection, SortMode};
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ColumnWidthMode {
     #[default]
@@ -119,6 +121,12 @@ impl TableView {
         self.viewport
     }
 
+    pub fn resize_viewport(&mut self, height: usize, width: usize) {
+        self.viewport.height = height.max(1);
+        self.viewport.width = width.max(1);
+        self.keep_cursor_visible();
+    }
+
     pub fn toggle_header(&mut self) {
         if self.header.is_some() {
             self.header_visible = !self.header_visible;
@@ -143,6 +151,11 @@ impl TableView {
             .map(Vec::len)
             .or_else(|| self.rows.first().map(Vec::len))
             .unwrap_or(0)
+    }
+
+    pub fn sort_current_column(&mut self, mode: SortMode, direction: SortDirection) {
+        sort_rows(&mut self.rows, self.cursor.column, mode, direction);
+        self.keep_cursor_visible();
     }
 
     fn keep_cursor_visible(&mut self) {
@@ -290,5 +303,32 @@ mod tests {
         state.apply_to(&mut reloaded);
         assert_eq!(reloaded.cursor(), Position { row: 1, column: 1 });
         assert_eq!(state.search.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn resizes_viewport_and_keeps_cursor_visible() {
+        let mut view = TableView::classify(
+            rows(&[
+                &["A", "B", "C"],
+                &["1", "2", "3"],
+                &["4", "5", "6"],
+                &["7", "8", "9"],
+            ]),
+            Viewport::new(3, 3),
+        );
+        view.goto(2, 2);
+        view.resize_viewport(1, 1);
+        assert_eq!(view.viewport().origin, Position { row: 2, column: 2 });
+    }
+
+    #[test]
+    fn sorts_data_rows_by_current_column() {
+        let mut view = TableView::classify(
+            rows(&[&["Name", "Value"], &["b", "10"], &["a", "2"]]),
+            Viewport::new(10, 2),
+        );
+        view.goto(0, 0);
+        view.sort_current_column(SortMode::Lexical, SortDirection::Ascending);
+        assert_eq!(view.rows(), rows(&[&["a", "2"], &["b", "10"]]));
     }
 }
