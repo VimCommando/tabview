@@ -55,23 +55,18 @@ Features:
 * Yank cell contents to the clipboard
 * File can be reloaded in-place if the data changes.
 * F1 or ? for keybindings
-* Can also use from python command line to visualize any tabular data (e.g.
-  list-of-lists)
 * See the screenshots directory for some pictures.
 
 Requires: 
 ---------
 
-* Python 3.4+
-* Xsel or xclip (Optional - only required for 'yank' to clipboard)
+* Rust toolchain for installation with Cargo
+* Optional clipboard support is provided by the Rust build when enabled
 
 Installation:
 -------------
 
-* ``pip install tabview`` OR
-* ``# python setup.py install``  OR
-* ``$ python setup.py install --user``  OR
-* `Archlinux AUR package <https://aur.archlinux.org/packages/tabview-git/>`_
+* ``cargo install tabview``
 
 Usage:
 ------
@@ -85,20 +80,9 @@ Usage:
     tabview <filename> +6:5  (equivalent to previous usage)
     tabview <filename> --encoding iso8859-1 +6:
 
-* From python command line to view an object
-
-    .. code:: python
-    
-        import tabview as t
-        a = [["a","b","c"], ["d","e","f"]]
-        t.view(a)
-
-* From python command line to view a file
-
-    .. code:: python
-    
-        import tabview as t
-        t.view(<filename>, start_pos=(60,40))
+The Rust rewrite supports the ``tabview`` CLI only. The former Python import
+API (``import tabview`` and ``tabview.view(...)``) is not part of the supported
+surface.
 
 * Using as the pager for MySQL. Set these options in ~/.my.cnf::
 
@@ -108,7 +92,8 @@ Usage:
 Tests:
 ------
 
-* ``python tests/test_tabview.py``
+* ``cargo test --all-features``
+* ``cargo clippy --all-targets --all-features -- -D warnings``
 
 Keybindings:
 ---------------

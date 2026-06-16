@@ -1,0 +1,46 @@
+{
+  "cli": [
+    {
+      "name": "readme_start_pos",
+      "args": ["sample/data_ohlcv.csv", "--start_pos", "6,5"]
+    },
+    {
+      "name": "classic_start_pos",
+      "args": ["sample/data_ohlcv.csv", "+6:5"]
+    },
+    {
+      "name": "mysql_pager",
+      "args": ["-d", "\\t", "--quoting", "QUOTE_NONE", "-"]
+    }
+  ],
+  "encoding": [
+    {
+      "name": "utf8_sample",
+      "path": "sample/unicode-example-utf8.txt"
+    },
+    {
+      "name": "latin1_sample",
+      "path": "sample/test_latin-1.csv"
+    }
+  ],
+  "csv": [
+    {
+      "name": "annotated_space_delimited",
+      "path": "sample/commented_annotated_numeric.txt",
+      "accepted_change": "multi_row_sniffing"
+    },
+    {
+      "name": "windows_newlines",
+      "path": "sample/windows_newlines.csv"
+    }
+  ],
+  "accepted_changes": [
+    "macos_clipboard_without_display",
+    "empty_cell_popup_noop",
+    "multi_row_csv_sniffing",
+    "structural_header_toggle",
+    "non_mutating_reverse_search",
+    "specific_encoding_before_latin1",
+    "default_mode_column_width"
+  ]
+}
