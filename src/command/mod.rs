@@ -165,12 +165,32 @@ pub fn lookup_key_event(event: KeyEvent) -> Option<Command> {
 pub fn default_key_bindings() -> Vec<KeyBinding> {
     vec![
         KeyBinding {
+            keys: "F1/?",
+            command: Command::Help,
+            description: "Show keybindings",
+        },
+        KeyBinding {
             keys: "h/j/k/l",
             command: Command::MoveDown,
             description: "Move selection",
         },
         KeyBinding {
-            keys: "J/K",
+            keys: "Home/^/C-a",
+            command: Command::LineHome,
+            description: "Move to start of row",
+        },
+        KeyBinding {
+            keys: "End/$/C-e",
+            command: Command::LineEnd,
+            description: "Move to end of row",
+        },
+        KeyBinding {
+            keys: "[num]|",
+            command: Command::GotoColumn,
+            description: "Go to column",
+        },
+        KeyBinding {
+            keys: "PgUp/PgDn/J/K",
             command: Command::PageDown,
             description: "Move a page vertically",
         },
@@ -178,6 +198,31 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             keys: "H/L",
             command: Command::PageLeft,
             description: "Move a page horizontally",
+        },
+        KeyBinding {
+            keys: "g/[num]G",
+            command: Command::GotoRow,
+            description: "Go to top, row, or bottom",
+        },
+        KeyBinding {
+            keys: "C-g",
+            command: Command::ShowInfo,
+            description: "Show file/data information",
+        },
+        KeyBinding {
+            keys: "Insert/m",
+            command: Command::Mark,
+            description: "Mark current cell",
+        },
+        KeyBinding {
+            keys: "Delete/'",
+            command: Command::GotoMark,
+            description: "Return to mark",
+        },
+        KeyBinding {
+            keys: "Enter",
+            command: Command::ShowCell,
+            description: "Show full cell contents",
         },
         KeyBinding {
             keys: "/",
@@ -190,19 +235,54 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             description: "Next/previous search result",
         },
         KeyBinding {
-            keys: "s/S a/A #/@",
-            command: Command::SortLexicalAsc,
-            description: "Sort current column",
-        },
-        KeyBinding {
             keys: "t",
             command: Command::ToggleHeader,
             description: "Toggle header row",
         },
         KeyBinding {
-            keys: "Enter",
-            command: Command::ShowCell,
-            description: "Show full cell contents",
+            keys: "</>",
+            command: Command::AllColumnsNarrower,
+            description: "Resize all columns",
+        },
+        KeyBinding {
+            keys: ",/.",
+            command: Command::CurrentColumnNarrower,
+            description: "Resize current column",
+        },
+        KeyBinding {
+            keys: "-/+",
+            command: Command::GapDown,
+            description: "Adjust column gap",
+        },
+        KeyBinding {
+            keys: "s/S a/A #/@",
+            command: Command::SortLexicalAsc,
+            description: "Sort current column",
+        },
+        KeyBinding {
+            keys: "r",
+            command: Command::Reload,
+            description: "Reload data",
+        },
+        KeyBinding {
+            keys: "y",
+            command: Command::YankCell,
+            description: "Yank current cell",
+        },
+        KeyBinding {
+            keys: "[num]c/C",
+            command: Command::ToggleColumnWidthMode,
+            description: "Set column width mode",
+        },
+        KeyBinding {
+            keys: "[num][]",
+            command: Command::SkipRowChangeForward,
+            description: "Skip row value changes",
+        },
+        KeyBinding {
+            keys: "[num]{}",
+            command: Command::SkipColumnChangeForward,
+            description: "Skip column value changes",
         },
         KeyBinding {
             keys: "q",

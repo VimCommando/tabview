@@ -2,11 +2,11 @@ pub mod terminal;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::command::KeyBinding;
-use crate::view::{column_widths, ColumnWidthMode, TableView};
+use crate::view::TableView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Popup {
@@ -53,8 +53,7 @@ pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
     }
 
     let mut row_y = area.y + 2;
-    let all_rows = display_rows(view);
-    let widths = column_widths(&all_rows, ColumnWidthMode::Max, 2);
+    let widths = view.effective_column_widths();
 
     if view.header_visible() {
         if let Some(header) = view.header() {
@@ -68,6 +67,7 @@ pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
                     style: Style::default().add_modifier(Modifier::BOLD),
                     selected_column: None,
                     column_offset: viewport.origin.column,
+                    column_gap: view.column_gap(),
                 },
             );
             row_y += 1;
@@ -95,6 +95,7 @@ pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
                 style: Style::default(),
                 selected_column,
                 column_offset: viewport.origin.column,
+                column_gap: view.column_gap(),
             },
         );
         row_y += 1;
@@ -105,8 +106,18 @@ pub fn render_popup(title: &str, body: &str, area: Rect, buffer: &mut Buffer) {
     if area.width < 2 || area.height < 2 {
         return;
     }
+    let popup_style = Style::default().fg(Color::White).bg(Color::Black);
     let x2 = area.x + area.width - 1;
     let y2 = area.y + area.height - 1;
+
+    for y in area.y..=y2 {
+        for x in area.x..=x2 {
+            let cell = &mut buffer[(x, y)];
+            cell.reset();
+            cell.set_symbol(" ");
+            cell.set_style(popup_style);
+        }
+    }
 
     for x in area.x..=x2 {
         buffer[(x, area.y)].set_symbol("─");
@@ -125,29 +136,15 @@ pub fn render_popup(title: &str, body: &str, area: Rect, buffer: &mut Buffer) {
         area.x + 1,
         area.y,
         title,
-        Style::default().add_modifier(Modifier::BOLD),
+        popup_style.add_modifier(Modifier::BOLD),
     );
     for (offset, line) in body
         .lines()
         .take(area.height.saturating_sub(2) as usize)
         .enumerate()
     {
-        buffer.set_string(
-            area.x + 1,
-            area.y + 1 + offset as u16,
-            line,
-            Style::default(),
-        );
+        buffer.set_string(area.x + 1, area.y + 1 + offset as u16, line, popup_style);
     }
-}
-
-fn display_rows(view: &TableView) -> Vec<Vec<String>> {
-    let mut rows = Vec::new();
-    if let Some(header) = view.header() {
-        rows.push(header.to_vec());
-    }
-    rows.extend(view.rows().iter().cloned());
-    rows
 }
 
 struct RowRender<'a> {
@@ -157,6 +154,7 @@ struct RowRender<'a> {
     style: Style,
     selected_column: Option<usize>,
     column_offset: usize,
+    column_gap: usize,
 }
 
 fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
@@ -173,7 +171,9 @@ fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
         };
         let cell = truncate_cell(cell, width, "…");
         buffer.set_stringn(x, render.y, &cell, width, style);
-        x = x.saturating_add(width as u16).saturating_add(2);
+        x = x
+            .saturating_add(width as u16)
+            .saturating_add(render.column_gap as u16);
     }
 }
 
@@ -186,12 +186,11 @@ fn visible_row_capacity(view: &TableView, area: Rect) -> usize {
 }
 
 fn visible_column_capacity(view: &TableView, area: Rect) -> usize {
-    let all_rows = display_rows(view);
-    let widths = column_widths(&all_rows, ColumnWidthMode::Max, 2);
+    let widths = view.effective_column_widths();
     let mut used = 0usize;
     let mut columns = 0usize;
     for width in widths.iter().skip(view.viewport().origin.column) {
-        let required = *width + usize::from(columns > 0) * 2;
+        let required = *width + usize::from(columns > 0) * view.column_gap();
         if columns > 0 && used + required > usize::from(area.width) {
             break;
         }
@@ -214,12 +213,45 @@ pub fn render_info_popup(info: &str, area: Rect, buffer: &mut Buffer) {
 }
 
 pub fn render_help_popup(bindings: &[KeyBinding], area: Rect, buffer: &mut Buffer) {
-    let body = bindings
-        .iter()
-        .map(|binding| format!("{:<12}{}", binding.keys, binding.description))
-        .collect::<Vec<_>>()
-        .join("\n");
+    let body = if area.width >= 76 && bindings.len() > 12 {
+        let split_at = bindings.len().div_ceil(2);
+        (0..split_at)
+            .map(|idx| {
+                let left = format_binding(&bindings[idx], 12, 23);
+                let right = bindings
+                    .get(idx + split_at)
+                    .map(|binding| format_binding(binding, 12, 23))
+                    .unwrap_or_default();
+                format!("{left}  {right}")
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    } else {
+        bindings
+            .iter()
+            .map(|binding| format_binding(binding, 14, area.width.saturating_sub(18) as usize))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
     render_popup("Help", &body, area, buffer);
+}
+
+fn format_binding(binding: &KeyBinding, key_width: usize, desc_width: usize) -> String {
+    format!(
+        "{:<key_width$} {}",
+        binding.keys,
+        truncate_plain(binding.description, desc_width)
+    )
+}
+
+fn truncate_plain(value: &str, width: usize) -> String {
+    if value.len() <= width {
+        return value.to_owned();
+    }
+    if width <= 1 {
+        return "…".to_owned();
+    }
+    format!("{}…", &value[..width - 1])
 }
 
 pub fn render_search_prompt(query: &str, area: Rect, buffer: &mut Buffer) {
@@ -335,6 +367,7 @@ mod tests {
         assert!(text.contains("Cell"));
         assert!(text.contains("contents"));
         assert!(text.contains("┌"));
+        assert_eq!(buffer[(1, 1)].style().bg, Some(Color::Black));
     }
 
     #[test]

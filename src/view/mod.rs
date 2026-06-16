@@ -42,6 +42,10 @@ pub struct TableView {
     rows: Vec<Vec<String>>,
     cursor: Position,
     viewport: Viewport,
+    mark: Option<Position>,
+    column_width_mode: ColumnWidthMode,
+    column_gap: usize,
+    column_widths: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -98,7 +102,16 @@ impl TableView {
             rows,
             cursor: Position::default(),
             viewport,
+            mark: None,
+            column_width_mode: ColumnWidthMode::Mode,
+            column_gap: 2,
+            column_widths: Vec::new(),
         }
+    }
+
+    pub fn with_column_width_mode(mut self, mode: ColumnWidthMode) -> Self {
+        self.column_width_mode = mode;
+        self
     }
 
     pub fn header(&self) -> Option<&[String]> {
@@ -113,12 +126,28 @@ impl TableView {
         &self.rows
     }
 
+    pub fn row_count(&self) -> usize {
+        self.rows.len()
+    }
+
     pub fn cursor(&self) -> Position {
         self.cursor
     }
 
     pub fn viewport(&self) -> Viewport {
         self.viewport
+    }
+
+    pub fn column_gap(&self) -> usize {
+        self.column_gap
+    }
+
+    pub fn column_width_mode(&self) -> ColumnWidthMode {
+        self.column_width_mode
+    }
+
+    pub fn mark(&self) -> Option<Position> {
+        self.mark
     }
 
     pub fn resize_viewport(&mut self, height: usize, width: usize) {
@@ -145,6 +174,39 @@ impl TableView {
         self.goto(row, column);
     }
 
+    pub fn page_by(&mut self, row_pages: isize, column_pages: isize, count: usize) {
+        let count = count.max(1) as isize;
+        let row_delta = row_pages * self.viewport.height.max(1) as isize * count;
+        let column_delta = column_pages * self.viewport.width.max(1) as isize * count;
+        self.move_by(row_delta, column_delta);
+    }
+
+    pub fn goto_top(&mut self) {
+        self.goto(0, self.cursor.column);
+    }
+
+    pub fn goto_bottom(&mut self) {
+        self.goto(self.rows.len().saturating_sub(1), self.cursor.column);
+    }
+
+    pub fn goto_user_row(&mut self, row: usize) {
+        self.goto(row.saturating_sub(1), self.cursor.column);
+    }
+
+    pub fn goto_user_column(&mut self, column: usize) {
+        self.goto(self.cursor.row, column.saturating_sub(1));
+    }
+
+    pub fn set_mark(&mut self) {
+        self.mark = Some(self.cursor);
+    }
+
+    pub fn goto_mark(&mut self) {
+        if let Some(mark) = self.mark {
+            self.goto(mark.row, mark.column);
+        }
+    }
+
     pub fn column_count(&self) -> usize {
         self.header
             .as_ref()
@@ -156,6 +218,75 @@ impl TableView {
     pub fn sort_current_column(&mut self, mode: SortMode, direction: SortDirection) {
         sort_rows(&mut self.rows, self.cursor.column, mode, direction);
         self.keep_cursor_visible();
+    }
+
+    pub fn set_column_gap(&mut self, gap: usize) {
+        self.column_gap = gap;
+    }
+
+    pub fn adjust_column_gap(&mut self, delta: isize) {
+        self.column_gap = self.column_gap.saturating_add_signed(delta);
+    }
+
+    pub fn set_column_width_mode(&mut self, mode: ColumnWidthMode) {
+        self.column_width_mode = mode;
+        self.column_widths.clear();
+    }
+
+    pub fn toggle_variable_column_width_mode(&mut self) {
+        self.column_width_mode = match self.column_width_mode {
+            ColumnWidthMode::Mode => ColumnWidthMode::Max,
+            ColumnWidthMode::Max | ColumnWidthMode::Fixed(_) => ColumnWidthMode::Mode,
+        };
+        self.column_widths.clear();
+    }
+
+    pub fn set_all_column_widths(&mut self, width: usize) {
+        self.column_width_mode = ColumnWidthMode::Fixed(width.clamp(1, u16::MAX as usize) as u16);
+        self.column_widths.clear();
+    }
+
+    pub fn set_current_column_width(&mut self, width: usize) {
+        self.ensure_custom_column_widths();
+        if let Some(column_width) = self.column_widths.get_mut(self.cursor.column) {
+            *column_width = width.max(1);
+        }
+    }
+
+    pub fn maximize_current_column_width(&mut self) {
+        let max_widths = self.computed_column_widths(ColumnWidthMode::Max);
+        if let Some(width) = max_widths.get(self.cursor.column) {
+            self.set_current_column_width(*width);
+        }
+    }
+
+    pub fn adjust_all_column_widths(&mut self, delta: isize) {
+        self.ensure_custom_column_widths();
+        for width in &mut self.column_widths {
+            *width = width.saturating_add_signed(delta).max(1);
+        }
+    }
+
+    pub fn adjust_current_column_width(&mut self, delta: isize) {
+        self.ensure_custom_column_widths();
+        if let Some(width) = self.column_widths.get_mut(self.cursor.column) {
+            *width = width.saturating_add_signed(delta).max(1);
+        }
+    }
+
+    pub fn effective_column_widths(&self) -> Vec<usize> {
+        if self.column_widths.len() == self.column_count() {
+            self.column_widths.clone()
+        } else {
+            self.computed_column_widths(self.column_width_mode)
+        }
+    }
+
+    pub fn restore_view_settings_from(&mut self, previous: &TableView) {
+        self.column_width_mode = previous.column_width_mode;
+        self.column_gap = previous.column_gap;
+        self.column_widths = previous.column_widths.clone();
+        self.mark = previous.mark;
     }
 
     fn keep_cursor_visible(&mut self) {
@@ -170,6 +301,21 @@ impl TableView {
         } else if self.cursor.column >= self.viewport.origin.column + self.viewport.width {
             self.viewport.origin.column = self.cursor.column + 1 - self.viewport.width;
         }
+    }
+
+    fn ensure_custom_column_widths(&mut self) {
+        if self.column_widths.len() != self.column_count() {
+            self.column_widths = self.computed_column_widths(self.column_width_mode);
+        }
+    }
+
+    fn computed_column_widths(&self, mode: ColumnWidthMode) -> Vec<usize> {
+        let mut rows = Vec::new();
+        if let Some(header) = self.header() {
+            rows.push(header.to_vec());
+        }
+        rows.extend(self.rows().iter().cloned());
+        column_widths(&rows, mode, self.column_gap)
     }
 }
 
@@ -330,5 +476,55 @@ mod tests {
         view.goto(0, 0);
         view.sort_current_column(SortMode::Lexical, SortDirection::Ascending);
         assert_eq!(view.rows(), rows(&[&["a", "2"], &["b", "10"]]));
+    }
+
+    #[test]
+    fn page_motion_uses_viewport_size() {
+        let mut view = TableView::classify(
+            rows(&[
+                &["A"],
+                &["1"],
+                &["2"],
+                &["3"],
+                &["4"],
+                &["5"],
+                &["6"],
+                &["7"],
+            ]),
+            Viewport::new(3, 1),
+        );
+        view.page_by(1, 0, 2);
+        assert_eq!(view.cursor().row, 6);
+        view.page_by(-1, 0, 1);
+        assert_eq!(view.cursor().row, 3);
+    }
+
+    #[test]
+    fn mark_round_trips_cursor_position() {
+        let mut view = TableView::classify(
+            rows(&[&["A", "B"], &["1", "2"], &["3", "4"]]),
+            Viewport::new(3, 2),
+        );
+        view.goto(1, 1);
+        view.set_mark();
+        view.goto(0, 0);
+        view.goto_mark();
+        assert_eq!(view.cursor(), Position { row: 1, column: 1 });
+    }
+
+    #[test]
+    fn column_width_controls_update_effective_widths() {
+        let mut view = TableView::classify(
+            rows(&[&["Name", "Value"], &["alpha", "1"]]),
+            Viewport::new(3, 2),
+        );
+        view.set_all_column_widths(4);
+        assert_eq!(view.effective_column_widths(), [4, 4]);
+        view.set_current_column_width(8);
+        assert_eq!(view.effective_column_widths()[0], 8);
+        view.adjust_current_column_width(-20);
+        assert_eq!(view.effective_column_widths()[0], 1);
+        view.adjust_column_gap(3);
+        assert_eq!(view.column_gap(), 5);
     }
 }
