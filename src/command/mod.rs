@@ -255,9 +255,19 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             description: "Adjust column gap",
         },
         KeyBinding {
-            keys: "s/S a/A #/@",
+            keys: "s/S",
             command: Command::SortLexicalAsc,
-            description: "Sort current column",
+            description: "Lexical sort current column",
+        },
+        KeyBinding {
+            keys: "a/A",
+            command: Command::SortNaturalAsc,
+            description: "Natural sort current column",
+        },
+        KeyBinding {
+            keys: "#/@",
+            command: Command::SortNumericAsc,
+            description: "Numeric sort current column",
         },
         KeyBinding {
             keys: "r",

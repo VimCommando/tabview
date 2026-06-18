@@ -30,7 +30,7 @@
 - [x] 4.5 Implement space-delimited normalization with first-line `#`/`%` stripping.
 - [x] 4.6 Implement row padding so parsed data is rectangular.
 - [x] 4.7 Implement an in-memory table store for ordinary files and operation tests.
-- [x] 4.8 Implement lazy or streaming-backed table access for very large files.
+- [x] 4.8 Add large-file groundwork: a centralized 100 MiB threshold, table-store abstractions, and prototype lazy file access for a follow-on TUI-backed implementation.
 
 ## 5. View Model and Commands
 
@@ -47,7 +47,7 @@
 - [x] 6.2 Implement lexical, natural, and numeric sort operations for the current column.
 - [x] 6.3 Implement skip-to-change operations for row and column value changes.
 - [x] 6.4 Implement current cell yanking behind an optional clipboard feature.
-- [x] 6.5 Define controlled behavior for full-table operations against lazy table stores.
+- [x] 6.5 Define the follow-on boundary for controlled full-table operations against lazy table stores.
 
 ## 7. Ratatui Interface
 

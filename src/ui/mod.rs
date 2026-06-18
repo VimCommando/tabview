@@ -6,6 +6,7 @@ use ratatui::style::{Color, Modifier, Style};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::command::KeyBinding;
+use crate::ops::sort::{is_numeric_cell, is_numeric_placeholder};
 use crate::view::TableView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -54,6 +55,8 @@ pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
 
     let mut row_y = area.y + 2;
     let widths = view.effective_column_widths();
+    let alignments = column_alignments(view);
+    let left_alignments = vec![Alignment::Left; widths.len()];
 
     if view.header_visible() {
         if let Some(header) = view.header() {
@@ -68,6 +71,7 @@ pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
                     selected_column: None,
                     column_offset: viewport.origin.column,
                     column_gap: view.column_gap(),
+                    alignments: &left_alignments,
                 },
             );
             row_y += 1;
@@ -96,6 +100,7 @@ pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
                 selected_column,
                 column_offset: viewport.origin.column,
                 column_gap: view.column_gap(),
+                alignments: &alignments,
             },
         );
         row_y += 1;
@@ -155,6 +160,7 @@ struct RowRender<'a> {
     selected_column: Option<usize>,
     column_offset: usize,
     column_gap: usize,
+    alignments: &'a [Alignment],
 }
 
 fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
@@ -169,12 +175,48 @@ fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
         } else {
             render.style
         };
-        let cell = truncate_cell(cell, width, "…");
+        let alignment = render.alignments.get(column).copied().unwrap_or_default();
+        let cell = align_cell(cell, width, "…", alignment);
         buffer.set_stringn(x, render.y, &cell, width, style);
         x = x
             .saturating_add(width as u16)
             .saturating_add(render.column_gap as u16);
     }
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Alignment {
+    #[default]
+    Left,
+    Right,
+}
+
+fn column_alignments(view: &TableView) -> Vec<Alignment> {
+    (0..view.column_count())
+        .map(|column| {
+            let mut has_numeric_value = false;
+            for row in view.rows() {
+                let Some(cell) = row.get(column).map(|cell| cell.trim()) else {
+                    continue;
+                };
+                if cell.is_empty() {
+                    continue;
+                }
+                if is_numeric_placeholder(cell) {
+                    continue;
+                }
+                if !is_numeric_cell(cell, view.numeric_column_profile(column)) {
+                    return Alignment::Left;
+                }
+                has_numeric_value = true;
+            }
+            if has_numeric_value {
+                Alignment::Right
+            } else {
+                Alignment::Left
+            }
+        })
+        .collect()
 }
 
 fn visible_row_capacity(view: &TableView, area: Rect) -> usize {
@@ -213,45 +255,70 @@ pub fn render_info_popup(info: &str, area: Rect, buffer: &mut Buffer) {
 }
 
 pub fn render_help_popup(bindings: &[KeyBinding], area: Rect, buffer: &mut Buffer) {
-    let body = if area.width >= 76 && bindings.len() > 12 {
+    let content_width = area.width.saturating_sub(2) as usize;
+    let key_width = bindings
+        .iter()
+        .map(|binding| UnicodeWidthStr::width(binding.keys))
+        .max()
+        .unwrap_or(1)
+        .min(16);
+    let body = if content_width >= 74 && bindings.len() > 12 {
         let split_at = bindings.len().div_ceil(2);
+        let column_gap = 2;
+        let column_width = (content_width - column_gap) / 2;
         (0..split_at)
             .map(|idx| {
-                let left = format_binding(&bindings[idx], 12, 23);
+                let left = format_binding(&bindings[idx], key_width, column_width);
                 let right = bindings
                     .get(idx + split_at)
-                    .map(|binding| format_binding(binding, 12, 23))
-                    .unwrap_or_default();
-                format!("{left}  {right}")
+                    .map(|binding| format_binding(binding, key_width, column_width))
+                    .unwrap_or_else(|| " ".repeat(column_width));
+                format!("{left}{}{}", " ".repeat(column_gap), right)
             })
             .collect::<Vec<_>>()
             .join("\n")
     } else {
+        let column_width = content_width.max(1);
         bindings
             .iter()
-            .map(|binding| format_binding(binding, 14, area.width.saturating_sub(18) as usize))
+            .map(|binding| format_binding(binding, key_width, column_width))
             .collect::<Vec<_>>()
             .join("\n")
     };
     render_popup("Help", &body, area, buffer);
 }
 
-fn format_binding(binding: &KeyBinding, key_width: usize, desc_width: usize) -> String {
+fn format_binding(binding: &KeyBinding, key_width: usize, column_width: usize) -> String {
+    let separator_width = 1;
+    if column_width <= key_width + separator_width {
+        return fit_text(binding.keys, column_width);
+    }
+    let desc_width = column_width
+        .saturating_sub(key_width)
+        .saturating_sub(separator_width);
     format!(
-        "{:<key_width$} {}",
-        binding.keys,
-        truncate_plain(binding.description, desc_width)
+        "{} {}",
+        fit_text(binding.keys, key_width),
+        fit_text(binding.description, desc_width)
     )
 }
 
-fn truncate_plain(value: &str, width: usize) -> String {
-    if value.len() <= width {
-        return value.to_owned();
+fn fit_text(value: &str, width: usize) -> String {
+    truncate_cell(value, width, "…")
+}
+
+fn align_cell(cell: &str, width: usize, truncation: &str, alignment: Alignment) -> String {
+    if UnicodeWidthStr::width(cell) > width {
+        return truncate_cell(cell, width, truncation);
     }
-    if width <= 1 {
-        return "…".to_owned();
+
+    match alignment {
+        Alignment::Left => format!("{cell:<width$}"),
+        Alignment::Right => {
+            let padding = width.saturating_sub(UnicodeWidthStr::width(cell));
+            format!("{}{}", " ".repeat(padding), cell)
+        }
     }
-    format!("{}…", &value[..width - 1])
 }
 
 pub fn render_search_prompt(query: &str, area: Rect, buffer: &mut Buffer) {
@@ -359,6 +426,107 @@ mod tests {
     }
 
     #[test]
+    fn right_aligns_numeric_columns() {
+        let mut view = TableView::classify(
+            rows(&[&["Name", "Value"], &["alpha", "2"], &["beta", "100"]]),
+            Viewport::new(10, 2),
+        );
+        view.set_all_column_widths(5);
+        let area = Rect::new(0, 0, 20, 6);
+        let mut buffer = Buffer::empty(area);
+        render_table(&mut view, area, &mut buffer);
+
+        assert_eq!(buffer[(7, 2)].symbol(), "V");
+        assert_eq!(buffer[(8, 2)].symbol(), "a");
+        assert_eq!(buffer[(7, 3)].symbol(), " ");
+        assert_eq!(buffer[(8, 3)].symbol(), " ");
+        assert_eq!(buffer[(9, 3)].symbol(), " ");
+        assert_eq!(buffer[(10, 3)].symbol(), " ");
+        assert_eq!(buffer[(11, 3)].symbol(), "2");
+    }
+
+    #[test]
+    fn right_aligns_suffixed_numeric_columns() {
+        let mut view = TableView::classify(
+            rows(&[&["Name", "Size"], &["alpha", "2MiB"], &["beta", "512kb"]]),
+            Viewport::new(10, 2),
+        );
+        view.set_all_column_widths(6);
+        let area = Rect::new(0, 0, 24, 6);
+        let mut buffer = Buffer::empty(area);
+        render_table(&mut view, area, &mut buffer);
+
+        assert_eq!(buffer[(8, 3)].symbol(), " ");
+        assert_eq!(buffer[(9, 3)].symbol(), " ");
+        assert_eq!(buffer[(10, 3)].symbol(), "2");
+        assert_eq!(buffer[(11, 3)].symbol(), "M");
+        assert_eq!(buffer[(12, 3)].symbol(), "i");
+        assert_eq!(buffer[(13, 3)].symbol(), "B");
+    }
+
+    #[test]
+    fn right_aligns_time_hint_numeric_columns() {
+        let mut view = TableView::classify(
+            rows(&[&["Name", "Duration"], &["alpha", "2m"], &["beta", "30"]]),
+            Viewport::new(10, 2),
+        );
+        view.set_all_column_widths(5);
+        let area = Rect::new(0, 0, 20, 6);
+        let mut buffer = Buffer::empty(area);
+        render_table(&mut view, area, &mut buffer);
+
+        assert_eq!(buffer[(9, 3)].symbol(), " ");
+        assert_eq!(buffer[(10, 3)].symbol(), "2");
+        assert_eq!(buffer[(11, 3)].symbol(), "m");
+    }
+
+    #[test]
+    fn right_aligns_percent_numeric_columns() {
+        let mut view = TableView::classify(
+            rows(&[&["Name", "Rate"], &["alpha", "2.5%"], &["beta", "100%"]]),
+            Viewport::new(10, 2),
+        );
+        view.set_all_column_widths(6);
+        let area = Rect::new(0, 0, 22, 6);
+        let mut buffer = Buffer::empty(area);
+        render_table(&mut view, area, &mut buffer);
+
+        assert_eq!(buffer[(8, 3)].symbol(), " ");
+        assert_eq!(buffer[(9, 3)].symbol(), " ");
+        assert_eq!(buffer[(10, 3)].symbol(), "2");
+        assert_eq!(buffer[(11, 3)].symbol(), ".");
+        assert_eq!(buffer[(12, 3)].symbol(), "5");
+        assert_eq!(buffer[(13, 3)].symbol(), "%");
+    }
+
+    #[test]
+    fn ignores_placeholders_when_aligning_numeric_columns() {
+        let mut view = TableView::classify(
+            rows(&[
+                &["Name", "Value"],
+                &["alpha", "2.5%"],
+                &["beta", "null"],
+                &["gamma", "N/A"],
+            ]),
+            Viewport::new(10, 4),
+        );
+        view.set_all_column_widths(6);
+        let area = Rect::new(0, 0, 22, 8);
+        let mut buffer = Buffer::empty(area);
+        render_table(&mut view, area, &mut buffer);
+
+        assert_eq!(buffer[(8, 3)].symbol(), " ");
+        assert_eq!(buffer[(9, 3)].symbol(), " ");
+        assert_eq!(buffer[(10, 3)].symbol(), "2");
+        assert_eq!(buffer[(11, 3)].symbol(), ".");
+        assert_eq!(buffer[(12, 3)].symbol(), "5");
+        assert_eq!(buffer[(13, 3)].symbol(), "%");
+        assert_eq!(buffer[(8, 4)].symbol(), " ");
+        assert_eq!(buffer[(10, 4)].symbol(), "n");
+        assert_eq!(buffer[(13, 5)].symbol(), "A");
+    }
+
+    #[test]
     fn renders_popup_box() {
         let area = Rect::new(0, 0, 20, 5);
         let mut buffer = Buffer::empty(area);
@@ -389,6 +557,29 @@ mod tests {
         render_search_prompt("abc", area, &mut buffer);
         let text = buffer_text(&buffer);
         assert!(text.contains("Search: abc"));
+    }
+
+    #[test]
+    fn renders_help_columns_with_stable_alignment() {
+        let area = Rect::new(0, 0, 78, 22);
+        let mut buffer = Buffer::empty(area);
+        render_help_popup(&crate::command::default_key_bindings(), area, &mut buffer);
+        let text = buffer_text(&buffer);
+
+        assert!(text.contains("PgUp/PgDn/J/K Move a page vertically"));
+        assert!(!text.contains("PgUp/PgDn/J/KMove"));
+
+        let line_with_sort = text
+            .lines()
+            .find(|line| line.contains("Move a page vertically"))
+            .expect("page motion help line");
+        assert!(line_with_sort.contains("r"));
+        assert!(text.contains("s/S"));
+        assert!(text.contains("Lexical sort current"));
+        assert!(text.contains("a/A"));
+        assert!(text.contains("Natural sort current"));
+        assert!(text.contains("#/@"));
+        assert!(text.contains("Numeric sort current"));
     }
 
     #[test]

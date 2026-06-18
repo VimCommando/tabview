@@ -43,13 +43,17 @@ The system SHALL normalize parsed rows to a rectangular table by padding shorter
 - **WHEN** input rows contain different numbers of fields
 - **THEN** all parsed rows expose the same column count and missing cells are empty strings
 
-### Requirement: Lazy large-file support
-The system SHALL support lazy or streaming-backed table access for very large files without requiring all rows to be loaded before the viewer can start, except when an operation requires full-table materialization or indexing.
+### Requirement: Large-file groundwork
+The rewrite SHALL include explicit groundwork for future lazy or streaming-backed table access without requiring the first Rust replacement to route the interactive TUI through that lazy path.
 
-#### Scenario: Large file opens incrementally
-- **WHEN** a user opens a file large enough to trigger lazy loading
-- **THEN** the viewer can begin displaying initial rows without first materializing the complete file into memory
+#### Scenario: Lazy threshold is centralized
+- **WHEN** the code needs to decide whether a file is large enough for future lazy handling
+- **THEN** the default threshold is available as a named configurable constant set to 100 MiB
 
-#### Scenario: Full-table operation on lazy input
-- **WHEN** a user invokes a full-table operation such as sort on a lazy input
-- **THEN** the system materializes or indexes the required data in a controlled way without corrupting the current table state
+#### Scenario: Prototype store exists
+- **WHEN** developers work on follow-on lazy loading support
+- **THEN** the codebase exposes table-store abstractions and prototype lazy file access that can be evolved into the TUI-backed implementation
+
+#### Scenario: First replacement may materialize input
+- **WHEN** a user opens a file with the first Rust replacement
+- **THEN** the viewer may materialize the file into memory while preserving compatible CLI, parsing, table, and TUI behavior

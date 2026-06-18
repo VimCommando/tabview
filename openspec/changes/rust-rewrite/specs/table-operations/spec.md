@@ -23,11 +23,39 @@ The system SHALL support fixed, mode, and max column width modes plus interactiv
 - **THEN** all columns use fixed width 20 subject to terminal constraints
 
 ### Requirement: Sort operations
-The system SHALL support ascending and descending lexical, natural, and numeric sort on the current column using the existing keybindings.
+The system SHALL support ascending and descending lexical, natural, and numeric sort on the current column using the existing keybindings. Numeric sort SHALL treat plain numbers, recognized suffixed numbers, and multi-dot numeric values as numeric values, while leaving non-numeric values after numeric values in ascending order.
 
 #### Scenario: Numeric ascending sort
 - **WHEN** a user presses `#`
 - **THEN** rows are sorted by the current column using numeric comparison where values parse as numbers
+
+#### Scenario: Scientific and byte suffix numeric sort
+- **WHEN** numeric sort is applied to values with scientific suffixes from nano through exa, byte suffixes such as `kb`, `MB`, `GiB`, and `MiB`, or decimal percent suffixes such as `2.5%`
+- **THEN** those values are compared using their numeric magnitude, with `%` using no multiplier beyond the numeric value itself
+
+#### Scenario: Time-context suffix numeric sort
+- **WHEN** a numeric column contains explicit time suffixes such as `ns`, `us`, `ms`, `s`, `min`, `h`, `d`, or `y`, or the column header suggests time-like data such as duration, latency, elapsed, runtime, uptime, timeout, or interval
+- **THEN** numeric sort treats bare `m` as minutes for that column
+
+#### Scenario: Non-time bare m numeric sort
+- **WHEN** a numeric column does not have time-context evidence
+- **THEN** numeric sort treats bare `m` as the scientific milli suffix
+
+#### Scenario: Multi-dot numeric sort
+- **WHEN** numeric sort is applied to values with multiple dot-separated numeric groups such as IP addresses or semantic versions
+- **THEN** those values are compared component-by-component numerically
+
+#### Scenario: Placeholder values in numeric columns
+- **WHEN** a numeric column contains placeholder values such as `null`, `n/a`, `na`, `none`, `nil`, or `nan`
+- **THEN** those placeholders do not prevent the column from being treated as numeric and sort after numeric values in ascending order
+
+#### Scenario: Sticky numeric column profile
+- **WHEN** the viewer classifies a column as time-context or default numeric context
+- **THEN** that numeric interpretation remains stable for subsequent sorts and rendering until the table is reloaded or reclassified
+
+#### Scenario: Numeric column alignment
+- **WHEN** a visible column contains only numeric values, empty cells, or recognized placeholder values
+- **THEN** data cells in that column are right-aligned while headers remain left-aligned
 
 ### Requirement: Search traversal
 The system SHALL preserve current forward and reverse search traversal results, including wraparound through rows and columns, without mutating table row or cell order during traversal.

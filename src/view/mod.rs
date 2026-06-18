@@ -1,8 +1,13 @@
+mod column;
+
 use std::collections::HashMap;
 
 use unicode_width::UnicodeWidthStr;
 
-use crate::ops::sort::{sort_rows, SortDirection, SortMode};
+use crate::ops::sort::{
+    sort_rows, sort_rows_with_numeric_profile, NumericColumnProfile, SortDirection, SortMode,
+};
+use column::{ColumnIndex, Columns};
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ColumnWidthMode {
@@ -46,6 +51,7 @@ pub struct TableView {
     column_width_mode: ColumnWidthMode,
     column_gap: usize,
     column_widths: Vec<usize>,
+    columns: Columns,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -96,6 +102,8 @@ impl TableView {
             (None, rows)
         };
 
+        let columns = Columns::infer(header.as_deref(), &rows);
+
         Self {
             header_visible: header.is_some(),
             header,
@@ -106,6 +114,7 @@ impl TableView {
             column_width_mode: ColumnWidthMode::Mode,
             column_gap: 2,
             column_widths: Vec::new(),
+            columns,
         }
     }
 
@@ -144,6 +153,10 @@ impl TableView {
 
     pub fn column_width_mode(&self) -> ColumnWidthMode {
         self.column_width_mode
+    }
+
+    pub(crate) fn numeric_column_profile(&self, column: usize) -> NumericColumnProfile {
+        self.columns.numeric_profile(ColumnIndex::new(column))
     }
 
     pub fn mark(&self) -> Option<Position> {
@@ -208,15 +221,17 @@ impl TableView {
     }
 
     pub fn column_count(&self) -> usize {
-        self.header
-            .as_ref()
-            .map(Vec::len)
-            .or_else(|| self.rows.first().map(Vec::len))
-            .unwrap_or(0)
+        self.columns.len()
     }
 
     pub fn sort_current_column(&mut self, mode: SortMode, direction: SortDirection) {
-        sort_rows(&mut self.rows, self.cursor.column, mode, direction);
+        let column = self.cursor.column;
+        if mode == SortMode::Numeric {
+            let profile = self.numeric_column_profile(column);
+            sort_rows_with_numeric_profile(&mut self.rows, column, direction, profile);
+        } else {
+            sort_rows(&mut self.rows, column, mode, direction);
+        }
         self.keep_cursor_visible();
     }
 
