@@ -1837,7 +1837,7 @@ dependencies = [
 
 [[package]]
 name = "tabview"
-version = "1.4.4"
+version = "2.0.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1850,7 +1850,6 @@ dependencies = [
  "libc",
  "predicates",
  "ratatui",
- "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "unicode-width",

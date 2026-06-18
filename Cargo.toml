@@ -1,6 +1,6 @@
 [package]
 name = "tabview"
-version = "1.4.4"
+version = "2.0.0"
 edition = "2021"
 license = "MIT"
 description = "A command-line CSV and tabular data viewer"
@@ -30,5 +30,4 @@ unicode-width = "0.2.2"
 assert_cmd = "2.0"
 insta = "1.43"
 predicates = "3.1"
-serde_json = "1.0"
 tempfile = "3.20"

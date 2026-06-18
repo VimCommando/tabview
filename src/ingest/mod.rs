@@ -292,6 +292,11 @@ pub fn pad_rows(mut rows: Vec<Vec<String>>) -> Vec<Vec<String>> {
 mod tests {
     use super::*;
 
+    fn fixture(name: &str) -> Vec<u8> {
+        std::fs::read(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(name))
+            .expect("fixture bytes")
+    }
+
     #[test]
     fn pads_rows_to_rectangular_shape() {
         let rows = pad_rows(vec![
@@ -324,5 +329,82 @@ mod tests {
     fn automatic_decoding_uses_latin1_as_late_fallback() {
         let decoded = decode_input("plain utf8".as_bytes(), None).expect("utf-8");
         assert_eq!(decoded.encoding, "utf-8");
+    }
+
+    #[test]
+    fn parses_utf8_sample_rows() {
+        let rows = parse_rows(
+            &fixture("sample/unicode-example-utf8.txt"),
+            &ParseOptions::default(),
+        )
+        .expect("utf8 sample rows");
+
+        assert_eq!(
+            rows.last().expect("last row"),
+            &vec![
+                "Yugoslavia (Latin)".to_owned(),
+                "Djordje Balasevic".to_owned(),
+                "Jugoslavija".to_owned(),
+                "Đorđe Balašević".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_latin1_sample_with_explicit_encoding() {
+        let rows = parse_rows(
+            &fixture("sample/test_latin-1.csv"),
+            &ParseOptions {
+                encoding: Some("latin-1".to_owned()),
+                ..ParseOptions::default()
+            },
+        )
+        .expect("latin1 sample rows");
+        let row = rows.last().expect("last row");
+
+        assert_eq!(row[0], "ALP");
+        assert_eq!(row[1], "B34130005");
+        assert_eq!(
+            row[2],
+            "Ladies' 7 oz. ComfortSoft® Cotton Piqué Polo - WHITE - L"
+        );
+        assert_eq!(row[8], "L");
+        assert_eq!(row[20], "00766369145683");
+    }
+
+    #[test]
+    fn parses_annotated_space_delimited_sample() {
+        let rows = parse_rows(
+            &fixture("sample/commented_annotated_numeric.txt"),
+            &ParseOptions {
+                encoding: Some("utf-8".to_owned()),
+                ..ParseOptions::default()
+            },
+        )
+        .expect("space-delimited sample rows");
+
+        assert_eq!(rows.first().expect("header row"), &vec!["A", "B", "C", "D"]);
+        assert_eq!(
+            rows.last().expect("last row"),
+            &vec![
+                "-0.000103903949401458218".to_owned(),
+                "-0.687995654231882803".to_owned(),
+                "+3".to_owned(),
+                "+40.9029683683568948".to_owned(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_windows_newline_sample() {
+        let rows = parse_rows(
+            &fixture("sample/windows_newlines.csv"),
+            &ParseOptions::default(),
+        )
+        .expect("windows newline sample rows");
+
+        assert_eq!(rows.len(), 4);
+        assert_eq!(rows[0], vec!["Col1", "Col2", "Col3"]);
+        assert!(rows.iter().skip(1).all(|row| row == &vec!["1", "2", "3"]));
     }
 }

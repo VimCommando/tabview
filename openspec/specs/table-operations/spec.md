@@ -5,7 +5,7 @@ Define table model behavior and user-facing table operations for the Rust `tabvi
 ## Requirements
 
 ### Requirement: Header row behavior
-The system SHALL classify and toggle the header row compatibly with the current viewer, while allowing compatibility tests to mark selected quirks as accepted bug fixes.
+The system SHALL classify and toggle the header row compatibly with the current viewer, while preserving accepted bug fixes from the Rust rewrite.
 
 #### Scenario: Non-numeric first row
 - **WHEN** a multi-row table has a first row with no numeric cells

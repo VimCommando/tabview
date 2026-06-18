@@ -25,16 +25,16 @@ The implementation SHALL use typestate or equivalent compile-time state separati
 - **WHEN** code constructs a table model for the viewer
 - **THEN** it can only do so from rows that have completed decoding, parsing, and rectangular normalization
 
-### Requirement: Compatibility test harness
-The implementation SHALL include tests that compare the Rust behavior against the existing Python implementation for selected compatibility surfaces before the hard replacement is completed.
+### Requirement: Rust test suite
+The implementation SHALL include Rust tests for CLI parsing, data ingestion, table operations, rendering, and terminal lifecycle boundaries.
 
-#### Scenario: Parsing fixture comparison
-- **WHEN** compatibility tests run against existing sample files
-- **THEN** Rust parsed rows match the Python implementation unless the difference is marked as an accepted bug fix
+#### Scenario: Parsing fixture coverage
+- **WHEN** Rust tests run against existing sample files
+- **THEN** parsed rows match the expected fixture behavior
 
-#### Scenario: Navigation fixture comparison
-- **WHEN** compatibility tests replay key sequences over small tables
-- **THEN** Rust cursor and viewport state matches the expected Python-compatible state
+#### Scenario: Navigation fixture coverage
+- **WHEN** Rust tests replay key sequences over small tables
+- **THEN** Rust cursor and viewport state matches the expected viewer state
 
 ### Requirement: Ratatui render tests
 The implementation SHALL include render-level tests for important TUI states using Ratatui buffers or equivalent terminal snapshots.

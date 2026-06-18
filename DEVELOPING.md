@@ -11,5 +11,5 @@ cargo clippy --all-targets --all-features -- -D warnings
 cargo test --all-features
 ```
 
-During the rewrite, the Python implementation remains available as a
-compatibility oracle for tests until the Rust replacement reaches parity.
+The Python implementation has been removed. The Rust crate is the maintained
+implementation.

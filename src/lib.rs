@@ -1,6 +1,5 @@
 pub mod cli;
 pub mod command;
-pub mod compat;
 pub mod ingest;
 pub mod ops;
 pub mod table;
