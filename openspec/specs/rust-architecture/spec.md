@@ -1,9 +1,7 @@
 ## Purpose
 
 Define implementation architecture, target environments, test harness expectations, and excluded feature areas for the Rust `tabview` replacement.
-
 ## Requirements
-
 ### Requirement: Single Rust crate and binary
 The rewrite SHALL be implemented as one Rust crate that builds one `tabview` binary.
 
@@ -44,8 +42,9 @@ The implementation SHALL include render-level tests for important TUI states usi
 - **THEN** the render test verifies the location bar, divider, header row, and selected cell placement
 
 ### Requirement: Feature exclusions
-The implementation SHALL NOT add editing, formulas, filtering, or other data manipulation features beyond the current viewer operations.
+The implementation SHALL NOT add editing, formulas, or persistent data mutation features beyond current viewer operations. Filtering SHALL be allowed only as a viewer row-visibility operation that does not mutate parsed cell data.
 
 #### Scenario: User attempts to edit a cell
-- **WHEN** a user presses ordinary printable keys outside of search entry
+- **WHEN** a user presses ordinary printable keys outside of search or filter entry
 - **THEN** the viewer does not modify table cell contents
+

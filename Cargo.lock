@@ -1850,6 +1850,7 @@ dependencies = [
  "libc",
  "predicates",
  "ratatui",
+ "regex",
  "tempfile",
  "thiserror 2.0.18",
  "unicode-width",

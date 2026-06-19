@@ -71,7 +71,11 @@ fn compare_cells(
     }
 }
 
-fn compare_numeric_cells(left: &str, right: &str, profile: NumericColumnProfile) -> Ordering {
+pub(crate) fn compare_numeric_cells(
+    left: &str,
+    right: &str,
+    profile: NumericColumnProfile,
+) -> Ordering {
     match (
         parse_numeric_key(left, profile),
         parse_numeric_key(right, profile),
@@ -110,6 +114,13 @@ fn parse_numeric_key(value: &str, profile: NumericColumnProfile) -> Option<Numer
 
 pub(crate) fn is_numeric_cell(value: &str, profile: NumericColumnProfile) -> bool {
     parse_numeric_key(value, profile).is_some()
+}
+
+pub(crate) fn parse_numeric_scalar(value: &str, profile: NumericColumnProfile) -> Option<f64> {
+    if is_numeric_placeholder(value) {
+        return None;
+    }
+    parse_suffixed_number_with_profile(value, profile)
 }
 
 pub(crate) fn is_numeric_placeholder(value: &str) -> bool {

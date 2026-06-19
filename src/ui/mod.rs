@@ -6,8 +6,10 @@ use ratatui::style::{Color, Modifier, Style};
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::command::KeyBinding;
+use crate::ops::filter::{FilterKind, FilterMode};
 use crate::ops::sort::{is_numeric_cell, is_numeric_placeholder};
 use crate::view::TableView;
+use crate::FilterPromptView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Popup {
@@ -15,6 +17,7 @@ pub enum Popup {
     Info,
     Help,
     Search,
+    Filter,
 }
 
 pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
@@ -32,11 +35,7 @@ pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
         Style::default().add_modifier(Modifier::REVERSED),
     );
 
-    if let Some(cell) = view
-        .rows()
-        .get(cursor.row)
-        .and_then(|row| row.get(cursor.column))
-    {
+    if let Some(cell) = view.current_cell() {
         buffer.set_string(
             area.x + location.len() as u16 + 1,
             area.y,
@@ -59,10 +58,10 @@ pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
     let left_alignments = vec![Alignment::Left; widths.len()];
 
     if view.header_visible() {
-        if let Some(header) = view.header() {
+        if let Some(header) = view.rendered_header() {
             render_row(
                 buffer,
-                header,
+                &header,
                 RowRender {
                     area,
                     y: row_y,
@@ -79,8 +78,7 @@ pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
     }
 
     for (idx, row) in view
-        .rows()
-        .iter()
+        .visible_rows()
         .enumerate()
         .skip(viewport.origin.row)
         .take(viewport.height)
@@ -195,7 +193,7 @@ fn column_alignments(view: &TableView) -> Vec<Alignment> {
     (0..view.column_count())
         .map(|column| {
             let mut has_numeric_value = false;
-            for row in view.rows() {
+            for row in view.visible_rows() {
                 let Some(cell) = row.get(column).map(|cell| cell.trim()) else {
                     continue;
                 };
@@ -325,6 +323,45 @@ pub fn render_search_prompt(query: &str, area: Rect, buffer: &mut Buffer) {
     render_popup("Search", &format!("Search: {query}"), area, buffer);
 }
 
+pub(crate) fn render_filter_prompt(prompt: &FilterPromptView<'_>, area: Rect, buffer: &mut Buffer) {
+    let mode = match prompt.mode {
+        FilterMode::In => "Filter in",
+        FilterMode::Out => "Filter out",
+    };
+    let mut body = format!(
+        "{mode} column {}\n{}\nCondition: {}",
+        prompt.column + 1,
+        filter_kind_radios(prompt),
+        prompt.input
+    );
+    if let Some(error) = prompt.error {
+        body.push('\n');
+        body.push_str(error);
+    }
+    render_popup("Filter", &body, area, buffer);
+}
+
+fn filter_kind_radios(prompt: &FilterPromptView<'_>) -> String {
+    FilterKind::all()
+        .into_iter()
+        .map(|kind| {
+            let label = match kind {
+                FilterKind::Text => "text",
+                FilterKind::Regex => "regex",
+                FilterKind::Numeric => "numeric",
+            };
+            if !prompt.enabled_kinds.contains(&kind) {
+                format!("(-) {label}")
+            } else if prompt.selected_kind == kind {
+                format!("(*) {label}")
+            } else {
+                format!("( ) {label}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("  ")
+}
+
 pub fn truncate_cell(cell: &str, width: usize, truncation: &str) -> String {
     if width == 0 {
         return String::new();
@@ -357,6 +394,7 @@ pub fn truncate_cell(cell: &str, width: usize, truncation: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ops::filter::{FilterKind, FilterMode};
     use crate::view::Viewport;
 
     fn rows(values: &[&[&str]]) -> Vec<Vec<String>> {
@@ -423,6 +461,43 @@ mod tests {
         assert!(text.contains("(3,3)"));
         assert!(text.contains("r3c3"));
         assert!(!text.contains("r1c1"));
+    }
+
+    #[test]
+    fn renders_only_filtered_visible_rows() {
+        let mut view = TableView::classify(
+            rows(&[&["Name"], &["alpha"], &["beta"], &["gamma"]]),
+            Viewport::new(10, 1),
+        );
+        view.apply_filter(0, FilterMode::In, FilterKind::Text, "alpha".to_owned())
+            .expect("apply filter");
+        let area = Rect::new(0, 0, 24, 6);
+        let mut buffer = Buffer::empty(area);
+        render_table(&mut view, area, &mut buffer);
+
+        let text = buffer_text(&buffer);
+        assert!(text.contains("Name*"));
+        assert!(text.contains("alpha"));
+        assert!(!text.contains("beta"));
+        assert!(!text.contains("gamma"));
+    }
+
+    #[test]
+    fn renders_header_when_filter_hides_every_data_row() {
+        let mut view = TableView::classify(
+            rows(&[&["Name"], &["alpha"], &["beta"]]),
+            Viewport::new(10, 1),
+        );
+        view.apply_filter(0, FilterMode::In, FilterKind::Text, "zzz".to_owned())
+            .expect("apply filter");
+        let area = Rect::new(0, 0, 24, 6);
+        let mut buffer = Buffer::empty(area);
+        render_table(&mut view, area, &mut buffer);
+
+        let text = buffer_text(&buffer);
+        assert!(text.contains("Name*"));
+        assert!(!text.contains("alpha"));
+        assert!(!text.contains("beta"));
     }
 
     #[test]
@@ -557,6 +632,30 @@ mod tests {
         render_search_prompt("abc", area, &mut buffer);
         let text = buffer_text(&buffer);
         assert!(text.contains("Search: abc"));
+    }
+
+    #[test]
+    fn renders_filter_prompt_with_radios_disabled_numeric_and_error() {
+        let area = Rect::new(0, 0, 56, 8);
+        let mut buffer = Buffer::empty(area);
+        let enabled = [FilterKind::Text, FilterKind::Regex];
+        let prompt = crate::FilterPromptView {
+            mode: FilterMode::In,
+            column: 0,
+            selected_kind: FilterKind::Regex,
+            enabled_kinds: &enabled,
+            input: "^foo",
+            error: Some("invalid regex"),
+        };
+
+        render_filter_prompt(&prompt, area, &mut buffer);
+        let text = buffer_text(&buffer);
+        assert!(text.contains("Filter in column 1"));
+        assert!(text.contains("( ) text"));
+        assert!(text.contains("(*) regex"));
+        assert!(text.contains("(-) numeric"));
+        assert!(text.contains("Condition: ^foo"));
+        assert!(text.contains("invalid regex"));
     }
 
     #[test]

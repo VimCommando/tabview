@@ -22,6 +22,8 @@ pub enum Command {
     GotoMark,
     ShowCell,
     Search,
+    FilterIn,
+    FilterOut,
     NextSearchResult,
     PreviousSearchResult,
     ToggleHeader,
@@ -106,6 +108,8 @@ pub fn lookup_char(ch: char) -> Option<Command> {
         '\'' => Command::GotoMark,
         '\n' => Command::ShowCell,
         '/' => Command::Search,
+        'f' => Command::FilterIn,
+        'F' => Command::FilterOut,
         'n' => Command::NextSearchResult,
         'p' => Command::PreviousSearchResult,
         't' => Command::ToggleHeader,
@@ -230,6 +234,11 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             description: "Search",
         },
         KeyBinding {
+            keys: "f/F",
+            command: Command::FilterIn,
+            description: "Filter in/out current column",
+        },
+        KeyBinding {
             keys: "n/p",
             command: Command::NextSearchResult,
             description: "Next/previous search result",
@@ -318,6 +327,8 @@ mod tests {
     fn maps_existing_operation_keys() {
         assert_eq!(lookup_char('r'), Some(Command::Reload));
         assert_eq!(lookup_char('/'), Some(Command::Search));
+        assert_eq!(lookup_char('f'), Some(Command::FilterIn));
+        assert_eq!(lookup_char('F'), Some(Command::FilterOut));
         assert_eq!(lookup_char('#'), Some(Command::SortNumericAsc));
         assert_eq!(lookup_char('y'), Some(Command::YankCell));
         assert_eq!(lookup_char('?'), Some(Command::Help));

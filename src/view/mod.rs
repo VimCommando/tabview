@@ -4,10 +4,13 @@ use std::collections::HashMap;
 
 use unicode_width::UnicodeWidthStr;
 
+use crate::ops::filter::{ActiveFilter, FilterCondition, FilterKind, FilterMode, FilterParseError};
 use crate::ops::sort::{
     sort_rows, sort_rows_with_numeric_profile, NumericColumnProfile, SortDirection, SortMode,
 };
 use column::{ColumnIndex, Columns};
+
+const HEADER_FILTER_INDICATOR: &str = "*";
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ColumnWidthMode {
@@ -40,11 +43,13 @@ impl Viewport {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct TableView {
     header: Option<Vec<String>>,
     header_visible: bool,
     rows: Vec<Vec<String>>,
+    visible_rows: Vec<usize>,
+    filters: Vec<ActiveFilter>,
     cursor: Position,
     viewport: Viewport,
     mark: Option<Position>,
@@ -103,11 +108,14 @@ impl TableView {
         };
 
         let columns = Columns::infer(header.as_deref(), &rows);
+        let visible_rows = (0..rows.len()).collect();
 
         Self {
             header_visible: header.is_some(),
             header,
             rows,
+            visible_rows,
+            filters: Vec::new(),
             cursor: Position::default(),
             viewport,
             mark: None,
@@ -127,6 +135,22 @@ impl TableView {
         self.header.as_deref()
     }
 
+    pub fn rendered_header(&self) -> Option<Vec<String>> {
+        self.header.as_ref().map(|header| {
+            header
+                .iter()
+                .enumerate()
+                .map(|(column, cell)| {
+                    if self.column_has_filter(column) {
+                        format!("{cell}{HEADER_FILTER_INDICATOR}")
+                    } else {
+                        cell.clone()
+                    }
+                })
+                .collect()
+        })
+    }
+
     pub fn header_visible(&self) -> bool {
         self.header_visible
     }
@@ -136,7 +160,37 @@ impl TableView {
     }
 
     pub fn row_count(&self) -> usize {
+        self.visible_rows.len()
+    }
+
+    pub fn total_row_count(&self) -> usize {
         self.rows.len()
+    }
+
+    pub fn visible_rows(&self) -> impl Iterator<Item = &Vec<String>> {
+        self.visible_rows
+            .iter()
+            .filter_map(|row_idx| self.rows.get(*row_idx))
+    }
+
+    pub fn visible_rows_vec(&self) -> Vec<Vec<String>> {
+        self.visible_rows().cloned().collect()
+    }
+
+    pub fn current_cell(&self) -> Option<&str> {
+        self.visible_row(self.cursor.row)?
+            .get(self.cursor.column)
+            .map(String::as_str)
+    }
+
+    pub fn visible_row(&self, row: usize) -> Option<&Vec<String>> {
+        self.visible_rows
+            .get(row)
+            .and_then(|row_idx| self.rows.get(*row_idx))
+    }
+
+    pub fn source_row_for_visible_row(&self, row: usize) -> Option<usize> {
+        self.visible_rows.get(row).copied()
     }
 
     pub fn cursor(&self) -> Position {
@@ -159,6 +213,37 @@ impl TableView {
         self.columns.numeric_profile(ColumnIndex::new(column))
     }
 
+    pub(crate) fn is_numeric_column(&self, column: usize) -> bool {
+        self.columns.is_numeric(ColumnIndex::new(column))
+    }
+
+    pub(crate) fn filter_kind_enabled(&self, column: usize, kind: FilterKind) -> bool {
+        kind != FilterKind::Numeric || self.is_numeric_column(column)
+    }
+
+    pub(crate) fn default_filter_kind(&self, column: usize) -> FilterKind {
+        if self.is_numeric_column(column) {
+            FilterKind::Numeric
+        } else {
+            FilterKind::Text
+        }
+    }
+
+    pub fn filtered_columns(&self) -> Vec<usize> {
+        let mut columns = self
+            .filters
+            .iter()
+            .map(|filter| filter.column)
+            .collect::<Vec<_>>();
+        columns.sort_unstable();
+        columns.dedup();
+        columns
+    }
+
+    pub fn column_has_filter(&self, column: usize) -> bool {
+        self.filters.iter().any(|filter| filter.column == column)
+    }
+
     pub fn mark(&self) -> Option<Position> {
         self.mark
     }
@@ -176,7 +261,7 @@ impl TableView {
     }
 
     pub fn goto(&mut self, row: usize, column: usize) {
-        self.cursor.row = row.min(self.rows.len().saturating_sub(1));
+        self.cursor.row = row.min(self.visible_rows.len().saturating_sub(1));
         self.cursor.column = column.min(self.column_count().saturating_sub(1));
         self.keep_cursor_visible();
     }
@@ -199,7 +284,10 @@ impl TableView {
     }
 
     pub fn goto_bottom(&mut self) {
-        self.goto(self.rows.len().saturating_sub(1), self.cursor.column);
+        self.goto(
+            self.visible_rows.len().saturating_sub(1),
+            self.cursor.column,
+        );
     }
 
     pub fn goto_user_row(&mut self, row: usize) {
@@ -232,7 +320,31 @@ impl TableView {
         } else {
             sort_rows(&mut self.rows, column, mode, direction);
         }
+        self.recompute_visible_rows();
         self.keep_cursor_visible();
+    }
+
+    pub(crate) fn apply_filter(
+        &mut self,
+        column: usize,
+        mode: FilterMode,
+        kind: FilterKind,
+        input: String,
+    ) -> Result<(), FilterParseError> {
+        if kind == FilterKind::Numeric && !self.is_numeric_column(column) {
+            return Err(FilterParseError::NumericUnavailable);
+        }
+        let condition = FilterCondition::parse(kind, &input, self.numeric_column_profile(column))?;
+        self.filters.retain(|filter| filter.column != column);
+        self.filters
+            .push(ActiveFilter::new(column, mode, condition));
+        self.recompute_visible_rows();
+        Ok(())
+    }
+
+    pub fn clear_filters_for_column(&mut self, column: usize) {
+        self.filters.retain(|filter| filter.column != column);
+        self.recompute_visible_rows();
     }
 
     pub fn set_column_gap(&mut self, gap: usize) {
@@ -302,9 +414,19 @@ impl TableView {
         self.column_gap = previous.column_gap;
         self.column_widths = previous.column_widths.clone();
         self.mark = previous.mark;
+        self.filters = previous.filters.clone();
+        self.recompute_visible_rows();
     }
 
     fn keep_cursor_visible(&mut self) {
+        self.cursor.row = self
+            .cursor
+            .row
+            .min(self.visible_rows.len().saturating_sub(1));
+        self.cursor.column = self
+            .cursor
+            .column
+            .min(self.column_count().saturating_sub(1));
         if self.cursor.row < self.viewport.origin.row {
             self.viewport.origin.row = self.cursor.row;
         } else if self.cursor.row >= self.viewport.origin.row + self.viewport.height {
@@ -326,11 +448,27 @@ impl TableView {
 
     fn computed_column_widths(&self, mode: ColumnWidthMode) -> Vec<usize> {
         let mut rows = Vec::new();
-        if let Some(header) = self.header() {
-            rows.push(header.to_vec());
+        if let Some(header) = self.rendered_header() {
+            rows.push(header);
         }
         rows.extend(self.rows().iter().cloned());
         column_widths(&rows, mode, self.column_gap)
+    }
+
+    fn recompute_visible_rows(&mut self) {
+        self.visible_rows = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row_idx, row)| self.row_passes_filters(row).then_some(row_idx))
+            .collect();
+        self.keep_cursor_visible();
+    }
+
+    fn row_passes_filters(&self, row: &[String]) -> bool {
+        self.filters
+            .iter()
+            .all(|filter| filter.accepts(row, self.numeric_column_profile(filter.column)))
     }
 }
 
@@ -387,6 +525,7 @@ fn mode_width(rows: &[Vec<String>], column: usize, gap: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ops::filter::{FilterKind, FilterMode};
 
     fn rows(values: &[&[&str]]) -> Vec<Vec<String>> {
         values
@@ -541,5 +680,129 @@ mod tests {
         assert_eq!(view.effective_column_widths()[0], 1);
         view.adjust_column_gap(3);
         assert_eq!(view.column_gap(), 5);
+    }
+
+    #[test]
+    fn filter_in_keeps_matching_visible_rows_without_mutating_backing_rows() {
+        let mut view = TableView::classify(
+            rows(&[
+                &["Name", "Size"],
+                &["alpha", "1gb"],
+                &["beta", "2gb"],
+                &["gamma", "3gb"],
+            ]),
+            Viewport::new(10, 2),
+        );
+        view.goto(0, 0);
+        view.apply_filter(0, FilterMode::In, FilterKind::Text, "a".to_owned())
+            .expect("apply filter");
+
+        assert_eq!(view.row_count(), 3);
+        assert_eq!(view.total_row_count(), 3);
+        assert_eq!(
+            view.rows(),
+            rows(&[&["alpha", "1gb"], &["beta", "2gb"], &["gamma", "3gb"]])
+        );
+        assert_eq!(
+            view.visible_rows_vec(),
+            rows(&[&["alpha", "1gb"], &["beta", "2gb"], &["gamma", "3gb"]])
+        );
+    }
+
+    #[test]
+    fn filter_out_and_multiple_filters_reduce_visible_rows() {
+        let mut view = TableView::classify(
+            rows(&[
+                &["Name", "Size"],
+                &["alpha", "1gb"],
+                &["beta", "2gb"],
+                &["gamma", "3gb"],
+            ]),
+            Viewport::new(10, 2),
+        );
+        view.apply_filter(0, FilterMode::Out, FilterKind::Text, "beta".to_owned())
+            .expect("apply text filter");
+        view.apply_filter(1, FilterMode::In, FilterKind::Numeric, ">=2gb".to_owned())
+            .expect("apply numeric filter");
+
+        assert_eq!(view.visible_rows_vec(), rows(&[&["gamma", "3gb"]]));
+    }
+
+    #[test]
+    fn filters_clamp_cursor_and_can_be_cleared() {
+        let mut view = TableView::classify(
+            rows(&[&["Name"], &["alpha"], &["beta"], &["gamma"]]),
+            Viewport::new(1, 1),
+        );
+        view.goto(2, 0);
+        view.apply_filter(0, FilterMode::In, FilterKind::Text, "alpha".to_owned())
+            .expect("apply filter");
+
+        assert_eq!(view.cursor(), Position { row: 0, column: 0 });
+        assert_eq!(view.visible_rows_vec(), rows(&[&["alpha"]]));
+
+        view.clear_filters_for_column(0);
+        assert_eq!(view.row_count(), 3);
+    }
+
+    #[test]
+    fn filtered_header_indicator_participates_in_widths() {
+        let mut view = TableView::classify(
+            rows(&[&["Name", "Size"], &["alpha", "1gb"]]),
+            Viewport::new(10, 2),
+        );
+        view.apply_filter(1, FilterMode::In, FilterKind::Numeric, "<2gb".to_owned())
+            .expect("apply filter");
+
+        assert_eq!(
+            view.rendered_header().expect("header"),
+            vec!["Name".to_owned(), "Size*".to_owned()]
+        );
+        assert!(view.effective_column_widths()[1] >= 5);
+    }
+
+    #[test]
+    fn filtering_and_navigation_do_not_shrink_computed_widths() {
+        let mut view = TableView::classify(
+            rows(&[
+                &["Name", "Value"],
+                &["short", "ok"],
+                &["very-very-long", "hidden"],
+            ]),
+            Viewport::new(10, 2),
+        );
+        view.set_column_width_mode(ColumnWidthMode::Max);
+        let widths_before_filter = view.effective_column_widths();
+
+        view.apply_filter(1, FilterMode::In, FilterKind::Text, "ok".to_owned())
+            .expect("apply filter");
+        let widths_after_filter = view.effective_column_widths();
+        view.move_by(1, 0);
+        let widths_after_navigation = view.effective_column_widths();
+
+        assert_eq!(widths_after_filter, widths_before_filter);
+        assert_eq!(widths_after_navigation, widths_before_filter);
+    }
+
+    #[test]
+    fn sorting_preserves_active_filters() {
+        let mut view = TableView::classify(
+            rows(&[
+                &["Name", "Size"],
+                &["gamma", "3gb"],
+                &["alpha", "1gb"],
+                &["beta", "2gb"],
+            ]),
+            Viewport::new(10, 2),
+        );
+        view.apply_filter(1, FilterMode::In, FilterKind::Numeric, ">=2gb".to_owned())
+            .expect("apply filter");
+        view.goto(0, 0);
+        view.sort_current_column(SortMode::Lexical, SortDirection::Ascending);
+
+        assert_eq!(
+            view.visible_rows_vec(),
+            rows(&[&["beta", "2gb"], &["gamma", "3gb"]])
+        );
     }
 }

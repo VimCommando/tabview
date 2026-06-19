@@ -36,6 +36,7 @@ contents of that cell are shown next to it.
 - Lexical, natural, and numeric sorting by the current column.
 - Dynamic column width and gap adjustment.
 - Full-text incremental search with `n` and `p` result navigation.
+- Current-column filter-in and filter-out with text, regex, and numeric modes.
 - Full-cell popup with `Enter`.
 - Optional clipboard support for yanking the current cell.
 - In-place reload when data changes.
@@ -124,6 +125,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 | `Delete`, `'` | Return to the marked cell, if any. |
 | `Enter` | View full cell contents in a popup. |
 | `/` | Search. |
+| `f`, `F` | Filter in or filter out rows by the current column. `Tab` cycles text, regex, and numeric modes; submitting an empty condition clears filters for the current column. |
 | `n` | Go to the next search result. |
 | `p` | Go to the previous search result. |
 | `t` | Toggle fixed header row. |
