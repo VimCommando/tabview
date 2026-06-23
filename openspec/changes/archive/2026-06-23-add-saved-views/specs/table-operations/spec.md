@@ -124,7 +124,7 @@ The system SHALL support ascending and descending lexical, natural, numeric, and
 
 #### Scenario: Sorted header indicators
 - **WHEN** a visible column participates in the sort list
-- **THEN** its header displays `^` for ascending sort or `v` for descending sort
+- **THEN** its header displays `▲` for ascending sort or `▼` for descending sort
 
 ### Requirement: Column sizing controls
 The system SHALL support fixed, mode, and max column width modes plus interactive width and gap adjustments using `z` and `Z` for the former all-column and current-column width commands.

@@ -113,7 +113,7 @@
         "date",
         "number",
         "float",
-        "int",
+        "integer",
         "semver",
         "ip",
         "boolean",

@@ -71,7 +71,7 @@ filters:
 
 The user-facing `type` accepts both broad types and subtype aliases:
 - String family: `string`, `text`, `date`
-- Number family: `number`, `float`, `int`, `semver`
+- Number family: `number`, `float`, `integer`, `semver`
 - IP family alias: `ip`, internally treated as a string-family subtype with IPv4 and IPv6 parsing/comparison support
 - Boolean family: `boolean`, `char`, `bit`, `word`
 
@@ -93,7 +93,7 @@ Alternative considered: TOML. It would reduce YAML parser dependency risk, but t
 
 ### Discovery and Matching
 
-Discover files in `config_dir/tabview/views`, where `config_dir` is the platform config directory. On Linux this resolves to `~/.config`; in tests, allow overriding the config root so behavior is deterministic. Discovery is compiled and run only when the `saved-views` Cargo feature is enabled.
+Discover files in `config_dir/tabview/views`, where `config_dir` is `$XDG_CONFIG_HOME` when set, otherwise `~/.config`, on every platform including macOS. In tests, allow overriding the config root so behavior is deterministic. Discovery is compiled and run only when the `saved-views` Cargo feature is enabled.
 
 Each entry in `filenames` is classified as:
 - Regex if it starts with `^` or ends with `$`.
@@ -166,7 +166,7 @@ Use `c` composable sort commands for explicit column sort management:
 
 `csk` and `csj` choose the sort kind from the resolved column data type: number-family columns use numeric sorting, and all other columns use lexical sorting. Clearing with `csx` is the explicit way to remove a column sort without relying on shortcut toggle behavior.
 
-Headers for sorted columns render ASCII direction markers: `^` for ascending and `v` for descending. The marker appears on every sorted visible column so users can see multi-level sort participation.
+Headers for sorted columns render direction markers: `▲` for ascending and `▼` for descending. The marker appears on every sorted visible column so users can see multi-level sort participation.
 
 When serializing generated YAML, include sort and filter state only when the user has an active sort or active filters. Search remains session-only and must not be saved.
 
@@ -182,7 +182,7 @@ The modal is read-only YAML, but scrollable when the generated content is larger
 
 The displayed YAML should be generated from the current runtime view state, not only the initially loaded file. It should be sparse: include `name`, `filenames`, and only values that differ from defaults or represent explicit view state. Include top-level `locale` only when the user configured an explicit locale rather than auto-detected/default locale. Include a column only if its view state was modified, including width, visibility, alignment, type, format, mask, sort participation, or active filter participation. Interactive changes such as hiding/showing columns and width adjustments should be reflected in the generated YAML. Generated YAML should include only the current input filename in `filenames`, not the originally loaded view's filename patterns.
 
-Saving writes to the loaded view file when the view came from disk. When updating an existing file, preserve comments and field order so the saved file can remain a self-documenting example. If the current view did not come from disk, saving writes to `~/.config/tabview/views/<input-name-with-last-extension-replaced>.yml`. For example, `cat_shards.txt` becomes `cat_shards.yml` and `foo.bar.csv` becomes `foo.bar.yml`. The implementation should create the view directory if it does not exist.
+Saving writes to the loaded view file when the view came from disk. When updating an existing file, preserve the header comment block and matching inline comments while allowing generated YAML to use canonical field order. If the current view did not come from disk, saving writes to `~/.config/tabview/views/<input-name-with-last-extension-replaced>.yml`. For example, `cat_shards.txt` becomes `cat_shards.yml` and `foo.bar.csv` becomes `foo.bar.yml`. The implementation should create the view directory if it does not exist.
 
 If the target file does not exist, pressing `s` saves immediately and reports success in the footer notification line. If the target file already exists, the modal must ask for overwrite confirmation with `y` and `n` before writing. A declined overwrite returns to the modal without changing the file. A successful save updates the active view source path and reports success through the footer message line.
 

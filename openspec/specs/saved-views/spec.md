@@ -1,7 +1,11 @@
-## ADDED Requirements
+## Purpose
+
+Define user-defined saved view configuration files, matching, validation, application, serialization, and writing behavior.
+
+## Requirements
 
 ### Requirement: Saved view discovery
-When compiled with the `saved-views` feature, the system SHALL discover user-defined saved view files from the platform config directory at `tabview/views`, including files ending in `.yml` or `.yaml`.
+When compiled with the `saved-views` feature, the system SHALL discover user-defined saved view files from `$XDG_CONFIG_HOME/tabview/views`, or `~/.config/tabview/views` when `XDG_CONFIG_HOME` is unset, including files ending in `.yml` or `.yaml`.
 
 #### Scenario: Discover views from config directory
 - **WHEN** a user opens a file and saved views exist under `~/.config/tabview/views`
@@ -119,14 +123,14 @@ The system SHALL apply column configuration sparsely by matching configured colu
 - **THEN** the system ignores that column configuration and records a non-fatal warning
 
 ### Requirement: Column type metadata
-The system SHALL support string, number, and boolean column type families with subtype aliases for text, date, float, int, semantic version, IP address, character boolean, bit boolean, and word boolean.
+The system SHALL support string, number, and boolean column type families with subtype aliases for text, date, float, integer, semantic version, IP address, character boolean, bit boolean, and word boolean.
 
 #### Scenario: Broad type aliases
 - **WHEN** a column sets `type: string`, `type: number`, or `type: boolean`
 - **THEN** the system maps the value to the default subtype for that type family
 
 #### Scenario: Subtype aliases
-- **WHEN** a column sets `type: text`, `type: date`, `type: int`, `type: semver`, `type: ip`, `type: char`, `type: bit`, or `type: word`
+- **WHEN** a column sets `type: text`, `type: date`, `type: integer`, `type: semver`, `type: ip`, `type: char`, `type: bit`, or `type: word`
 - **THEN** the system maps the value to the corresponding typed column subtype
 
 #### Scenario: Type-aware sort
@@ -258,7 +262,7 @@ The system SHALL save the current runtime view configuration to `config_dir/tabv
 
 #### Scenario: Save loaded view
 - **WHEN** a view was loaded from `/home/user/.config/tabview/views/cat-shards.yml` and the user saves from the view modal
-- **THEN** the system writes the current view configuration atomically to that file after any required overwrite confirmation while preserving comments and field order
+- **THEN** the system writes the current view configuration atomically to that file after any required overwrite confirmation while preserving the header comment block and matching inline comments
 
 #### Scenario: Save new placeholder view
 - **WHEN** no view was loaded for `foo.bar.csv` and the user saves from the view modal

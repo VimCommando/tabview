@@ -14,7 +14,7 @@ Users often reopen recurring operational files and reapply the same column width
 - Allow sparse per-column configuration keyed by exact header or wildcard header patterns, matched case-insensitively.
 - Allow saved views to set per-column visibility with `visible: true|false`.
 - Persist sort and filter state in saved views while keeping search session-only.
-- Add column type metadata for string, number, and boolean values with explicit subtypes for text, date, float, int, semantic version, IP address, char, bit, and word booleans; IP is a string-family subtype with IPv4 and IPv6 support.
+- Add column type metadata for string, number, and boolean values with explicit subtypes for text, date, float, integer, semantic version, IP address, char, bit, and word booleans; IP is a string-family subtype with IPv4 and IPv6 support.
 - Add display formatting metadata, including plain formatting, POSIX system-locale numeric grouping and decimal separators with a top-level `locale` override, string case transforms, and a Rust-friendly numeric mask option.
 - Add width and alignment metadata that can seed the existing column layout while preserving interactive adjustments.
 - Provide a YAML schema file so view configurations can be validated by editors, tests, and future CLI tooling.
@@ -34,7 +34,7 @@ Users often reopen recurring operational files and reapply the same column width
 
 ## Impact
 
-- Adds configuration discovery under the user's config directory, likely using the platform config directory plus `tabview/views`.
+- Adds configuration discovery under `$XDG_CONFIG_HOME/tabview/views`, or `~/.config/tabview/views` when `XDG_CONFIG_HOME` is unset, on every platform.
 - Adds optional `yaml_serde`, locale formatting, SemVer parsing, and IP parsing support behind the saved views feature.
 - Extends table initialization with optional view-derived column metadata for width, alignment, formatting, type-aware sorting, and display rendering.
 - Adds serialization of the current runtime view state back to saved view YAML.
