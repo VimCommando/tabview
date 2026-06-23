@@ -47,6 +47,7 @@ contents of that cell are shown next to it.
 
 - Rust toolchain for installation with Cargo.
 - Optional clipboard support can be enabled with the `clipboard` Cargo feature.
+- Optional saved views can be enabled with the `saved-views` Cargo feature.
 
 ## Installation
 
@@ -68,6 +69,12 @@ Build with clipboard support:
 cargo install tabview --features clipboard
 ```
 
+Build with saved view support:
+
+```sh
+cargo install tabview --features saved-views
+```
+
 ## Usage
 
 From the command line:
@@ -81,6 +88,8 @@ tabview <filename> --delimiter '\t' --quoting QUOTE_NONE
 tabview <filename> --width mode
 tabview <filename> --width max
 tabview <filename> --width 20
+tabview <filename> --view cat-shards
+tabview <filename> --no-view
 ```
 
 Read from standard input:
@@ -98,6 +107,68 @@ silent
 
 The Rust rewrite supports the `tabview` CLI only. The former Python import API
 (`import tabview` and `tabview.view(...)`) is not part of the supported surface.
+
+## Saved Views
+
+When built with `--features saved-views`, tabview loads user-defined YAML views
+from `$XDG_CONFIG_HOME/tabview/views`, or `~/.config/tabview/views` when
+`XDG_CONFIG_HOME` is unset. This POSIX-style path is used on every platform,
+including macOS. Files ending in `.yml` and `.yaml` are accepted. If both
+`name.yml` and `name.yaml` exist, `.yml` wins and a footer warning is shown.
+
+Views match the opened input basename only. Filename entries are classified as
+exact strings, globs containing `*`, `?`, or `[`, or regexes that start with
+`^` or end with `$`. Exact matches win before globs, then regexes. Use
+`--view <name>` to force a view by file stem, or `--no-view` to disable loading
+and saving for that run.
+
+Saved views can define sparse per-column state:
+
+```yaml
+name: cat-shards
+filenames:
+  - cat_shards.txt
+columns:
+  shard:
+    type: integer
+    width: header
+    align: left
+  "*count":
+    type: integer
+    format: locale
+    width: content
+  segment:
+    type: text
+    visible: false
+sort:
+  - column: shard
+    direction: asc
+    kind: numeric
+filters:
+  - column: "*count"
+    action: in
+    kind: numeric
+    condition: ">0"
+```
+
+Column keys match headers case-insensitively. Exact keys win over wildcard
+keys; wildcard ties use the most literal characters, then lexical order.
+Supported type aliases are `string`, `text`, `date`, `ip`, `number`, `float`,
+`integer`, `semver`, `boolean`, `char`, `bit`, and `word`. Formats include
+`plain`, `locale`, `mask`, `uppercase`, `lowercase`, `char`, `bit`, and `word`.
+Number masks support `0`, `0.00`, `#,##0`, and `#,##0.00` forms. `locale`
+uses the system POSIX locale with `en_US` fallback, or a top-level `locale`.
+Headers are prefixed first with sort state, then filter state: `▲` for
+ascending sort, `▼` for descending sort, `+` for filter-in, `-` for filter-out,
+and `±` for multiple filters. Truncation applies after those prefix markers.
+
+Press `v` to inspect the current generated YAML. Press `s` to save it to the
+loaded view file, or to a placeholder file named from the current input with
+only the last extension replaced by `.yml`. Existing files ask for `y`/`n`
+confirmation. Saves are atomic and create the views directory as needed.
+
+The schema for editor validation is shipped at `schemas/view.schema.json`.
+See `sample/cat-shards.view.yml` for a complete example.
 
 ## Development
 
@@ -125,6 +196,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 | `Delete`, `'` | Return to the marked cell, if any. |
 | `Enter` | View full cell contents in a popup. |
 | `/` | Search. |
+| `i` | Edit the current column view configuration, sort state, and filter action. |
 | `f`, `F` | Filter in or filter out rows by the current column. `Tab` cycles text, regex, and numeric modes; submitting an empty condition clears filters for the current column. |
 | `n` | Go to the next search result. |
 | `p` | Go to the previous search result. |
@@ -136,9 +208,15 @@ cargo clippy --all-targets --all-features -- -D warnings
 | `a`, `A` | Sort the current column naturally, ascending or descending. |
 | `#`, `@` | Sort the current column numerically, ascending or descending. |
 | `r` | Reload file or input data and reset sort order. |
-| `y` | Yank the current cell to the clipboard when clipboard support is enabled. |
-| `[num]c` | Toggle variable column width mode between `mode` and `max`, or set all columns to width `num`. |
-| `[num]C` | Maximize the current column, or set the current column to width `num`. |
+| `y` | Yank the rendered current cell to the clipboard when clipboard support is enabled. |
+| `Y` | Yank the raw current cell to the clipboard when clipboard support is enabled. |
+| `v` | Show the saved view modal when saved views are enabled. |
+| `[num]z` | Toggle variable column width mode between `mode` and `max`, or set all columns to width `num`. |
+| `[num]Z` | Maximize the current column, or set the current column to width `num`. |
+| `[num]chh`, `[num]chl` | Hide visible columns to the left or right of the current column. |
+| `chj`, `chk` | Hide the current column. |
+| `[num]cHh`, `[num]cHl` | Show adjacent hidden columns to the left or right. |
+| `csk`, `csj`, `csx` | Sort the current column ascending, sort descending, or clear its sort key. |
 | `[num][` | Skip to the previous row value change. |
 | `[num]]` | Skip to the next row value change. |
 | `[num]{` | Skip to the previous column value change. |

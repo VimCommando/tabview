@@ -7,8 +7,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::command::KeyBinding;
 use crate::ops::filter::{FilterKind, FilterMode};
-use crate::ops::sort::{is_numeric_cell, is_numeric_placeholder};
-use crate::view::TableView;
+use crate::view::{ColumnAlignment, TableView};
 use crate::FilterPromptView;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -18,6 +17,9 @@ pub enum Popup {
     Help,
     Search,
     Filter,
+    ColumnInfo,
+    #[cfg(feature = "saved-views")]
+    SavedView,
 }
 
 pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
@@ -53,7 +55,7 @@ pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
     }
 
     let mut row_y = area.y + 2;
-    let widths = view.effective_column_widths();
+    let widths = view.effective_column_widths_cached();
     let alignments = column_alignments(view);
     let left_alignments = vec![Alignment::Left; widths.len()];
 
@@ -71,25 +73,29 @@ pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
                     column_offset: viewport.origin.column,
                     column_gap: view.column_gap(),
                     alignments: &left_alignments,
+                    hidden_boundaries: Some(&hidden_boundaries(view)),
                 },
             );
             row_y += 1;
         }
     }
 
-    for (idx, row) in view
-        .visible_rows()
-        .enumerate()
-        .skip(viewport.origin.row)
-        .take(viewport.height)
-    {
+    let row_end = viewport
+        .origin
+        .row
+        .saturating_add(viewport.height)
+        .min(view.row_count());
+    for idx in viewport.origin.row..row_end {
         if row_y >= area.y + area.height {
             break;
         }
+        let Some(row) = view.rendered_visible_row(idx) else {
+            break;
+        };
         let selected_column = (idx == cursor.row).then_some(cursor.column);
         render_row(
             buffer,
-            row,
+            &row,
             RowRender {
                 area,
                 y: row_y,
@@ -99,13 +105,44 @@ pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
                 column_offset: viewport.origin.column,
                 column_gap: view.column_gap(),
                 alignments: &alignments,
+                hidden_boundaries: None,
             },
         );
         row_y += 1;
     }
 }
 
+pub fn render_footer(message: Option<&str>, area: Rect, buffer: &mut Buffer) {
+    if area.height == 0 {
+        return;
+    }
+    let y = area.y + area.height - 1;
+    for x in area.x..area.x + area.width {
+        buffer[(x, y)].set_symbol(" ");
+    }
+    if let Some(message) = message {
+        let text = truncate_cell(message, area.width as usize, "…");
+        buffer.set_stringn(
+            area.x,
+            y,
+            &text,
+            area.width as usize,
+            Style::default().add_modifier(Modifier::REVERSED),
+        );
+    }
+}
+
 pub fn render_popup(title: &str, body: &str, area: Rect, buffer: &mut Buffer) {
+    render_popup_with_actions(title, body, &[], area, buffer);
+}
+
+fn render_popup_with_actions(
+    title: &str,
+    body: &str,
+    actions: &[&str],
+    area: Rect,
+    buffer: &mut Buffer,
+) {
     if area.width < 2 || area.height < 2 {
         return;
     }
@@ -135,18 +172,55 @@ pub fn render_popup(title: &str, body: &str, area: Rect, buffer: &mut Buffer) {
     buffer[(area.x, y2)].set_symbol("└");
     buffer[(x2, y2)].set_symbol("┘");
 
-    buffer.set_string(
-        area.x + 1,
-        area.y,
-        title,
-        popup_style.add_modifier(Modifier::BOLD),
-    );
+    let title_width = area.width.saturating_sub(4) as usize;
+    if title_width > 0 {
+        let title = truncate_cell(title, title_width, "…").trim_end().to_owned();
+        let title = format!("─ {title} ");
+        buffer.set_stringn(
+            area.x + 1,
+            area.y,
+            &title,
+            area.width.saturating_sub(2) as usize,
+            popup_style.add_modifier(Modifier::BOLD),
+        );
+    }
+    if !actions.is_empty() {
+        let footer = actions
+            .iter()
+            .map(|action| format!("[ {action} ]"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let width = UnicodeWidthStr::width(footer.as_str()) as u16;
+        let available = area.width.saturating_sub(3) as usize;
+        if available > 0 {
+            let text = truncate_cell(&footer, available, "…").trim_end().to_owned();
+            let width = width.min(available as u16);
+            let x = x2.saturating_sub(width).saturating_sub(1);
+            buffer.set_stringn(
+                x,
+                y2,
+                &text,
+                available,
+                popup_style.add_modifier(Modifier::BOLD),
+            );
+        }
+    }
     for (offset, line) in body
         .lines()
-        .take(area.height.saturating_sub(2) as usize)
+        .take(area.height.saturating_sub(4) as usize)
         .enumerate()
     {
-        buffer.set_string(area.x + 1, area.y + 1 + offset as u16, line, popup_style);
+        let content_width = area.width.saturating_sub(4) as usize;
+        if content_width == 0 {
+            break;
+        }
+        buffer.set_stringn(
+            area.x + 2,
+            area.y + 2 + offset as u16,
+            truncate_cell(line, content_width, "…"),
+            content_width,
+            popup_style,
+        );
     }
 }
 
@@ -159,6 +233,7 @@ struct RowRender<'a> {
     column_offset: usize,
     column_gap: usize,
     alignments: &'a [Alignment],
+    hidden_boundaries: Option<&'a [bool]>,
 }
 
 fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
@@ -176,6 +251,18 @@ fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
         let alignment = render.alignments.get(column).copied().unwrap_or_default();
         let cell = align_cell(cell, width, "…", alignment);
         buffer.set_stringn(x, render.y, &cell, width, style);
+        let gap_start = x.saturating_add(width as u16);
+        let marker_x = gap_start.saturating_add(render.column_gap.saturating_sub(1) as u16);
+        if render.column_gap > 0
+            && render
+                .hidden_boundaries
+                .and_then(|boundaries| boundaries.get(column + 1))
+                .copied()
+                .unwrap_or(false)
+            && marker_x < render.area.x + render.area.width
+        {
+            buffer.set_stringn(marker_x, render.y, "|", 1, render.style);
+        }
         x = x
             .saturating_add(width as u16)
             .saturating_add(render.column_gap as u16);
@@ -191,30 +278,19 @@ enum Alignment {
 
 fn column_alignments(view: &TableView) -> Vec<Alignment> {
     (0..view.column_count())
-        .map(|column| {
-            let mut has_numeric_value = false;
-            for row in view.visible_rows() {
-                let Some(cell) = row.get(column).map(|cell| cell.trim()) else {
-                    continue;
-                };
-                if cell.is_empty() {
-                    continue;
-                }
-                if is_numeric_placeholder(cell) {
-                    continue;
-                }
-                if !is_numeric_cell(cell, view.numeric_column_profile(column)) {
-                    return Alignment::Left;
-                }
-                has_numeric_value = true;
-            }
-            if has_numeric_value {
-                Alignment::Right
-            } else {
-                Alignment::Left
-            }
+        .map(|column| match view.column_alignment(column) {
+            ColumnAlignment::Left => Alignment::Left,
+            ColumnAlignment::Right => Alignment::Right,
         })
         .collect()
+}
+
+fn hidden_boundaries(view: &TableView) -> Vec<bool> {
+    let mut boundaries = (0..view.column_count())
+        .map(|column| view.hidden_boundary_before(column))
+        .collect::<Vec<_>>();
+    boundaries.push(view.hidden_boundary_after_last());
+    boundaries
 }
 
 fn visible_row_capacity(view: &TableView, area: Rect) -> usize {
@@ -225,8 +301,8 @@ fn visible_row_capacity(view: &TableView, area: Rect) -> usize {
         .max(1)
 }
 
-fn visible_column_capacity(view: &TableView, area: Rect) -> usize {
-    let widths = view.effective_column_widths();
+fn visible_column_capacity(view: &mut TableView, area: Rect) -> usize {
+    let widths = view.effective_column_widths_cached();
     let mut used = 0usize;
     let mut columns = 0usize;
     for width in widths.iter().skip(view.viewport().origin.column) {
@@ -244,16 +320,185 @@ pub fn render_cell_popup(cell: &str, title: &str, area: Rect, buffer: &mut Buffe
     if cell.is_empty() {
         return false;
     }
-    render_popup(title, cell, area, buffer);
+    render_popup_with_actions(title, cell, &["Close"], area, buffer);
     true
 }
 
 pub fn render_info_popup(info: &str, area: Rect, buffer: &mut Buffer) {
-    render_popup("Info", info, area, buffer);
+    render_popup_with_actions("Info", info, &["Close"], area, buffer);
+}
+
+#[cfg(feature = "saved-views")]
+pub fn render_saved_view_popup(
+    filename: &str,
+    yaml: &str,
+    scroll: usize,
+    confirming_overwrite: bool,
+    area: Rect,
+    buffer: &mut Buffer,
+) {
+    let actions: &[&str] = if confirming_overwrite {
+        &["Yes", "No"]
+    } else {
+        &["Save", "Cancel"]
+    };
+    let content_height = area.height.saturating_sub(4) as usize;
+    let yaml_body = yaml
+        .lines()
+        .skip(scroll)
+        .take(content_height)
+        .collect::<Vec<_>>()
+        .join("\n");
+    let body = if confirming_overwrite {
+        format!("Overwrite existing file?\n{filename}\n{yaml_body}")
+    } else {
+        format!("{filename}\n{yaml_body}")
+    };
+    render_popup_with_actions("View", &body, actions, area, buffer);
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ColumnInfoPopup {
+    pub title: String,
+    pub summary: String,
+    pub sections: Vec<ColumnInfoSection>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ColumnInfoSection {
+    pub header: String,
+    pub active: bool,
+    pub options: Vec<ColumnInfoOption>,
+    pub details: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ColumnInfoOption {
+    pub label: String,
+    pub selected: bool,
+    pub enabled: bool,
+}
+
+pub(crate) fn render_column_info_popup(popup: &ColumnInfoPopup, area: Rect, buffer: &mut Buffer) {
+    render_popup_with_actions(&popup.title, "", &["Save", "Cancel"], area, buffer);
+    if area.width < 4 || area.height < 4 {
+        return;
+    }
+
+    let popup_style = Style::default().fg(Color::White).bg(Color::Black);
+    let disabled_style = popup_style.fg(Color::DarkGray);
+    let active_style = popup_style.add_modifier(Modifier::BOLD);
+    let content_x = area.x + 2;
+    let content_y = area.y + 2;
+    let content_width = area.width.saturating_sub(4) as usize;
+    let content_height = area.height.saturating_sub(4) as usize;
+
+    buffer.set_stringn(
+        content_x,
+        content_y,
+        truncate_cell(&popup.summary, content_width, "…"),
+        content_width,
+        popup_style,
+    );
+
+    let column_gap = 2usize;
+    let column_width = content_width.saturating_sub(column_gap) / 2;
+    if column_width == 0 || content_height <= 2 {
+        return;
+    }
+    let mut left_y = content_y + 2;
+    let mut right_y = content_y + 2;
+    let max_y = area.y + area.height.saturating_sub(2);
+
+    for (idx, section) in popup.sections.iter().enumerate() {
+        let column = idx % 2;
+        let x = if column == 0 {
+            content_x
+        } else {
+            content_x + column_width as u16 + column_gap as u16
+        };
+        let y = if column == 0 {
+            &mut left_y
+        } else {
+            &mut right_y
+        };
+        render_column_info_section(
+            section,
+            x,
+            y,
+            column_width,
+            max_y,
+            buffer,
+            active_style,
+            popup_style,
+            disabled_style,
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_column_info_section(
+    section: &ColumnInfoSection,
+    x: u16,
+    y: &mut u16,
+    width: usize,
+    max_y: u16,
+    buffer: &mut Buffer,
+    active_style: Style,
+    popup_style: Style,
+    disabled_style: Style,
+) {
+    if *y >= max_y {
+        return;
+    }
+    let marker = if section.active { "> " } else { "  " };
+    let header = format!("{marker}{}", section.header);
+    buffer.set_stringn(
+        x,
+        *y,
+        truncate_cell(&header, width, "…"),
+        width,
+        if section.active {
+            active_style
+        } else {
+            popup_style.add_modifier(Modifier::BOLD)
+        },
+    );
+    *y += 1;
+
+    for option in &section.options {
+        if *y >= max_y {
+            return;
+        }
+        let selected = if option.selected { "*" } else { " " };
+        let text = format!("  ({selected})  {}", option.label);
+        buffer.set_stringn(
+            x,
+            *y,
+            truncate_cell(&text, width, "…"),
+            width,
+            if option.enabled {
+                popup_style
+            } else {
+                disabled_style
+            },
+        );
+        *y += 1;
+    }
+
+    for detail in &section.details {
+        if *y >= max_y {
+            return;
+        }
+        let text = format!("    {detail}");
+        buffer.set_stringn(x, *y, truncate_cell(&text, width, "…"), width, popup_style);
+        *y += 1;
+    }
+    *y = y.saturating_add(1);
 }
 
 pub fn render_help_popup(bindings: &[KeyBinding], area: Rect, buffer: &mut Buffer) {
-    let content_width = area.width.saturating_sub(2) as usize;
+    let content_width = area.width.saturating_sub(4) as usize;
     let key_width = bindings
         .iter()
         .map(|binding| UnicodeWidthStr::width(binding.keys))
@@ -283,7 +528,7 @@ pub fn render_help_popup(bindings: &[KeyBinding], area: Rect, buffer: &mut Buffe
             .collect::<Vec<_>>()
             .join("\n")
     };
-    render_popup("Help", &body, area, buffer);
+    render_popup_with_actions("Help", &body, &["Close"], area, buffer);
 }
 
 fn format_binding(binding: &KeyBinding, key_width: usize, column_width: usize) -> String {
@@ -320,7 +565,13 @@ fn align_cell(cell: &str, width: usize, truncation: &str, alignment: Alignment) 
 }
 
 pub fn render_search_prompt(query: &str, area: Rect, buffer: &mut Buffer) {
-    render_popup("Search", &format!("Search: {query}"), area, buffer);
+    render_popup_with_actions(
+        "Search",
+        &format!("Search: {query}"),
+        &["Close", "Cancel"],
+        area,
+        buffer,
+    );
 }
 
 pub(crate) fn render_filter_prompt(prompt: &FilterPromptView<'_>, area: Rect, buffer: &mut Buffer) {
@@ -328,38 +579,106 @@ pub(crate) fn render_filter_prompt(prompt: &FilterPromptView<'_>, area: Rect, bu
         FilterMode::In => "Filter in",
         FilterMode::Out => "Filter out",
     };
-    let mut body = format!(
-        "{mode} column {}\n{}\nCondition: {}",
-        prompt.column + 1,
-        filter_kind_radios(prompt),
-        prompt.input
+    render_popup_with_actions("Filter", "", &["Apply", "Cancel"], area, buffer);
+    if area.width < 5 || area.height < 5 {
+        return;
+    }
+
+    let popup_style = Style::default().fg(Color::White).bg(Color::Black);
+    let disabled_style = popup_style.fg(Color::DarkGray);
+    let content_x = area.x + 2;
+    let content_width = area.width.saturating_sub(4) as usize;
+    let mut y = area.y + 2;
+    let max_y = area.y + area.height.saturating_sub(2);
+
+    buffer.set_stringn(
+        content_x,
+        y,
+        truncate_cell(
+            &format!("{mode} column {}", prompt.column + 1),
+            content_width,
+            "…",
+        ),
+        content_width,
+        popup_style,
+    );
+    y += 1;
+    if y >= max_y {
+        return;
+    }
+
+    render_filter_kind_radios(
+        prompt,
+        content_x,
+        y,
+        content_width,
+        buffer,
+        popup_style,
+        disabled_style,
+    );
+    y += 1;
+    if y >= max_y {
+        return;
+    }
+
+    buffer.set_stringn(
+        content_x,
+        y,
+        truncate_cell(&format!("Condition: {}", prompt.input), content_width, "…"),
+        content_width,
+        popup_style,
     );
     if let Some(error) = prompt.error {
-        body.push('\n');
-        body.push_str(error);
+        y += 1;
+        if y < max_y {
+            buffer.set_stringn(
+                content_x,
+                y,
+                truncate_cell(error, content_width, "…"),
+                content_width,
+                popup_style,
+            );
+        }
     }
-    render_popup("Filter", &body, area, buffer);
 }
 
-fn filter_kind_radios(prompt: &FilterPromptView<'_>) -> String {
-    FilterKind::all()
-        .into_iter()
-        .map(|kind| {
-            let label = match kind {
-                FilterKind::Text => "text",
-                FilterKind::Regex => "regex",
-                FilterKind::Numeric => "numeric",
-            };
-            if !prompt.enabled_kinds.contains(&kind) {
-                format!("(-) {label}")
-            } else if prompt.selected_kind == kind {
-                format!("(*) {label}")
-            } else {
-                format!("( ) {label}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join("  ")
+#[allow(clippy::too_many_arguments)]
+fn render_filter_kind_radios(
+    prompt: &FilterPromptView<'_>,
+    x: u16,
+    y: u16,
+    width: usize,
+    buffer: &mut Buffer,
+    popup_style: Style,
+    disabled_style: Style,
+) {
+    let mut used = 0usize;
+    for (idx, kind) in FilterKind::all().into_iter().enumerate() {
+        let label = match kind {
+            FilterKind::Text => "text",
+            FilterKind::Regex => "regex",
+            FilterKind::Numeric => "numeric",
+        };
+        let selected = if prompt.selected_kind == kind {
+            "*"
+        } else {
+            " "
+        };
+        let text = format!("({selected}) {label}");
+        let prefix = usize::from(idx > 0) * 2;
+        let item_width = prefix + UnicodeWidthStr::width(text.as_str());
+        if used + item_width > width {
+            break;
+        }
+        let style = if prompt.enabled_kinds.contains(&kind) {
+            popup_style
+        } else {
+            disabled_style
+        };
+        let item_x = x + used as u16 + prefix as u16;
+        buffer.set_string(item_x, y, &text, style);
+        used += item_width;
+    }
 }
 
 pub fn truncate_cell(cell: &str, width: usize, truncation: &str) -> String {
@@ -476,7 +795,7 @@ mod tests {
         render_table(&mut view, area, &mut buffer);
 
         let text = buffer_text(&buffer);
-        assert!(text.contains("Name*"));
+        assert!(text.contains("+Name"));
         assert!(text.contains("alpha"));
         assert!(!text.contains("beta"));
         assert!(!text.contains("gamma"));
@@ -495,9 +814,54 @@ mod tests {
         render_table(&mut view, area, &mut buffer);
 
         let text = buffer_text(&buffer);
-        assert!(text.contains("Name*"));
+        assert!(text.contains("+Name"));
         assert!(!text.contains("alpha"));
         assert!(!text.contains("beta"));
+    }
+
+    #[test]
+    fn header_truncation_keeps_sort_and_filter_prefixes() {
+        let mut view = TableView::classify(
+            rows(&[&["Name"], &["alpha"], &["beta"]]),
+            Viewport::new(10, 1),
+        );
+        view.set_all_column_widths(4);
+        view.apply_filter(0, FilterMode::In, FilterKind::Text, "a".to_owned())
+            .expect("apply filter");
+        view.sort_current_column(
+            crate::ops::sort::SortMode::Lexical,
+            crate::ops::sort::SortDirection::Ascending,
+        );
+
+        let area = Rect::new(0, 0, 16, 6);
+        let mut buffer = Buffer::empty(area);
+        render_table(&mut view, area, &mut buffer);
+
+        assert_eq!(buffer[(0, 2)].symbol(), "▲");
+        assert_eq!(buffer[(1, 2)].symbol(), "+");
+        assert_eq!(buffer[(2, 2)].symbol(), "N");
+        assert_eq!(buffer[(3, 2)].symbol(), "…");
+    }
+
+    #[test]
+    fn hidden_column_marker_does_not_shift_header_columns() {
+        let mut view = TableView::classify(
+            rows(&[&["AA", "BB", "CC"], &["aa", "bb", "cc"]]),
+            Viewport::new(10, 3),
+        );
+        view.set_all_column_widths(2);
+        view.goto(0, 1);
+        view.hide_current_column();
+
+        let area = Rect::new(0, 0, 16, 5);
+        let mut buffer = Buffer::empty(area);
+        render_table(&mut view, area, &mut buffer);
+
+        assert_eq!(buffer[(3, 2)].symbol(), "|");
+        assert_eq!(buffer[(4, 2)].symbol(), "C");
+        assert_eq!(buffer[(5, 2)].symbol(), "C");
+        assert_eq!(buffer[(4, 3)].symbol(), "c");
+        assert_eq!(buffer[(5, 3)].symbol(), "c");
     }
 
     #[test]
@@ -611,6 +975,43 @@ mod tests {
         assert!(text.contains("contents"));
         assert!(text.contains("┌"));
         assert_eq!(buffer[(1, 1)].style().bg, Some(Color::Black));
+        assert_eq!(buffer[(1, 1)].symbol(), " ");
+        assert_eq!(buffer[(1, 2)].symbol(), " ");
+        assert_eq!(buffer[(2, 2)].symbol(), "c");
+    }
+
+    #[test]
+    fn renders_column_info_disabled_options_dim() {
+        let area = Rect::new(0, 0, 48, 12);
+        let mut buffer = Buffer::empty(area);
+        let popup = ColumnInfoPopup {
+            title: "Column Info".to_owned(),
+            summary: "Name  visible:1 source:1".to_owned(),
+            sections: vec![ColumnInfoSection {
+                header: "Format".to_owned(),
+                active: true,
+                options: vec![
+                    ColumnInfoOption {
+                        label: "plain".to_owned(),
+                        selected: true,
+                        enabled: true,
+                    },
+                    ColumnInfoOption {
+                        label: "locale".to_owned(),
+                        selected: false,
+                        enabled: false,
+                    },
+                ],
+                details: Vec::new(),
+            }],
+        };
+
+        render_column_info_popup(&popup, area, &mut buffer);
+
+        assert_eq!(buffer[(2, 6)].style().fg, Some(Color::DarkGray));
+        assert_eq!(buffer[(4, 6)].symbol(), "(");
+        assert!(buffer_text(&buffer).contains("[ Save ] [ Cancel ]"));
+        assert_eq!(buffer[(46, 11)].symbol(), "─");
     }
 
     #[test]
@@ -653,9 +1054,27 @@ mod tests {
         assert!(text.contains("Filter in column 1"));
         assert!(text.contains("( ) text"));
         assert!(text.contains("(*) regex"));
-        assert!(text.contains("(-) numeric"));
+        assert!(text.contains("( ) numeric"));
+        assert_eq!(buffer[(23, 3)].style().fg, Some(Color::DarkGray));
         assert!(text.contains("Condition: ^foo"));
         assert!(text.contains("invalid regex"));
+    }
+
+    #[test]
+    fn renders_footer_message_on_last_line() {
+        let area = Rect::new(0, 0, 24, 4);
+        let mut buffer = Buffer::empty(area);
+        buffer.set_string(0, 0, "table", Style::default());
+
+        render_footer(Some("saved view warning"), area, &mut buffer);
+
+        let text = buffer_text(&buffer);
+        assert!(text.lines().next().expect("first line").contains("table"));
+        assert!(text
+            .lines()
+            .last()
+            .expect("last line")
+            .contains("saved view warning"));
     }
 
     #[test]
@@ -665,20 +1084,17 @@ mod tests {
         render_help_popup(&crate::command::default_key_bindings(), area, &mut buffer);
         let text = buffer_text(&buffer);
 
-        assert!(text.contains("PgUp/PgDn/J/K Move a page vertically"));
+        assert!(text.contains("PgUp/PgDn/J/K"));
+        assert!(text.contains("Move a page"));
         assert!(!text.contains("PgUp/PgDn/J/KMove"));
 
-        let line_with_sort = text
-            .lines()
-            .find(|line| line.contains("Move a page vertically"))
-            .expect("page motion help line");
-        assert!(line_with_sort.contains("r"));
+        assert!(text.contains("r"));
         assert!(text.contains("s/S"));
-        assert!(text.contains("Lexical sort current"));
+        assert!(text.contains("Lexical sort"));
         assert!(text.contains("a/A"));
-        assert!(text.contains("Natural sort current"));
+        assert!(text.contains("Natural sort"));
         assert!(text.contains("#/@"));
-        assert!(text.contains("Numeric sort current"));
+        assert!(text.contains("Numeric sort"));
     }
 
     #[test]

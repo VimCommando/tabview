@@ -70,21 +70,52 @@ impl FilterCondition {
 pub(crate) struct ActiveFilter {
     pub(crate) column: usize,
     pub(crate) mode: FilterMode,
+    #[allow(dead_code, reason = "retained for saved-view serialization")]
+    pub(crate) kind: FilterKind,
+    #[allow(dead_code, reason = "retained for saved-view serialization")]
+    pub(crate) input: String,
     pub(crate) condition: FilterCondition,
 }
 
 impl ActiveFilter {
-    pub(crate) fn new(column: usize, mode: FilterMode, condition: FilterCondition) -> Self {
+    pub(crate) fn new(
+        column: usize,
+        mode: FilterMode,
+        kind: FilterKind,
+        input: String,
+        condition: FilterCondition,
+    ) -> Self {
         Self {
             column,
             mode,
+            kind,
+            input,
             condition,
         }
     }
 
+    #[allow(
+        dead_code,
+        reason = "kept for raw-only filter tests and fallback callers"
+    )]
     pub(crate) fn accepts(&self, row: &[String], profile: NumericColumnProfile) -> bool {
         let value = row.get(self.column).map(String::as_str).unwrap_or_default();
-        let matches = self.condition.matches(value, profile);
+        self.accepts_values(value, value, profile)
+    }
+
+    pub(crate) fn accepts_values(
+        &self,
+        raw: &str,
+        rendered: &str,
+        profile: NumericColumnProfile,
+    ) -> bool {
+        let matches = match &self.condition {
+            FilterCondition::Text(_) | FilterCondition::Regex(_) => {
+                self.condition.matches(raw, profile)
+                    || (rendered != raw && self.condition.matches(rendered, profile))
+            }
+            FilterCondition::Numeric { .. } => self.condition.matches(raw, profile),
+        };
         match self.mode {
             FilterMode::In => matches,
             FilterMode::Out => !matches,
@@ -203,9 +234,21 @@ mod tests {
             FilterCondition::parse(FilterKind::Text, "foo", NumericColumnProfile::default())
                 .expect("text condition");
         let row = vec!["foobar".to_owned()];
-        assert!(ActiveFilter::new(0, FilterMode::In, condition.clone())
-            .accepts(&row, NumericColumnProfile::default()));
-        assert!(!ActiveFilter::new(0, FilterMode::Out, condition)
-            .accepts(&row, NumericColumnProfile::default()));
+        assert!(ActiveFilter::new(
+            0,
+            FilterMode::In,
+            FilterKind::Text,
+            "foo".to_owned(),
+            condition.clone()
+        )
+        .accepts(&row, NumericColumnProfile::default()));
+        assert!(!ActiveFilter::new(
+            0,
+            FilterMode::Out,
+            FilterKind::Text,
+            "foo".to_owned(),
+            condition
+        )
+        .accepts(&row, NumericColumnProfile::default()));
     }
 }

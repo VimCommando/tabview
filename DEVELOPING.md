@@ -13,3 +13,6 @@ cargo test --all-features
 
 The Python implementation has been removed. The Rust crate is the maintained
 implementation.
+
+For terminal modal layout and interaction rules, see
+[`docs/modal-style.md`](docs/modal-style.md).

@@ -9,6 +9,14 @@ pub enum SortMode {
     Lexical,
     Natural,
     Numeric,
+    #[cfg(feature = "saved-views")]
+    Date,
+    #[cfg(feature = "saved-views")]
+    SemVer,
+    #[cfg(feature = "saved-views")]
+    Ip,
+    #[cfg(feature = "saved-views")]
+    Boolean,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,22 +47,41 @@ pub fn sort_rows(
     });
 }
 
-pub(crate) fn sort_rows_with_numeric_profile(
-    rows: &mut [Vec<String>],
-    column: usize,
-    direction: SortDirection,
-    profile: NumericColumnProfile,
-) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct SortSpec {
+    pub(crate) column: usize,
+    pub(crate) mode: SortMode,
+    pub(crate) direction: SortDirection,
+    pub(crate) numeric_profile: NumericColumnProfile,
+}
+
+pub(crate) fn sort_rows_by_specs(rows: &mut [Vec<String>], specs: &[SortSpec]) {
+    if specs.is_empty() {
+        return;
+    }
+
     rows.sort_by(|left, right| {
-        let ordering = compare_numeric_cells(
-            left.get(column).map(String::as_str).unwrap_or_default(),
-            right.get(column).map(String::as_str).unwrap_or_default(),
-            profile,
-        );
-        match direction {
-            SortDirection::Ascending => ordering,
-            SortDirection::Descending => ordering.reverse(),
+        for spec in specs {
+            let ordering = compare_cells(
+                left.get(spec.column)
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+                right
+                    .get(spec.column)
+                    .map(String::as_str)
+                    .unwrap_or_default(),
+                spec.mode,
+                spec.numeric_profile,
+            );
+            let ordering = match spec.direction {
+                SortDirection::Ascending => ordering,
+                SortDirection::Descending => ordering.reverse(),
+            };
+            if ordering != Ordering::Equal {
+                return ordering;
+            }
         }
+        Ordering::Equal
     });
 }
 
@@ -68,6 +95,133 @@ fn compare_cells(
         SortMode::Lexical => left.cmp(right),
         SortMode::Natural => natural_tokens(left).cmp(&natural_tokens(right)),
         SortMode::Numeric => compare_numeric_cells(left, right, numeric_profile),
+        #[cfg(feature = "saved-views")]
+        SortMode::Date => compare_optional_keys(parse_iso8601_key(left), parse_iso8601_key(right)),
+        #[cfg(feature = "saved-views")]
+        SortMode::SemVer => compare_optional_keys(parse_semver_key(left), parse_semver_key(right)),
+        #[cfg(feature = "saved-views")]
+        SortMode::Ip => compare_optional_keys(parse_ip_key(left), parse_ip_key(right)),
+        #[cfg(feature = "saved-views")]
+        SortMode::Boolean => compare_optional_keys(parse_bool_key(left), parse_bool_key(right)),
+    }
+}
+
+#[cfg(feature = "saved-views")]
+fn compare_optional_keys<T: Ord>(left: Option<T>, right: Option<T>) -> Ordering {
+    match (left, right) {
+        (Some(left), Some(right)) => left.cmp(&right),
+        (Some(_), None) => Ordering::Less,
+        (None, Some(_)) => Ordering::Greater,
+        (None, None) => Ordering::Equal,
+    }
+}
+
+#[cfg(feature = "saved-views")]
+fn parse_iso8601_key(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let (date, rest) = value.split_once(['T', ' ']).unwrap_or((value, ""));
+    let mut date_parts = date.split('-');
+    let year = date_parts.next()?.parse::<i32>().ok()?;
+    let month = date_parts.next()?.parse::<u32>().ok()?;
+    let day = date_parts.next()?.parse::<u32>().ok()?;
+    if date_parts.next().is_some() {
+        return None;
+    }
+
+    let (hour, minute, second, offset_seconds) = if rest.is_empty() {
+        (0, 0, 0, 0)
+    } else {
+        parse_iso8601_time(rest)?
+    };
+
+    let days = days_from_civil(year, month, day)?;
+    Some(days * 86_400 + hour * 3_600 + minute * 60 + second - offset_seconds)
+}
+
+#[cfg(feature = "saved-views")]
+fn parse_iso8601_time(value: &str) -> Option<(i64, i64, i64, i64)> {
+    let (time, offset_seconds) = if let Some(time) = value.strip_suffix('Z') {
+        (time, 0)
+    } else if let Some((time, offset)) = split_timezone_offset(value) {
+        (time, parse_timezone_offset(offset)?)
+    } else {
+        (value, 0)
+    };
+    let mut parts = time.split(':');
+    let hour = parts.next()?.parse::<i64>().ok()?;
+    let minute = parts.next().unwrap_or("0").parse::<i64>().ok()?;
+    let second = parts
+        .next()
+        .unwrap_or("0")
+        .split('.')
+        .next()
+        .unwrap_or("0")
+        .parse::<i64>()
+        .ok()?;
+    Some((hour, minute, second, offset_seconds))
+}
+
+#[cfg(feature = "saved-views")]
+fn split_timezone_offset(value: &str) -> Option<(&str, &str)> {
+    let offset_idx = value
+        .char_indices()
+        .skip(1)
+        .find_map(|(idx, ch)| matches!(ch, '+' | '-').then_some(idx))?;
+    Some(value.split_at(offset_idx))
+}
+
+#[cfg(feature = "saved-views")]
+fn parse_timezone_offset(value: &str) -> Option<i64> {
+    let sign = if value.starts_with('-') { -1 } else { 1 };
+    let value = value.trim_start_matches(['+', '-']);
+    let mut parts = value.split(':');
+    let hours = parts.next()?.parse::<i64>().ok()?;
+    let minutes = parts.next().unwrap_or("0").parse::<i64>().ok()?;
+    Some(sign * (hours * 3_600 + minutes * 60))
+}
+
+#[cfg(feature = "saved-views")]
+fn days_from_civil(year: i32, month: u32, day: u32) -> Option<i64> {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let year = year - i32::from(month <= 2);
+    let era = if year >= 0 { year } else { year - 399 } / 400;
+    let yoe = year - era * 400;
+    let month = month as i32;
+    let doy = (153 * (month + if month > 2 { -3 } else { 9 }) + 2) / 5 + day as i32 - 1;
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    Some((era * 146_097 + doe - 719_468) as i64)
+}
+
+#[cfg(feature = "saved-views")]
+fn parse_semver_key(value: &str) -> Option<semver::Version> {
+    let value = value.trim().trim_start_matches('v');
+    semver::Version::parse(value)
+        .or_else(|_| semver::Version::parse(&format!("{value}.0")))
+        .or_else(|_| semver::Version::parse(&format!("{value}.0.0")))
+        .ok()
+}
+
+#[cfg(feature = "saved-views")]
+fn parse_ip_key(value: &str) -> Option<[u8; 16]> {
+    match value.trim().parse::<std::net::IpAddr>().ok()? {
+        std::net::IpAddr::V4(addr) => {
+            let mut bytes = [0; 16];
+            bytes[10] = 0xff;
+            bytes[11] = 0xff;
+            bytes[12..].copy_from_slice(&addr.octets());
+            Some(bytes)
+        }
+        std::net::IpAddr::V6(addr) => Some(addr.octets()),
+    }
+}
+
+pub(crate) fn parse_bool_key(value: &str) -> Option<bool> {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "true" | "yes" | "y" | "1" => Some(true),
+        "false" | "no" | "n" | "0" => Some(false),
+        _ => None,
     }
 }
 
@@ -776,7 +930,15 @@ mod tests {
             vec!["1".to_owned()],
         ];
         let profile = infer_numeric_column_profile(Some("duration"), &rows, 0);
-        sort_rows_with_numeric_profile(&mut rows, 0, SortDirection::Ascending, profile);
+        sort_rows_by_specs(
+            &mut rows,
+            &[SortSpec {
+                column: 0,
+                mode: SortMode::Numeric,
+                direction: SortDirection::Ascending,
+                numeric_profile: profile,
+            }],
+        );
         assert_eq!(
             rows,
             vec![

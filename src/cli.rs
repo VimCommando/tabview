@@ -43,6 +43,16 @@ pub struct Args {
     #[arg(short = 'q', long = "quote-char", default_value = "\"")]
     pub quote_char: String,
 
+    /// Force a saved view by canonical name.
+    #[cfg(feature = "saved-views")]
+    #[arg(long = "view", conflicts_with = "no_view")]
+    pub view: Option<String>,
+
+    /// Disable saved view discovery and application for this invocation.
+    #[cfg(feature = "saved-views")]
+    #[arg(long = "no-view", action = ArgAction::SetTrue)]
+    pub no_view: bool,
+
     /// Extra positional arguments, including classic +y:x start positions.
     #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
     pub extra: Vec<String>,
@@ -64,6 +74,8 @@ pub struct Config {
     pub width: ColumnWidthMode,
     pub double_width: bool,
     pub quote_char: char,
+    #[cfg(feature = "saved-views")]
+    pub saved_view: SavedViewSelection,
 }
 
 impl Config {
@@ -77,7 +89,30 @@ impl Config {
             width: parse_width(&args.width)?,
             double_width: args.double_width,
             quote_char: parse_char(&args.quote_char, "quote character")?,
+            #[cfg(feature = "saved-views")]
+            saved_view: SavedViewSelection::from_args(args.view, args.no_view),
         })
+    }
+}
+
+#[cfg(feature = "saved-views")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SavedViewSelection {
+    Auto,
+    Force(String),
+    Disabled,
+}
+
+#[cfg(feature = "saved-views")]
+impl SavedViewSelection {
+    fn from_args(view: Option<String>, no_view: bool) -> Self {
+        if no_view {
+            Self::Disabled
+        } else if let Some(view) = view {
+            Self::Force(crate::saved_views::normalize_view_name(&view))
+        } else {
+            Self::Auto
+        }
     }
 }
 
@@ -265,5 +300,27 @@ mod tests {
         assert_eq!(config.filename, PathBuf::from("-"));
         assert_eq!(config.delimiter, Some(b'\t'));
         assert_eq!(config.quoting, Some(Quoting::None));
+    }
+
+    #[cfg(feature = "saved-views")]
+    #[test]
+    fn parses_saved_view_selection_flags() {
+        let config = parse(&["tabview", "--view", "cat-shards.yml", "sample/data.csv"]);
+        assert_eq!(
+            config.saved_view,
+            SavedViewSelection::Force("cat-shards".to_owned())
+        );
+
+        let config = parse(&["tabview", "--no-view", "sample/data.csv"]);
+        assert_eq!(config.saved_view, SavedViewSelection::Disabled);
+
+        assert!(Args::try_parse_from([
+            "tabview",
+            "--view",
+            "cat-shards",
+            "--no-view",
+            "sample/data.csv"
+        ])
+        .is_err());
     }
 }

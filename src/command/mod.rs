@@ -22,8 +22,11 @@ pub enum Command {
     GotoMark,
     ShowCell,
     Search,
+    ColumnInfo,
     FilterIn,
     FilterOut,
+    #[cfg(feature = "saved-views")]
+    SavedView,
     NextSearchResult,
     PreviousSearchResult,
     ToggleHeader,
@@ -40,8 +43,17 @@ pub enum Command {
     SortLexicalAsc,
     SortLexicalDesc,
     YankCell,
+    YankRawCell,
     ToggleColumnWidthMode,
     SetCurrentColumnWidth,
+    ColumnHideLeft,
+    ColumnHideRight,
+    ColumnHideCurrent,
+    ColumnShowLeft,
+    ColumnShowRight,
+    ColumnSortAsc,
+    ColumnSortDesc,
+    ColumnSortClear,
     SkipRowChangeForward,
     SkipRowChangeBackward,
     SkipColumnChangeForward,
@@ -66,24 +78,48 @@ pub struct KeyBinding {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct KeyInterpreter {
     modifier: String,
+    sequence: String,
 }
 
 impl KeyInterpreter {
     pub fn handle_char(&mut self, ch: char) -> Option<KeyAction> {
+        if !self.sequence.is_empty() {
+            self.sequence.push(ch);
+            if let Some(command) = lookup_sequence(&self.sequence) {
+                self.sequence.clear();
+                let count = self.take_count();
+                return Some(KeyAction { command, count });
+            }
+            if is_sequence_prefix(&self.sequence) {
+                return None;
+            }
+            self.sequence.clear();
+            return None;
+        }
+
         if ch.is_ascii_digit() && (!self.modifier.is_empty() || lookup_char(ch).is_none()) {
             self.modifier.push(ch);
             return None;
         }
 
+        if ch == 'c' {
+            self.sequence.push(ch);
+            return None;
+        }
+
         let command = lookup_char(ch)?;
-        let count = if self.modifier.is_empty() {
+        let count = self.take_count();
+        Some(KeyAction { command, count })
+    }
+
+    fn take_count(&mut self) -> Option<usize> {
+        if self.modifier.is_empty() {
             None
         } else {
             let count = self.modifier.parse().ok();
             self.modifier.clear();
             count
-        };
-        Some(KeyAction { command, count })
+        }
     }
 }
 
@@ -108,6 +144,9 @@ pub fn lookup_char(ch: char) -> Option<Command> {
         '\'' => Command::GotoMark,
         '\n' => Command::ShowCell,
         '/' => Command::Search,
+        'i' => Command::ColumnInfo,
+        #[cfg(feature = "saved-views")]
+        'v' => Command::SavedView,
         'f' => Command::FilterIn,
         'F' => Command::FilterOut,
         'n' => Command::NextSearchResult,
@@ -126,8 +165,9 @@ pub fn lookup_char(ch: char) -> Option<Command> {
         's' => Command::SortLexicalAsc,
         'S' => Command::SortLexicalDesc,
         'y' => Command::YankCell,
-        'c' => Command::ToggleColumnWidthMode,
-        'C' => Command::SetCurrentColumnWidth,
+        'Y' => Command::YankRawCell,
+        'z' => Command::ToggleColumnWidthMode,
+        'Z' => Command::SetCurrentColumnWidth,
         ']' => Command::SkipRowChangeForward,
         '[' => Command::SkipRowChangeBackward,
         '}' => Command::SkipColumnChangeForward,
@@ -135,6 +175,24 @@ pub fn lookup_char(ch: char) -> Option<Command> {
         '?' => Command::Help,
         _ => return None,
     })
+}
+
+fn lookup_sequence(sequence: &str) -> Option<Command> {
+    Some(match sequence {
+        "chh" => Command::ColumnHideLeft,
+        "chl" => Command::ColumnHideRight,
+        "chj" | "chk" => Command::ColumnHideCurrent,
+        "cHh" => Command::ColumnShowLeft,
+        "cHl" => Command::ColumnShowRight,
+        "csj" => Command::ColumnSortDesc,
+        "csk" => Command::ColumnSortAsc,
+        "csx" => Command::ColumnSortClear,
+        _ => return None,
+    })
+}
+
+fn is_sequence_prefix(sequence: &str) -> bool {
+    matches!(sequence, "c" | "ch" | "cH" | "cs")
 }
 
 pub fn lookup_key_event(event: KeyEvent) -> Option<Command> {
@@ -167,7 +225,7 @@ pub fn lookup_key_event(event: KeyEvent) -> Option<Command> {
 }
 
 pub fn default_key_bindings() -> Vec<KeyBinding> {
-    vec![
+    let mut bindings = vec![
         KeyBinding {
             keys: "F1/?",
             command: Command::Help,
@@ -234,6 +292,19 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             description: "Search",
         },
         KeyBinding {
+            keys: "i",
+            command: Command::ColumnInfo,
+            description: "Edit current column view",
+        },
+    ];
+    #[cfg(feature = "saved-views")]
+    bindings.push(KeyBinding {
+        keys: "v",
+        command: Command::SavedView,
+        description: "Show saved view",
+    });
+    bindings.extend([
+        KeyBinding {
             keys: "f/F",
             command: Command::FilterIn,
             description: "Filter in/out current column",
@@ -289,9 +360,29 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             description: "Yank current cell",
         },
         KeyBinding {
-            keys: "[num]c/C",
+            keys: "Y",
+            command: Command::YankRawCell,
+            description: "Yank raw current cell",
+        },
+        KeyBinding {
+            keys: "[num]z/Z",
             command: Command::ToggleColumnWidthMode,
             description: "Set column width mode",
+        },
+        KeyBinding {
+            keys: "[num]ch{h/l/j/k}",
+            command: Command::ColumnHideCurrent,
+            description: "Hide columns",
+        },
+        KeyBinding {
+            keys: "[num]cH{h/l}",
+            command: Command::ColumnShowLeft,
+            description: "Show adjacent hidden columns",
+        },
+        KeyBinding {
+            keys: "cs{k/j/x}",
+            command: Command::ColumnSortAsc,
+            description: "Sort or clear current column",
         },
         KeyBinding {
             keys: "[num][]",
@@ -308,7 +399,8 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             command: Command::Quit,
             description: "Quit",
         },
-    ]
+    ]);
+    bindings
 }
 
 #[cfg(test)]
@@ -327,10 +419,12 @@ mod tests {
     fn maps_existing_operation_keys() {
         assert_eq!(lookup_char('r'), Some(Command::Reload));
         assert_eq!(lookup_char('/'), Some(Command::Search));
+        assert_eq!(lookup_char('i'), Some(Command::ColumnInfo));
         assert_eq!(lookup_char('f'), Some(Command::FilterIn));
         assert_eq!(lookup_char('F'), Some(Command::FilterOut));
         assert_eq!(lookup_char('#'), Some(Command::SortNumericAsc));
         assert_eq!(lookup_char('y'), Some(Command::YankCell));
+        assert_eq!(lookup_char('z'), Some(Command::ToggleColumnWidthMode));
         assert_eq!(lookup_char('?'), Some(Command::Help));
     }
 
@@ -381,6 +475,32 @@ mod tests {
             Some(KeyAction {
                 command: Command::GotoRow,
                 count: Some(12)
+            })
+        );
+    }
+
+    #[test]
+    fn parses_composable_column_commands() {
+        let mut interpreter = KeyInterpreter::default();
+        assert_eq!(interpreter.handle_char('1'), None);
+        assert_eq!(interpreter.handle_char('0'), None);
+        assert_eq!(interpreter.handle_char('c'), None);
+        assert_eq!(interpreter.handle_char('h'), None);
+        assert_eq!(
+            interpreter.handle_char('l'),
+            Some(KeyAction {
+                command: Command::ColumnHideRight,
+                count: Some(10)
+            })
+        );
+
+        assert_eq!(interpreter.handle_char('c'), None);
+        assert_eq!(interpreter.handle_char('s'), None);
+        assert_eq!(
+            interpreter.handle_char('x'),
+            Some(KeyAction {
+                command: Command::ColumnSortClear,
+                count: None
             })
         );
     }
