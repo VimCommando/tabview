@@ -97,7 +97,9 @@ impl KeyInterpreter {
             return None;
         }
 
-        if ch.is_ascii_digit() && (!self.modifier.is_empty() || lookup_char(ch).is_none()) {
+        if ch.is_ascii_digit()
+            && (!self.modifier.is_empty() || (ch != '0' && lookup_char(ch).is_none()))
+        {
             self.modifier.push(ch);
             return None;
         }
@@ -509,5 +511,12 @@ mod tests {
     fn digit_command_without_modifier_is_ignored_like_unknown_key() {
         let mut interpreter = KeyInterpreter::default();
         assert_eq!(interpreter.handle_char('0'), None);
+        assert_eq!(
+            interpreter.handle_char('j'),
+            Some(KeyAction {
+                command: Command::MoveDown,
+                count: None
+            })
+        );
     }
 }
