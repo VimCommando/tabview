@@ -1,6 +1,7 @@
 pub mod source;
 
 use std::borrow::Cow;
+use std::env;
 
 use csv::ReaderBuilder;
 use encoding_rs::{Encoding, UTF_16BE, UTF_16LE, UTF_8, WINDOWS_1252};
@@ -55,20 +56,68 @@ pub fn decode_input(bytes: &[u8], requested: Option<&str>) -> Result<DecodedInpu
         return decode_with_label(bytes, label);
     }
 
-    for label in [
-        "utf-8",
-        "utf-16",
-        "iso8859-1",
-        "iso8859-2",
-        "cp720",
-        "latin-1",
-    ] {
-        if let Ok(decoded) = decode_with_label(bytes, label) {
+    for label in compatibility_encoding_labels() {
+        if let Ok(decoded) = decode_with_label(bytes, &label) {
             return Ok(decoded);
         }
     }
 
     Err(IngestError::DecodeFailed)
+}
+
+fn compatibility_encoding_labels() -> Vec<String> {
+    compatibility_encoding_labels_with_locale(locale_encoding_label())
+}
+
+fn compatibility_encoding_labels_with_locale(locale: Option<String>) -> Vec<String> {
+    let mut labels = Vec::new();
+    for label in ["utf-8", "utf-16"] {
+        push_unique_label(&mut labels, label.to_owned());
+    }
+    if let Some(label) = locale {
+        push_unique_label(&mut labels, label);
+    }
+    for label in ["iso8859-1", "iso8859-2", "cp720", "latin-1"] {
+        push_unique_label(&mut labels, label.to_owned());
+    }
+    labels
+}
+
+fn push_unique_label(labels: &mut Vec<String>, label: String) {
+    if !labels.iter().any(|existing| existing == &label) {
+        labels.push(label);
+    }
+}
+
+fn locale_encoding_label() -> Option<String> {
+    ["LC_ALL", "LC_CTYPE", "LANG"]
+        .into_iter()
+        .filter_map(|name| env::var(name).ok())
+        .find_map(|locale| encoding_label_from_locale(&locale))
+}
+
+fn encoding_label_from_locale(locale: &str) -> Option<String> {
+    let locale = locale.trim();
+    if locale.is_empty() {
+        return None;
+    }
+    let candidate = locale
+        .split_once('.')
+        .map(|(_, encoding)| encoding)
+        .unwrap_or(locale)
+        .split('@')
+        .next()
+        .unwrap_or_default()
+        .trim();
+    if candidate.is_empty() {
+        return None;
+    }
+    let normalized = normalize_encoding_label(candidate);
+    if normalized == "cp720" || encoding_for_label(&normalized).is_some() {
+        Some(normalized)
+    } else {
+        None
+    }
 }
 
 fn decode_with_label(bytes: &[u8], label: &str) -> Result<DecodedInput, IngestError> {
@@ -329,6 +378,35 @@ mod tests {
     fn automatic_decoding_uses_latin1_as_late_fallback() {
         let decoded = decode_input("plain utf8".as_bytes(), None).expect("utf-8");
         assert_eq!(decoded.encoding, "utf-8");
+    }
+
+    #[test]
+    fn extracts_encoding_label_from_posix_locale() {
+        assert_eq!(
+            encoding_label_from_locale("en_US.ISO8859-2@euro"),
+            Some("iso8859-2".to_owned())
+        );
+        assert_eq!(
+            encoding_label_from_locale("C.UTF-8"),
+            Some("utf-8".to_owned())
+        );
+        assert_eq!(encoding_label_from_locale("C"), None);
+    }
+
+    #[test]
+    fn compatibility_encoding_set_tries_locale_before_latin1_fallbacks() {
+        assert_eq!(
+            compatibility_encoding_labels_with_locale(Some("windows-1250".to_owned())),
+            vec![
+                "utf-8",
+                "utf-16",
+                "windows-1250",
+                "iso8859-1",
+                "iso8859-2",
+                "cp720",
+                "latin-1"
+            ]
+        );
     }
 
     #[test]
