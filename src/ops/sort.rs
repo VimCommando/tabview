@@ -427,6 +427,10 @@ impl NumericColumnProfile {
         }
     }
 
+    pub(crate) fn is_time(self) -> bool {
+        self.kind == NumericColumnKind::Time
+    }
+
     fn bare_m_is_minutes(self) -> bool {
         self.kind == NumericColumnKind::Time
     }

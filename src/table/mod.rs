@@ -1,8 +1,10 @@
 use std::fs::File;
-use std::io::{BufRead, BufReader, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
-use crate::ingest::{parse_decoded_rows, ParseOptions};
+use csv::ReaderBuilder;
+
+use crate::ingest::{parse_decoded_rows, sniff_delimiter, ParseOptions, Quoting};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
@@ -70,26 +72,22 @@ pub struct LazyFileTable {
 impl LazyFileTable {
     pub fn open(path: impl AsRef<Path>, options: ParseOptions) -> anyhow::Result<Self> {
         let path = path.as_ref().to_path_buf();
-        let mut reader = BufReader::new(File::open(&path)?);
+        let mut options = options;
+        if options.delimiter.is_none() {
+            options.delimiter = Some(sniff_file_delimiter(&path)?);
+        }
+
+        let mut reader = csv_reader_builder(&options).from_reader(File::open(&path)?);
         let mut offsets = Vec::new();
-        let mut offset = 0_u64;
-        let mut line = String::new();
+        let mut record = csv::StringRecord::new();
         let mut column_count = 0;
 
-        loop {
-            offsets.push(offset);
-            line.clear();
-            let read = reader.read_line(&mut line)?;
-            if read == 0 {
-                offsets.pop();
-                break;
+        while reader.read_record(&mut record)? {
+            if let Some(position) = record.position() {
+                offsets.push(position.byte());
             }
-            offset += read as u64;
-            if column_count == 0 {
-                column_count = parse_decoded_rows(&line, &options)
-                    .ok()
-                    .and_then(|rows| rows.first().map(Vec::len).filter(|len| *len > 0))
-                    .unwrap_or(0);
+            if column_count == 0 && !record.is_empty() {
+                column_count = record.len();
             }
         }
 
@@ -107,11 +105,14 @@ impl LazyFileTable {
         };
         let mut file = File::open(&self.path)?;
         file.seek(SeekFrom::Start(offset))?;
-        let mut reader = BufReader::new(file);
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        let rows = parse_decoded_rows(&line, &self.options)?;
-        Ok(rows.into_iter().next().map(Row::new))
+        let mut reader = csv_reader_builder(&self.options).from_reader(file);
+        let mut record = csv::StringRecord::new();
+        if !reader.read_record(&mut record)? {
+            return Ok(None);
+        }
+        Ok(Some(Row::new(
+            record.iter().map(ToOwned::to_owned).collect(),
+        )))
     }
 }
 
@@ -129,6 +130,27 @@ impl TableStore for LazyFileTable {
         File::open(&self.path)?.read_to_string(&mut data)?;
         Ok(parse_decoded_rows(&data, &self.options)?)
     }
+}
+
+fn sniff_file_delimiter(path: &Path) -> anyhow::Result<u8> {
+    let mut sample = String::new();
+    File::open(path)?
+        .take(64 * 1024)
+        .read_to_string(&mut sample)?;
+    Ok(sniff_delimiter(&sample).unwrap_or(b','))
+}
+
+fn csv_reader_builder(options: &ParseOptions) -> ReaderBuilder {
+    let mut builder = ReaderBuilder::new();
+    builder
+        .has_headers(false)
+        .flexible(true)
+        .delimiter(options.delimiter.unwrap_or(b','))
+        .quote(options.quote_char);
+    if options.quoting == Some(Quoting::None) {
+        builder.quoting(false);
+    }
+    builder
 }
 
 #[cfg(test)]
@@ -158,6 +180,29 @@ mod tests {
             vec![
                 vec!["a".to_owned(), "b".to_owned()],
                 vec!["1".to_owned(), "2".to_owned()]
+            ]
+        );
+    }
+
+    #[test]
+    fn lazy_file_table_indexes_multiline_csv_records() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("data.csv");
+        std::fs::write(&path, "a,b\n\"hello\nworld\",2\nx,y\n").expect("write");
+        let mut table = LazyFileTable::open(&path, ParseOptions::default()).expect("lazy table");
+
+        assert_eq!(table.row_count(), Some(3));
+        assert_eq!(table.column_count(), 2);
+        assert_eq!(
+            table.row(1).expect("row").expect("row").cells(),
+            ["hello\nworld", "2"]
+        );
+        assert_eq!(
+            table.materialize().expect("materialize"),
+            vec![
+                vec!["a".to_owned(), "b".to_owned()],
+                vec!["hello\nworld".to_owned(), "2".to_owned()],
+                vec!["x".to_owned(), "y".to_owned()]
             ]
         );
     }

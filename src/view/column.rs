@@ -105,7 +105,7 @@ fn is_numeric_column(rows: &[Vec<String>], column: usize, profile: NumericColumn
         }
         has_numeric_value = true;
     }
-    has_numeric_value
+    has_numeric_value || profile.is_time()
 }
 
 #[cfg(test)]
@@ -137,5 +137,18 @@ mod tests {
         );
         assert!(columns.is_numeric(ColumnIndex::new(1)));
         assert!(!columns.is_numeric(ColumnIndex::new(0)));
+    }
+
+    #[test]
+    fn treats_time_header_with_only_placeholders_as_numeric() {
+        let header = vec!["Duration".to_owned()];
+        let rows = rows(&[&[""], &["n/a"]]);
+        let columns = Columns::infer(Some(&header), &rows);
+
+        assert_eq!(
+            columns.numeric_profile(ColumnIndex::new(0)),
+            NumericColumnProfile::time()
+        );
+        assert!(columns.is_numeric(ColumnIndex::new(0)));
     }
 }
