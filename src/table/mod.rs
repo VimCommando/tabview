@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 
 use csv::ReaderBuilder;
 
-use crate::ingest::{parse_decoded_rows, sniff_delimiter, ParseOptions, Quoting};
+use crate::ingest::{decode_input, parse_rows, sniff_delimiter, ParseOptions, Quoting};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
@@ -79,10 +79,10 @@ impl LazyFileTable {
 
         let mut reader = csv_reader_builder(&options).from_reader(File::open(&path)?);
         let mut offsets = Vec::new();
-        let mut record = csv::StringRecord::new();
+        let mut record = csv::ByteRecord::new();
         let mut column_count = 0;
 
-        while reader.read_record(&mut record)? {
+        while reader.read_byte_record(&mut record)? {
             if let Some(position) = record.position() {
                 offsets.push(position.byte());
             }
@@ -106,13 +106,11 @@ impl LazyFileTable {
         let mut file = File::open(&self.path)?;
         file.seek(SeekFrom::Start(offset))?;
         let mut reader = csv_reader_builder(&self.options).from_reader(file);
-        let mut record = csv::StringRecord::new();
-        if !reader.read_record(&mut record)? {
+        let mut record = csv::ByteRecord::new();
+        if !reader.read_byte_record(&mut record)? {
             return Ok(None);
         }
-        Ok(Some(Row::new(
-            record.iter().map(ToOwned::to_owned).collect(),
-        )))
+        Ok(Some(row_from_byte_record(&record, &self.options)?))
     }
 }
 
@@ -126,18 +124,24 @@ impl TableStore for LazyFileTable {
     }
 
     fn materialize(&mut self) -> anyhow::Result<Vec<Vec<String>>> {
-        let mut data = String::new();
-        File::open(&self.path)?.read_to_string(&mut data)?;
-        Ok(parse_decoded_rows(&data, &self.options)?)
+        let data = std::fs::read(&self.path)?;
+        Ok(parse_rows(&data, &self.options)?)
     }
 }
 
 fn sniff_file_delimiter(path: &Path) -> anyhow::Result<u8> {
-    let mut sample = String::new();
-    File::open(path)?
-        .take(64 * 1024)
-        .read_to_string(&mut sample)?;
+    let mut sample = Vec::new();
+    File::open(path)?.take(64 * 1024).read_to_end(&mut sample)?;
+    let sample = String::from_utf8_lossy(&sample);
     Ok(sniff_delimiter(&sample).unwrap_or(b','))
+}
+
+fn row_from_byte_record(record: &csv::ByteRecord, options: &ParseOptions) -> anyhow::Result<Row> {
+    let cells = record
+        .iter()
+        .map(|field| decode_input(field, options.encoding.as_deref()).map(|decoded| decoded.text))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(Row::new(cells))
 }
 
 fn csv_reader_builder(options: &ParseOptions) -> ReaderBuilder {
@@ -204,6 +208,30 @@ mod tests {
                 vec!["hello\nworld".to_owned(), "2".to_owned()],
                 vec!["x".to_owned(), "y".to_owned()]
             ]
+        );
+    }
+
+    #[test]
+    fn lazy_file_table_materializes_non_utf8_input_with_parse_options() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("latin1.csv");
+        std::fs::write(&path, b"caf\xe9,2\n").expect("write");
+        let mut table = LazyFileTable::open(
+            &path,
+            ParseOptions {
+                encoding: Some("latin-1".to_owned()),
+                ..ParseOptions::default()
+            },
+        )
+        .expect("lazy table");
+
+        assert_eq!(
+            table.row(0).expect("row").expect("row").cells(),
+            ["café", "2"]
+        );
+        assert_eq!(
+            table.materialize().expect("materialize"),
+            vec![vec!["café".to_owned(), "2".to_owned()]]
         );
     }
 }
