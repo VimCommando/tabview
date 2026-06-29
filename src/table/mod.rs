@@ -35,7 +35,7 @@ pub struct InMemoryTable {
 
 impl InMemoryTable {
     pub fn new(rows: Vec<Vec<String>>) -> Self {
-        let column_count = rows.first().map(Vec::len).unwrap_or(0);
+        let column_count = rows.iter().map(Vec::len).max().unwrap_or(0);
         Self {
             rows: rows.into_iter().map(Row::new).collect(),
             column_count,
@@ -165,6 +165,17 @@ mod tests {
         assert_eq!(table.row_count(), Some(1));
         assert_eq!(table.column_count(), 2);
         assert_eq!(table.row(0).expect("row").cells(), ["a", "b"]);
+    }
+
+    #[test]
+    fn in_memory_table_tracks_max_column_count() {
+        let table = InMemoryTable::new(vec![
+            vec!["a".to_owned()],
+            vec!["1".to_owned(), "2".to_owned(), "3".to_owned()],
+        ]);
+
+        assert_eq!(table.row_count(), Some(2));
+        assert_eq!(table.column_count(), 3);
     }
 
     #[test]

@@ -42,7 +42,7 @@ impl TerminalSession {
             return Err(error);
         }
         let backend = CrosstermBackend::new(stdout);
-        let terminal = match Terminal::new(backend) {
+        let mut terminal = match Terminal::new(backend) {
             Ok(terminal) => terminal,
             Err(error) => {
                 let _ = execute!(io::stdout(), LeaveAlternateScreen);
@@ -50,6 +50,11 @@ impl TerminalSession {
                 return Err(error);
             }
         };
+        if let Err(error) = terminal.hide_cursor() {
+            let _ = execute!(terminal.backend_mut(), LeaveAlternateScreen);
+            let _ = disable_raw_mode();
+            return Err(error);
+        }
         Ok(Self { terminal })
     }
 
