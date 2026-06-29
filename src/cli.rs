@@ -153,6 +153,11 @@ fn parse_normal_start_position(value: &str) -> Result<StartPosition, CliError> {
         .next()
         .map(|part| parse_optional_usize(part, value))
         .transpose()?;
+    if parts.next().is_some() {
+        return Err(CliError::InvalidStartPosition {
+            value: value.to_owned(),
+        });
+    }
     Ok(StartPosition { row, column })
 }
 
@@ -165,6 +170,11 @@ fn parse_classic_start_position(value: &str) -> Result<StartPosition, CliError> 
         .map(|part| parse_optional_usize(part, value))
         .transpose()?
         .or(Some(0));
+    if parts.next().is_some() {
+        return Err(CliError::InvalidStartPosition {
+            value: value.to_owned(),
+        });
+    }
     Ok(StartPosition { row, column })
 }
 
@@ -303,6 +313,22 @@ mod tests {
             }
         );
         assert_eq!(config.encoding.as_deref(), Some("utf-8"));
+    }
+
+    #[test]
+    fn rejects_start_position_with_extra_components() {
+        assert_eq!(
+            parse_config_error(&["tabview", "--start_pos", "1,2,3", "sample/data_ohlcv.csv"]),
+            CliError::InvalidStartPosition {
+                value: "1,2,3".to_owned()
+            }
+        );
+        assert_eq!(
+            parse_config_error(&["tabview", "sample/data_ohlcv.csv", "+1:2:3"]),
+            CliError::InvalidStartPosition {
+                value: "+1:2:3".to_owned()
+            }
+        );
     }
 
     #[test]
