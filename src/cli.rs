@@ -73,7 +73,7 @@ pub struct Config {
     pub start_position: StartPosition,
     pub width: ColumnWidthMode,
     pub double_width: bool,
-    pub quote_char: char,
+    pub quote_char: u8,
     #[cfg(feature = "saved-views")]
     pub saved_view: SavedViewSelection,
 }
@@ -88,7 +88,7 @@ impl Config {
             start_position: parse_start_position(args.start_pos.as_deref(), &args.extra)?,
             width: parse_width(&args.width)?,
             double_width: args.double_width,
-            quote_char: parse_char(&args.quote_char, "quote character")?,
+            quote_char: parse_ascii_char(&args.quote_char, "quote character")?,
             #[cfg(feature = "saved-views")]
             saved_view: SavedViewSelection::from_args(args.view, args.no_view),
         })
@@ -181,12 +181,17 @@ fn parse_width(value: &str) -> Result<ColumnWidthMode, CliError> {
     match value {
         "mode" => Ok(ColumnWidthMode::Mode),
         "max" => Ok(ColumnWidthMode::Max),
-        _ => value
-            .parse::<u16>()
-            .map(ColumnWidthMode::Fixed)
-            .map_err(|_| CliError::InvalidWidth {
+        _ => {
+            let width = value.parse::<u16>().map_err(|_| CliError::InvalidWidth {
                 value: value.to_owned(),
-            }),
+            })?;
+            if width == 0 {
+                return Err(CliError::InvalidWidth {
+                    value: value.to_owned(),
+                });
+            }
+            Ok(ColumnWidthMode::Fixed(width))
+        }
     }
 }
 
@@ -206,12 +211,16 @@ fn parse_byte_char(value: &str) -> Result<u8, CliError> {
     if value == r"\t" {
         return Ok(b'\t');
     }
-    let ch = parse_char(value, "delimiter")?;
+    parse_ascii_char(value, "delimiter")
+}
+
+fn parse_ascii_char(value: &str, what: &'static str) -> Result<u8, CliError> {
+    let ch = parse_char(value, what)?;
     if ch.is_ascii() {
         Ok(ch as u8)
     } else {
         Err(CliError::InvalidChar {
-            what: "delimiter",
+            what,
             value: value.to_owned(),
         })
     }
@@ -244,10 +253,36 @@ mod tests {
         Config::from_args(args).expect("config")
     }
 
+    fn parse_config_error(args: &[&str]) -> CliError {
+        let args = Args::try_parse_from(args).expect("parse args");
+        Config::from_args(args).expect_err("config error")
+    }
+
     #[test]
     fn default_width_is_mode() {
         let config = parse(&["tabview", "sample/data_ohlcv.csv"]);
         assert_eq!(config.width, ColumnWidthMode::Mode);
+    }
+
+    #[test]
+    fn rejects_zero_fixed_width() {
+        assert_eq!(
+            parse_config_error(&["tabview", "--width", "0", "sample/data_ohlcv.csv"]),
+            CliError::InvalidWidth {
+                value: "0".to_owned()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_non_ascii_quote_character() {
+        assert_eq!(
+            parse_config_error(&["tabview", "--quote-char", "“", "sample/data_ohlcv.csv"]),
+            CliError::InvalidChar {
+                what: "quote character",
+                value: "“".to_owned()
+            }
+        );
     }
 
     #[test]

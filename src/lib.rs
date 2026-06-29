@@ -20,7 +20,7 @@ pub fn run(args: cli::Args) -> anyhow::Result<()> {
         encoding: config.encoding.clone(),
         delimiter: config.delimiter,
         quoting: config.quoting,
-        quote_char: config.quote_char as u8,
+        quote_char: config.quote_char,
     };
     let rows = read_rows(&source, &parse_options)?;
     let mut view = view::TableView::classify(rows, view::Viewport::new(20, 8))
