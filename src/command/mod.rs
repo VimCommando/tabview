@@ -94,6 +94,7 @@ impl KeyInterpreter {
                 return None;
             }
             self.sequence.clear();
+            self.modifier.clear();
             return None;
         }
 
@@ -109,7 +110,10 @@ impl KeyInterpreter {
             return None;
         }
 
-        let command = lookup_char(ch)?;
+        let Some(command) = lookup_char(ch) else {
+            self.modifier.clear();
+            return None;
+        };
         let count = self.take_count();
         Some(KeyAction { command, count })
     }
@@ -511,6 +515,35 @@ mod tests {
     fn digit_command_without_modifier_is_ignored_like_unknown_key() {
         let mut interpreter = KeyInterpreter::default();
         assert_eq!(interpreter.handle_char('0'), None);
+        assert_eq!(
+            interpreter.handle_char('j'),
+            Some(KeyAction {
+                command: Command::MoveDown,
+                count: None
+            })
+        );
+    }
+
+    #[test]
+    fn invalid_sequence_clears_numeric_modifier() {
+        let mut interpreter = KeyInterpreter::default();
+        assert_eq!(interpreter.handle_char('3'), None);
+        assert_eq!(interpreter.handle_char('c'), None);
+        assert_eq!(interpreter.handle_char('z'), None);
+        assert_eq!(
+            interpreter.handle_char('j'),
+            Some(KeyAction {
+                command: Command::MoveDown,
+                count: None
+            })
+        );
+    }
+
+    #[test]
+    fn unknown_key_clears_numeric_modifier() {
+        let mut interpreter = KeyInterpreter::default();
+        assert_eq!(interpreter.handle_char('3'), None);
+        assert_eq!(interpreter.handle_char('!'), None);
         assert_eq!(
             interpreter.handle_char('j'),
             Some(KeyAction {
