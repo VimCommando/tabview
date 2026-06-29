@@ -86,9 +86,7 @@ impl LazyFileTable {
             if let Some(position) = record.position() {
                 offsets.push(position.byte());
             }
-            if column_count == 0 && !record.is_empty() {
-                column_count = record.len();
-            }
+            column_count = column_count.max(record.len());
         }
 
         Ok(Self {
@@ -209,6 +207,17 @@ mod tests {
                 vec!["x".to_owned(), "y".to_owned()]
             ]
         );
+    }
+
+    #[test]
+    fn lazy_file_table_tracks_max_column_count() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ragged.csv");
+        std::fs::write(&path, "a\n1,2,3\n").expect("write");
+        let table = LazyFileTable::open(&path, ParseOptions::default()).expect("lazy table");
+
+        assert_eq!(table.row_count(), Some(2));
+        assert_eq!(table.column_count(), 3);
     }
 
     #[test]

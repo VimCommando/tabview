@@ -397,7 +397,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             description: "Skip column value changes",
         },
         KeyBinding {
-            keys: "q",
+            keys: "q/Q",
             command: Command::Quit,
             description: "Quit",
         },
@@ -464,7 +464,7 @@ mod tests {
         assert!(bindings
             .iter()
             .any(|binding| binding.command == Command::Search));
-        assert!(bindings.iter().any(|binding| binding.keys == "q"));
+        assert!(bindings.iter().any(|binding| binding.keys == "q/Q"));
     }
 
     #[test]
