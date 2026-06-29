@@ -16,7 +16,7 @@ pub fn find_match(
         return None;
     }
     let query = query.to_lowercase();
-    let Some(mut position) = normalize_start(rows, start) else {
+    let Some(mut position) = start_or_virtual_wrap_position(rows, start, direction) else {
         return None;
     };
 
@@ -29,10 +29,17 @@ pub fn find_match(
     None
 }
 
-fn normalize_start(rows: &[Vec<String>], start: Position) -> Option<Position> {
+fn start_or_virtual_wrap_position(
+    rows: &[Vec<String>],
+    start: Position,
+    direction: SearchDirection,
+) -> Option<Position> {
     rows.get(start.row)
         .and_then(|row| (start.column < row.len()).then_some(start))
-        .or_else(|| first_position(rows))
+        .or_else(|| match direction {
+            SearchDirection::Forward => last_position(rows),
+            SearchDirection::Reverse => first_position(rows),
+        })
 }
 
 fn first_position(rows: &[Vec<String>]) -> Option<Position> {
@@ -171,6 +178,36 @@ mod tests {
                 SearchDirection::Forward,
             ),
             Some(Position { row: 2, column: 0 })
+        );
+    }
+
+    #[test]
+    fn invalid_start_checks_edge_cell_first() {
+        let rows = rows();
+
+        assert_eq!(
+            find_match(
+                &rows,
+                Position {
+                    row: usize::MAX,
+                    column: usize::MAX,
+                },
+                "alpha",
+                SearchDirection::Forward,
+            ),
+            Some(Position { row: 0, column: 0 })
+        );
+        assert_eq!(
+            find_match(
+                &rows,
+                Position {
+                    row: usize::MAX,
+                    column: usize::MAX,
+                },
+                "delta",
+                SearchDirection::Reverse,
+            ),
+            Some(Position { row: 1, column: 1 })
         );
     }
 }

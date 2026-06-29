@@ -64,6 +64,10 @@ impl TableStore for InMemoryTable {
 }
 
 #[derive(Debug, Clone)]
+/// File-backed table prototype that eagerly indexes row offsets on open.
+///
+/// This is groundwork for future incremental indexing/materialization rather
+/// than a fully lazy store today.
 pub struct LazyFileTable {
     path: PathBuf,
     offsets: Vec<u64>,
