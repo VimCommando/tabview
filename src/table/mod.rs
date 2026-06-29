@@ -6,6 +6,8 @@ use csv::ReaderBuilder;
 
 use crate::ingest::{decode_input, parse_rows, sniff_delimiter, ParseOptions, Quoting};
 
+const LAZY_FILE_SAMPLE_BYTES: u64 = 64 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Row {
     cells: Vec<String>,
@@ -73,6 +75,9 @@ impl LazyFileTable {
     pub fn open(path: impl AsRef<Path>, options: ParseOptions) -> anyhow::Result<Self> {
         let path = path.as_ref().to_path_buf();
         let mut options = options;
+        if options.encoding.is_none() {
+            options.encoding = Some(sniff_file_encoding(&path)?);
+        }
         if options.delimiter.is_none() {
             options.delimiter = Some(sniff_file_delimiter(&path)?);
         }
@@ -129,9 +134,19 @@ impl TableStore for LazyFileTable {
 
 fn sniff_file_delimiter(path: &Path) -> anyhow::Result<u8> {
     let mut sample = Vec::new();
-    File::open(path)?.take(64 * 1024).read_to_end(&mut sample)?;
+    File::open(path)?
+        .take(LAZY_FILE_SAMPLE_BYTES)
+        .read_to_end(&mut sample)?;
     let sample = String::from_utf8_lossy(&sample);
     Ok(sniff_delimiter(&sample).unwrap_or(b','))
+}
+
+fn sniff_file_encoding(path: &Path) -> anyhow::Result<String> {
+    let mut sample = Vec::new();
+    File::open(path)?
+        .take(LAZY_FILE_SAMPLE_BYTES)
+        .read_to_end(&mut sample)?;
+    Ok(decode_input(&sample, None)?.encoding)
 }
 
 fn row_from_byte_record(record: &csv::ByteRecord, options: &ParseOptions) -> anyhow::Result<Row> {
@@ -252,6 +267,30 @@ mod tests {
         assert_eq!(
             table.materialize().expect("materialize"),
             vec![vec!["café".to_owned(), "2".to_owned()]]
+        );
+    }
+
+    #[test]
+    fn lazy_file_table_uses_one_inferred_encoding_for_rows() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("latin1.csv");
+        std::fs::write(&path, b"ascii,ok\ncaf\xe9,22\n").expect("write");
+        let mut table = LazyFileTable::open(&path, ParseOptions::default()).expect("lazy table");
+
+        assert_eq!(
+            table.row(0).expect("row").expect("row").cells(),
+            ["ascii", "ok"]
+        );
+        assert_eq!(
+            table.row(1).expect("row").expect("row").cells(),
+            ["café", "22"]
+        );
+        assert_eq!(
+            table.materialize().expect("materialize"),
+            vec![
+                vec!["ascii".to_owned(), "ok".to_owned()],
+                vec!["café".to_owned(), "22".to_owned()]
+            ]
         );
     }
 }

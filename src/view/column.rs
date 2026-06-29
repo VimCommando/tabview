@@ -52,8 +52,8 @@ impl Columns {
     pub(crate) fn infer(header: Option<&[String]>, rows: &[Vec<String>]) -> Self {
         let column_count = header
             .map(<[String]>::len)
-            .or_else(|| rows.first().map(Vec::len))
-            .unwrap_or(0);
+            .unwrap_or(0)
+            .max(rows.iter().map(Vec::len).max().unwrap_or(0));
         let metadata = (0..column_count)
             .map(|column| {
                 let header = header.and_then(|header| header.get(column)).cloned();
@@ -150,5 +150,22 @@ mod tests {
             NumericColumnProfile::time()
         );
         assert!(columns.is_numeric(ColumnIndex::new(0)));
+    }
+
+    #[test]
+    fn infers_metadata_for_ragged_rows_beyond_header_width() {
+        let header = vec!["Name".to_owned()];
+        let rows = rows(&[&["alpha"], &["beta", "42"]]);
+        let columns = Columns::infer(Some(&header), &rows);
+
+        assert_eq!(columns.len(), 2);
+        assert_eq!(
+            columns
+                .metadata(ColumnIndex::new(1))
+                .expect("second metadata")
+                .header(),
+            None
+        );
+        assert!(columns.is_numeric(ColumnIndex::new(1)));
     }
 }
