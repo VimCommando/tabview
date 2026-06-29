@@ -79,7 +79,7 @@ impl LazyFileTable {
             options.encoding = Some(sniff_file_encoding(&path)?);
         }
         if options.delimiter.is_none() {
-            options.delimiter = Some(sniff_file_delimiter(&path)?);
+            options.delimiter = Some(sniff_file_delimiter(&path, &options)?);
         }
 
         let mut reader = csv_reader_builder(&options).from_reader(File::open(&path)?);
@@ -132,13 +132,13 @@ impl TableStore for LazyFileTable {
     }
 }
 
-fn sniff_file_delimiter(path: &Path) -> anyhow::Result<u8> {
+fn sniff_file_delimiter(path: &Path, options: &ParseOptions) -> anyhow::Result<u8> {
     let mut sample = Vec::new();
     File::open(path)?
         .take(LAZY_FILE_SAMPLE_BYTES)
         .read_to_end(&mut sample)?;
-    let sample = String::from_utf8_lossy(&sample);
-    Ok(sniff_delimiter(&sample).unwrap_or(b','))
+    let decoded = decode_input(&sample, options.encoding.as_deref())?;
+    Ok(sniff_delimiter(&decoded.text).unwrap_or(b','))
 }
 
 fn sniff_file_encoding(path: &Path) -> anyhow::Result<String> {
@@ -290,6 +290,42 @@ mod tests {
             vec![
                 vec!["ascii".to_owned(), "ok".to_owned()],
                 vec!["café".to_owned(), "22".to_owned()]
+            ]
+        );
+    }
+
+    #[test]
+    fn lazy_file_table_sniffs_delimiter_from_decoded_sample() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("utf16.tsv");
+        let mut bytes = vec![0xff, 0xfe];
+        for unit in "a\tb\n1\t2\n".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(&path, bytes).expect("write");
+        let options = ParseOptions {
+            encoding: Some("utf-16".to_owned()),
+            ..ParseOptions::default()
+        };
+
+        assert_eq!(
+            sniff_file_delimiter(&path, &options).expect("delimiter"),
+            b'\t'
+        );
+        let mut materialized = LazyFileTable {
+            path,
+            offsets: Vec::new(),
+            options: ParseOptions {
+                delimiter: Some(b'\t'),
+                ..options
+            },
+            column_count: 0,
+        };
+        assert_eq!(
+            materialized.materialize().expect("materialize"),
+            vec![
+                vec!["a".to_owned(), "b".to_owned()],
+                vec!["1".to_owned(), "2".to_owned()]
             ]
         );
     }
