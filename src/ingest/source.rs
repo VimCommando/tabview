@@ -18,9 +18,19 @@ impl InputSource {
 
 pub fn read_stdin_then_restore_tty() -> io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
-    io::stdin().read_to_end(&mut bytes)?;
-    restore_stdin_from_tty()?;
-    Ok(bytes)
+    let read_result = io::stdin().read_to_end(&mut bytes).map(|_| bytes);
+    restore_after_read(read_result, restore_stdin_from_tty())
+}
+
+fn restore_after_read(
+    read_result: io::Result<Vec<u8>>,
+    restore_result: io::Result<()>,
+) -> io::Result<Vec<u8>> {
+    match (read_result, restore_result) {
+        (Ok(bytes), Ok(())) => Ok(bytes),
+        (Ok(_), Err(error)) => Err(error),
+        (Err(error), _) => Err(error),
+    }
 }
 
 pub fn read_source(source: &InputSource) -> io::Result<Vec<u8>> {
@@ -80,5 +90,22 @@ mod tests {
             InputSource::from_cli_value("file://localhost/tmp/data.csv"),
             InputSource::Path(PathBuf::from("/tmp/data.csv"))
         );
+    }
+
+    #[test]
+    fn restore_after_read_preserves_read_error_precedence() {
+        let error = restore_after_read(
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "read failed")),
+            Ok(()),
+        )
+        .expect_err("read error");
+        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+
+        let error = restore_after_read(
+            Ok(Vec::new()),
+            Err(io::Error::new(io::ErrorKind::NotFound, "restore failed")),
+        )
+        .expect_err("restore error");
+        assert_eq!(error.kind(), io::ErrorKind::NotFound);
     }
 }
