@@ -82,6 +82,7 @@ impl LazyFileTable {
         if options.encoding.is_none() {
             options.encoding = Some(sniff_file_encoding(&path)?);
         }
+        ensure_byte_indexed_encoding(&options)?;
         if options.delimiter.is_none() {
             options.delimiter = Some(sniff_file_delimiter(&path, &options)?);
         }
@@ -119,6 +120,19 @@ impl LazyFileTable {
         }
         Ok(Some(row_from_byte_record(&record, &self.options)?))
     }
+}
+
+fn ensure_byte_indexed_encoding(options: &ParseOptions) -> anyhow::Result<()> {
+    let Some(encoding) = options.encoding.as_deref() else {
+        return Ok(());
+    };
+    let normalized = encoding.trim().to_ascii_lowercase().replace('_', "-");
+    if matches!(normalized.as_str(), "utf-16" | "utf-16le" | "utf-16be") {
+        anyhow::bail!(
+            "lazy byte-indexed table storage does not support {encoding}; use materialized decoding instead"
+        );
+    }
+    Ok(())
 }
 
 impl TableStore for LazyFileTable {
@@ -331,6 +345,32 @@ mod tests {
                 vec!["a".to_owned(), "b".to_owned()],
                 vec!["1".to_owned(), "2".to_owned()]
             ]
+        );
+    }
+
+    #[test]
+    fn lazy_file_table_rejects_utf16_byte_indexing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("utf16.tsv");
+        let mut bytes = vec![0xff, 0xfe];
+        for unit in "a\tb\n1\t2\n".encode_utf16() {
+            bytes.extend_from_slice(&unit.to_le_bytes());
+        }
+        std::fs::write(&path, bytes).expect("write");
+
+        let error = LazyFileTable::open(
+            &path,
+            ParseOptions {
+                encoding: Some("utf-16".to_owned()),
+                ..ParseOptions::default()
+            },
+        )
+        .expect_err("utf16 lazy table error");
+        assert!(
+            error
+                .to_string()
+                .contains("lazy byte-indexed table storage does not support utf-16"),
+            "{error}"
         );
     }
 }
