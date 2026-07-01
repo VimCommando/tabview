@@ -1,0 +1,1285 @@
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+
+use regex::Regex;
+use serde::Deserialize;
+
+pub const MAX_SORT_KEYS: usize = 3;
+const VIEW_DIR: &str = "tabview/views";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedView {
+    pub name: String,
+    pub locale: Option<String>,
+    pub filenames: Vec<FilenamePattern>,
+    pub columns: BTreeMap<String, ColumnView>,
+    pub sort: Vec<SortKey>,
+    pub filters: Vec<SavedFilter>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ValidatedSavedView {
+    pub view: SavedView,
+    pub warnings: Vec<SavedViewWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedViewFile {
+    pub path: PathBuf,
+    pub canonical_name: String,
+    pub view: SavedView,
+    pub warnings: Vec<SavedViewWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SavedViewDiscovery {
+    pub views: Vec<SavedViewFile>,
+    pub warnings: Vec<SavedViewWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SelectedSavedView<'a> {
+    pub view: &'a SavedViewFile,
+    pub warnings: Vec<SavedViewWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedColumns {
+    pub columns: Vec<Option<ResolvedColumnView>>,
+    pub warnings: Vec<SavedViewWarning>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ResolvedColumnView {
+    pub column_index: usize,
+    pub source_key: String,
+    pub view: ColumnView,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SavedViewSelection<'a> {
+    Auto { input_path: &'a Path },
+    Force { name: &'a str },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilenamePattern {
+    pub raw: String,
+    pub kind: FilenamePatternKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilenamePatternKind {
+    Exact,
+    Glob,
+    Regex,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ColumnView {
+    pub column_type: Option<ColumnType>,
+    pub format: Option<DisplayFormat>,
+    pub mask: Option<NumberMask>,
+    pub width: Option<ColumnWidth>,
+    pub align: Option<ColumnAlign>,
+    pub visible: Option<bool>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnType {
+    String(StringKind),
+    Number(NumberKind),
+    Boolean(BooleanKind),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StringKind {
+    Text,
+    Date,
+    Ip,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NumberKind {
+    Float,
+    Int,
+    SemVer,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BooleanKind {
+    Char,
+    Bit,
+    Word,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DisplayFormat {
+    Plain,
+    Locale,
+    Mask,
+    Uppercase,
+    Lowercase,
+    Char,
+    Bit,
+    Word,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NumberMask {
+    pub raw: String,
+    pub grouped: bool,
+    pub decimal_places: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnWidth {
+    Fixed(u16),
+    Header,
+    Content,
+    Mode,
+    Max,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnAlign {
+    Left,
+    Right,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SortKey {
+    pub column: String,
+    pub direction: SortDirection,
+    pub kind: SortKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortDirection {
+    Asc,
+    Desc,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortKind {
+    Lexical,
+    Natural,
+    Numeric,
+    Type,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedFilter {
+    pub column: String,
+    pub action: FilterAction,
+    pub kind: FilterKind,
+    pub condition: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterAction {
+    In,
+    Out,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FilterKind {
+    Text,
+    Regex,
+    Numeric,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedViewWarning {
+    pub field: String,
+    pub message: String,
+}
+
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum SavedViewParseError {
+    #[error("invalid saved view yaml: {0}")]
+    Yaml(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSavedView {
+    name: String,
+    locale: Option<String>,
+    filenames: Vec<String>,
+    #[serde(default)]
+    columns: BTreeMap<String, RawColumnView>,
+    #[serde(default)]
+    sort: Vec<RawSortKey>,
+    #[serde(default)]
+    filters: Vec<RawSavedFilter>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawColumnView {
+    #[serde(rename = "type")]
+    column_type: Option<String>,
+    format: Option<String>,
+    mask: Option<String>,
+    width: Option<RawColumnWidth>,
+    align: Option<String>,
+    visible: Option<bool>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(untagged)]
+enum RawColumnWidth {
+    Fixed(u16),
+    Mode(String),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSortKey {
+    column: String,
+    direction: String,
+    kind: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSavedFilter {
+    column: String,
+    action: String,
+    kind: String,
+    condition: String,
+}
+
+pub fn parse_saved_view_yaml(input: &str) -> Result<ValidatedSavedView, SavedViewParseError> {
+    let raw: RawSavedView =
+        yaml_serde::from_str(input).map_err(|err| SavedViewParseError::Yaml(err.to_string()))?;
+    Ok(validate_raw_view(raw))
+}
+
+pub fn saved_view_dir(config_root: Option<&Path>) -> Option<PathBuf> {
+    let root = config_root
+        .map(Path::to_path_buf)
+        .or_else(posix_config_dir)?;
+    Some(root.join(VIEW_DIR))
+}
+
+fn posix_config_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".config")))
+}
+
+pub fn discover_saved_views(config_root: Option<&Path>) -> SavedViewDiscovery {
+    let Some(view_dir) = saved_view_dir(config_root) else {
+        return SavedViewDiscovery::default();
+    };
+    discover_saved_views_in_dir(&view_dir)
+}
+
+pub fn discover_saved_views_in_dir(view_dir: &Path) -> SavedViewDiscovery {
+    let mut discovery = SavedViewDiscovery::default();
+    let Ok(entries) = fs::read_dir(view_dir) else {
+        return discovery;
+    };
+    let mut candidates = entries
+        .filter_map(Result::ok)
+        .map(|entry| entry.path())
+        .filter(|path| {
+            matches!(
+                view_extension(path),
+                Some(ViewExtension::Yml | ViewExtension::Yaml)
+            )
+        })
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        view_stem(left)
+            .cmp(&view_stem(right))
+            .then_with(|| view_extension_priority(left).cmp(&view_extension_priority(right)))
+            .then_with(|| left.cmp(right))
+    });
+
+    let mut seen = BTreeSet::new();
+    for path in candidates {
+        let Some(stem) = view_stem(&path) else {
+            continue;
+        };
+        let canonical_name = stem.to_owned();
+        if !seen.insert(canonical_name.clone())
+            && view_extension(&path) == Some(ViewExtension::Yaml)
+        {
+            discovery.warnings.push(warning(
+                path.display().to_string(),
+                format!(
+                    "duplicate saved view '{}': .yml takes precedence over .yaml",
+                    canonical_name
+                ),
+            ));
+            continue;
+        }
+        match fs::read_to_string(&path) {
+            Ok(contents) => match parse_saved_view_yaml(&contents) {
+                Ok(validated) => discovery.views.push(SavedViewFile {
+                    path,
+                    canonical_name,
+                    view: validated.view,
+                    warnings: validated.warnings,
+                }),
+                Err(err) => discovery.warnings.push(warning(
+                    path.display().to_string(),
+                    format!("failed to parse saved view: {err}"),
+                )),
+            },
+            Err(err) => discovery.warnings.push(warning(
+                path.display().to_string(),
+                format!("failed to read saved view: {err}"),
+            )),
+        }
+    }
+    discovery
+}
+
+pub fn select_saved_view<'a>(
+    views: &'a [SavedViewFile],
+    selection: SavedViewSelection<'_>,
+) -> Option<SelectedSavedView<'a>> {
+    match selection {
+        SavedViewSelection::Force { name } => {
+            let normalized = normalize_view_name(name);
+            views
+                .iter()
+                .find(|view| platform_eq(&view.canonical_name, &normalized))
+                .map(|view| SelectedSavedView {
+                    view,
+                    warnings: Vec::new(),
+                })
+        }
+        SavedViewSelection::Auto { input_path } => {
+            let basename = input_path.file_name()?.to_str()?;
+            let mut matches = views
+                .iter()
+                .filter_map(|view| best_match_rank(view, basename).map(|rank| (rank, view)))
+                .collect::<Vec<_>>();
+            matches.sort_by(|(left_rank, left), (right_rank, right)| {
+                left_rank
+                    .cmp(right_rank)
+                    .then_with(|| left.path.cmp(&right.path))
+            });
+            let (rank, view) = matches.first()?;
+            let ambiguous = matches
+                .iter()
+                .skip(1)
+                .any(|(other_rank, _)| other_rank == rank);
+            let mut warnings = Vec::new();
+            if ambiguous {
+                warnings.push(warning(
+                    basename,
+                    format!(
+                        "multiple saved views matched '{}'; using {}",
+                        basename,
+                        view.path.display()
+                    ),
+                ));
+            }
+            Some(SelectedSavedView { view, warnings })
+        }
+    }
+}
+
+pub fn normalize_view_name(name: &str) -> String {
+    let path = Path::new(name);
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("yml" | "yaml") => path
+            .file_stem()
+            .and_then(|stem| stem.to_str())
+            .unwrap_or(name)
+            .to_owned(),
+        _ => name.to_owned(),
+    }
+}
+
+pub fn resolve_columns(view: &SavedView, headers: &[String]) -> ResolvedColumns {
+    let mut resolved = vec![None; headers.len()];
+    let mut matched_keys = BTreeSet::new();
+
+    for (column_index, header) in headers.iter().enumerate() {
+        if let Some((key, column_view)) = view
+            .columns
+            .iter()
+            .find(|(key, _)| key.eq_ignore_ascii_case(header))
+        {
+            matched_keys.insert(key.clone());
+            resolved[column_index] = Some(ResolvedColumnView {
+                column_index,
+                source_key: key.clone(),
+                view: column_view.clone(),
+            });
+            continue;
+        }
+
+        let mut wildcard_matches = view
+            .columns
+            .iter()
+            .filter(|(key, _)| is_wildcard_pattern(key))
+            .filter(|(key, _)| column_glob_matches(key, header))
+            .map(|(key, column_view)| (wildcard_specificity(key), key.clone(), column_view.clone()))
+            .collect::<Vec<_>>();
+        wildcard_matches
+            .sort_by(|left, right| right.0.cmp(&left.0).then_with(|| left.1.cmp(&right.1)));
+        if let Some((_, key, column_view)) = wildcard_matches.into_iter().next() {
+            matched_keys.insert(key.clone());
+            resolved[column_index] = Some(ResolvedColumnView {
+                column_index,
+                source_key: key,
+                view: column_view,
+            });
+        }
+    }
+
+    let warnings = view
+        .columns
+        .keys()
+        .filter(|key| !matched_keys.contains(*key))
+        .map(|key| {
+            warning(
+                format!("columns.{key}"),
+                "configured column matched no header",
+            )
+        })
+        .collect();
+
+    ResolvedColumns {
+        columns: resolved,
+        warnings,
+    }
+}
+
+pub fn resolve_column_reference(headers: &[String], key: &str) -> Option<usize> {
+    headers
+        .iter()
+        .position(|header| key.eq_ignore_ascii_case(header))
+        .or_else(|| {
+            let mut wildcard_matches = headers
+                .iter()
+                .enumerate()
+                .filter(|(_, header)| is_wildcard_pattern(key) && column_glob_matches(key, header))
+                .map(|(column, _)| column)
+                .collect::<Vec<_>>();
+            wildcard_matches.sort_unstable();
+            wildcard_matches.into_iter().next()
+        })
+}
+
+fn validate_raw_view(raw: RawSavedView) -> ValidatedSavedView {
+    let mut warnings = Vec::new();
+    let locale = raw.locale.and_then(|locale| {
+        if is_posix_locale(&locale) {
+            Some(locale)
+        } else {
+            warnings.push(warning(
+                "locale",
+                format!("unsupported POSIX-style locale '{locale}', falling back to en_US"),
+            ));
+            None
+        }
+    });
+    let filenames = raw
+        .filenames
+        .into_iter()
+        .filter_map(|pattern| validate_filename_pattern(pattern, &mut warnings))
+        .collect();
+    let columns = raw
+        .columns
+        .into_iter()
+        .filter_map(|(key, raw_column)| validate_column(key, raw_column, &mut warnings))
+        .collect();
+    let sort_count = raw.sort.len();
+    let sort = raw
+        .sort
+        .into_iter()
+        .take(MAX_SORT_KEYS)
+        .filter_map(|sort| validate_sort(sort, &mut warnings))
+        .collect::<Vec<_>>();
+    if sort_count > MAX_SORT_KEYS {
+        warnings.push(warning(
+            "sort",
+            format!("only the first {MAX_SORT_KEYS} sort keys are used"),
+        ));
+    }
+    let filters = raw
+        .filters
+        .into_iter()
+        .filter_map(|filter| validate_filter(filter, &mut warnings))
+        .collect();
+
+    ValidatedSavedView {
+        view: SavedView {
+            name: raw.name,
+            locale,
+            filenames,
+            columns,
+            sort,
+            filters,
+        },
+        warnings,
+    }
+}
+
+fn validate_filename_pattern(
+    raw: String,
+    warnings: &mut Vec<SavedViewWarning>,
+) -> Option<FilenamePattern> {
+    if raw.is_empty() {
+        warnings.push(warning("filenames", "empty filename pattern ignored"));
+        return None;
+    }
+    let kind = classify_filename_pattern(&raw);
+    match kind {
+        FilenamePatternKind::Regex => {
+            if let Err(err) = Regex::new(&raw) {
+                warnings.push(warning(
+                    "filenames",
+                    format!("invalid regex filename pattern '{raw}': {err}"),
+                ));
+                return None;
+            }
+        }
+        FilenamePatternKind::Glob => {
+            if let Err(message) = validate_glob_pattern(&raw) {
+                warnings.push(warning(
+                    "filenames",
+                    format!("invalid glob filename pattern '{raw}': {message}"),
+                ));
+                return None;
+            }
+        }
+        FilenamePatternKind::Exact => {}
+    }
+    Some(FilenamePattern { raw, kind })
+}
+
+fn classify_filename_pattern(raw: &str) -> FilenamePatternKind {
+    if raw.starts_with('^') || raw.ends_with('$') {
+        FilenamePatternKind::Regex
+    } else if raw.contains('*') || raw.contains('?') || raw.contains('[') {
+        FilenamePatternKind::Glob
+    } else {
+        FilenamePatternKind::Exact
+    }
+}
+
+fn best_match_rank(view: &SavedViewFile, basename: &str) -> Option<MatchRank> {
+    view.view
+        .filenames
+        .iter()
+        .filter_map(|pattern| match_filename_pattern(pattern, basename))
+        .min()
+}
+
+fn match_filename_pattern(pattern: &FilenamePattern, basename: &str) -> Option<MatchRank> {
+    match pattern.kind {
+        FilenamePatternKind::Exact => {
+            platform_eq(&pattern.raw, basename).then_some(MatchRank::Exact)
+        }
+        FilenamePatternKind::Glob => {
+            glob_matches(&pattern.raw, basename).then_some(MatchRank::Glob)
+        }
+        FilenamePatternKind::Regex => {
+            let pattern = if platform_case_insensitive() {
+                format!("(?i:{})", pattern.raw)
+            } else {
+                pattern.raw.clone()
+            };
+            Regex::new(&pattern)
+                .ok()
+                .is_some_and(|regex| regex.is_match(basename))
+                .then_some(MatchRank::Regex)
+        }
+    }
+}
+
+fn glob_matches(pattern: &str, value: &str) -> bool {
+    let regex_pattern = glob_to_regex(pattern);
+    Regex::new(&regex_pattern)
+        .ok()
+        .is_some_and(|regex| regex.is_match(value))
+}
+
+fn column_glob_matches(pattern: &str, value: &str) -> bool {
+    let regex_pattern = glob_to_regex_case_insensitive(pattern);
+    Regex::new(&regex_pattern)
+        .ok()
+        .is_some_and(|regex| regex.is_match(value))
+}
+
+fn glob_to_regex(pattern: &str) -> String {
+    let mut regex = String::from("^");
+    for ch in pattern.chars() {
+        match ch {
+            '*' => regex.push_str(".*"),
+            '?' => regex.push('.'),
+            '[' | ']' => regex.push(ch),
+            _ => regex.push_str(&regex::escape(&ch.to_string())),
+        }
+    }
+    regex.push('$');
+    if platform_case_insensitive() {
+        format!("(?i:{regex})")
+    } else {
+        regex
+    }
+}
+
+fn glob_to_regex_case_insensitive(pattern: &str) -> String {
+    format!("(?i:{})", glob_to_regex_base(pattern))
+}
+
+fn glob_to_regex_base(pattern: &str) -> String {
+    let mut regex = String::from("^");
+    for ch in pattern.chars() {
+        match ch {
+            '*' => regex.push_str(".*"),
+            '?' => regex.push('.'),
+            '[' | ']' => regex.push(ch),
+            _ => regex.push_str(&regex::escape(&ch.to_string())),
+        }
+    }
+    regex.push('$');
+    regex
+}
+
+fn wildcard_specificity(pattern: &str) -> usize {
+    pattern
+        .chars()
+        .filter(|ch| !matches!(ch, '*' | '?' | '[' | ']'))
+        .count()
+}
+
+fn platform_eq(left: &str, right: &str) -> bool {
+    if platform_case_insensitive() {
+        left.eq_ignore_ascii_case(right)
+    } else {
+        left == right
+    }
+}
+
+fn platform_case_insensitive() -> bool {
+    cfg!(any(target_os = "macos", target_os = "windows"))
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum MatchRank {
+    Exact,
+    Glob,
+    Regex,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ViewExtension {
+    Yml,
+    Yaml,
+}
+
+fn view_extension(path: &Path) -> Option<ViewExtension> {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some("yml") => Some(ViewExtension::Yml),
+        Some("yaml") => Some(ViewExtension::Yaml),
+        _ => None,
+    }
+}
+
+fn view_stem(path: &Path) -> Option<&str> {
+    path.file_stem().and_then(|stem| stem.to_str())
+}
+
+fn view_extension_priority(path: &Path) -> u8 {
+    match view_extension(path) {
+        Some(ViewExtension::Yml) => 0,
+        Some(ViewExtension::Yaml) => 1,
+        None => 2,
+    }
+}
+
+fn validate_glob_pattern(raw: &str) -> Result<(), &'static str> {
+    let mut open_bracket = false;
+    for ch in raw.chars() {
+        match ch {
+            '[' if open_bracket => return Err("nested character classes are not supported"),
+            '[' => open_bracket = true,
+            ']' if open_bracket => open_bracket = false,
+            ']' => return Err("unmatched closing bracket"),
+            _ => {}
+        }
+    }
+    if open_bracket {
+        Err("unmatched opening bracket")
+    } else {
+        Ok(())
+    }
+}
+
+fn validate_column(
+    key: String,
+    raw: RawColumnView,
+    warnings: &mut Vec<SavedViewWarning>,
+) -> Option<(String, ColumnView)> {
+    if key.is_empty() {
+        warnings.push(warning("columns", "empty column key ignored"));
+        return None;
+    }
+    if is_wildcard_pattern(&key) {
+        if let Err(message) = validate_glob_pattern(&key) {
+            warnings.push(warning(
+                format!("columns.{key}"),
+                format!("invalid wildcard column key: {message}"),
+            ));
+            return None;
+        }
+    }
+    let field = |name: &str| format!("columns.{key}.{name}");
+    let column_type = raw.column_type.and_then(|value| {
+        parse_column_type(&value).or_else(|| {
+            warnings.push(warning(
+                field("type"),
+                format!("unknown column type '{value}'"),
+            ));
+            None
+        })
+    });
+    let format = raw.format.and_then(|value| {
+        parse_display_format(&value).or_else(|| {
+            warnings.push(warning(
+                field("format"),
+                format!("unknown format '{value}'"),
+            ));
+            None
+        })
+    });
+    let mask = raw.mask.and_then(|value| match parse_number_mask(&value) {
+        Ok(mask) => Some(mask),
+        Err(message) => {
+            warnings.push(warning(
+                field("mask"),
+                format!("invalid numeric mask '{value}': {message}"),
+            ));
+            None
+        }
+    });
+    let width = raw.width.and_then(|value| match parse_width(value) {
+        Ok(width) => Some(width),
+        Err(message) => {
+            warnings.push(warning(field("width"), message));
+            None
+        }
+    });
+    let align = raw.align.and_then(|value| {
+        parse_align(&value).or_else(|| {
+            warnings.push(warning(field("align"), format!("unknown align '{value}'")));
+            None
+        })
+    });
+    if format == Some(DisplayFormat::Mask) && mask.is_none() {
+        warnings.push(warning(field("mask"), "format: mask requires a valid mask"));
+    }
+    if matches!(format, Some(DisplayFormat::Locale | DisplayFormat::Mask))
+        && !matches!(column_type, Some(ColumnType::Number(_)) | None)
+    {
+        warnings.push(warning(
+            field("format"),
+            "number formats are ignored for non-number column types",
+        ));
+    }
+
+    Some((
+        key,
+        ColumnView {
+            column_type,
+            format,
+            mask,
+            width,
+            align,
+            visible: raw.visible,
+        },
+    ))
+}
+
+fn validate_sort(raw: RawSortKey, warnings: &mut Vec<SavedViewWarning>) -> Option<SortKey> {
+    let direction = parse_sort_direction(&raw.direction).or_else(|| {
+        warnings.push(warning(
+            "sort.direction",
+            format!("unknown sort direction '{}'", raw.direction),
+        ));
+        None
+    })?;
+    let kind = parse_sort_kind(&raw.kind).or_else(|| {
+        warnings.push(warning(
+            "sort.kind",
+            format!("unknown sort kind '{}'", raw.kind),
+        ));
+        None
+    })?;
+    Some(SortKey {
+        column: raw.column,
+        direction,
+        kind,
+    })
+}
+
+fn validate_filter(
+    raw: RawSavedFilter,
+    warnings: &mut Vec<SavedViewWarning>,
+) -> Option<SavedFilter> {
+    let action = parse_filter_action(&raw.action).or_else(|| {
+        warnings.push(warning(
+            "filters.action",
+            format!("unknown filter action '{}'", raw.action),
+        ));
+        None
+    })?;
+    let kind = parse_filter_kind(&raw.kind).or_else(|| {
+        warnings.push(warning(
+            "filters.kind",
+            format!("unknown filter kind '{}'", raw.kind),
+        ));
+        None
+    })?;
+    if kind == FilterKind::Regex {
+        if let Err(err) = Regex::new(&raw.condition) {
+            warnings.push(warning(
+                "filters.condition",
+                format!("invalid regex filter condition '{}': {err}", raw.condition),
+            ));
+            return None;
+        }
+    }
+    Some(SavedFilter {
+        column: raw.column,
+        action,
+        kind,
+        condition: raw.condition,
+    })
+}
+
+fn parse_column_type(value: &str) -> Option<ColumnType> {
+    match value {
+        "string" | "text" => Some(ColumnType::String(StringKind::Text)),
+        "date" => Some(ColumnType::String(StringKind::Date)),
+        "ip" => Some(ColumnType::String(StringKind::Ip)),
+        "number" | "float" => Some(ColumnType::Number(NumberKind::Float)),
+        "integer" => Some(ColumnType::Number(NumberKind::Int)),
+        "semver" => Some(ColumnType::Number(NumberKind::SemVer)),
+        "boolean" | "word" => Some(ColumnType::Boolean(BooleanKind::Word)),
+        "char" => Some(ColumnType::Boolean(BooleanKind::Char)),
+        "bit" => Some(ColumnType::Boolean(BooleanKind::Bit)),
+        _ => None,
+    }
+}
+
+fn parse_display_format(value: &str) -> Option<DisplayFormat> {
+    match value {
+        "plain" => Some(DisplayFormat::Plain),
+        "locale" => Some(DisplayFormat::Locale),
+        "mask" => Some(DisplayFormat::Mask),
+        "uppercase" => Some(DisplayFormat::Uppercase),
+        "lowercase" => Some(DisplayFormat::Lowercase),
+        "char" => Some(DisplayFormat::Char),
+        "bit" => Some(DisplayFormat::Bit),
+        "word" => Some(DisplayFormat::Word),
+        _ => None,
+    }
+}
+
+fn parse_number_mask(value: &str) -> Result<NumberMask, &'static str> {
+    let (grouped, rest) = if let Some(rest) = value.strip_prefix("#,##") {
+        (true, rest)
+    } else {
+        (false, value)
+    };
+    let Some(decimal) = rest.strip_prefix('0') else {
+        return Err("mask must contain a required 0 digit");
+    };
+    let decimal_places = if decimal.is_empty() {
+        0
+    } else if let Some(places) = decimal.strip_prefix('.') {
+        if places.is_empty() || !places.chars().all(|ch| ch == '0') {
+            return Err("decimal mask must use one or more 0 placeholders");
+        }
+        places.len()
+    } else {
+        return Err("unsupported mask syntax");
+    };
+    Ok(NumberMask {
+        raw: value.to_owned(),
+        grouped,
+        decimal_places,
+    })
+}
+
+fn parse_width(value: RawColumnWidth) -> Result<ColumnWidth, String> {
+    match value {
+        RawColumnWidth::Fixed(width) if width > 0 => Ok(ColumnWidth::Fixed(width)),
+        RawColumnWidth::Fixed(_) => Err("fixed width must be greater than zero".to_owned()),
+        RawColumnWidth::Mode(value) => match value.as_str() {
+            "header" => Ok(ColumnWidth::Header),
+            "content" => Ok(ColumnWidth::Content),
+            "mode" => Ok(ColumnWidth::Mode),
+            "max" => Ok(ColumnWidth::Max),
+            _ => Err(format!("unknown width '{value}'")),
+        },
+    }
+}
+
+fn parse_align(value: &str) -> Option<ColumnAlign> {
+    match value {
+        "left" => Some(ColumnAlign::Left),
+        "right" => Some(ColumnAlign::Right),
+        _ => None,
+    }
+}
+
+fn parse_sort_direction(value: &str) -> Option<SortDirection> {
+    match value {
+        "asc" => Some(SortDirection::Asc),
+        "desc" => Some(SortDirection::Desc),
+        _ => None,
+    }
+}
+
+fn parse_sort_kind(value: &str) -> Option<SortKind> {
+    match value {
+        "lexical" => Some(SortKind::Lexical),
+        "natural" => Some(SortKind::Natural),
+        "numeric" => Some(SortKind::Numeric),
+        "type" => Some(SortKind::Type),
+        _ => None,
+    }
+}
+
+fn parse_filter_action(value: &str) -> Option<FilterAction> {
+    match value {
+        "in" => Some(FilterAction::In),
+        "out" => Some(FilterAction::Out),
+        _ => None,
+    }
+}
+
+fn parse_filter_kind(value: &str) -> Option<FilterKind> {
+    match value {
+        "text" => Some(FilterKind::Text),
+        "regex" => Some(FilterKind::Regex),
+        "numeric" => Some(FilterKind::Numeric),
+        _ => None,
+    }
+}
+
+fn is_posix_locale(value: &str) -> bool {
+    let mut chars = value.chars();
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_alphabetic()
+        && chars.all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '.' | '-' | '@'))
+}
+
+fn is_wildcard_pattern(value: &str) -> bool {
+    value.contains('*') || value.contains('?') || value.contains('[')
+}
+
+fn warning(field: impl Into<String>, message: impl Into<String>) -> SavedViewWarning {
+    SavedViewWarning {
+        field: field.into(),
+        message: message.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_saved_view_with_aliases_sort_and_filters() {
+        let parsed = parse_saved_view_yaml(
+            r##"
+name: shards
+locale: en_US
+filenames:
+  - cat_shards.txt
+  - "*shards*"
+columns:
+  Index:
+    type: string
+    width: 20
+  docs:
+    type: integer
+    format: mask
+    mask: "#,##0"
+    visible: false
+sort:
+  - column: docs
+    direction: desc
+    kind: numeric
+filters:
+  - column: docs
+    action: in
+    kind: numeric
+    condition: ">0"
+"##,
+        )
+        .expect("parse");
+
+        assert!(parsed.warnings.is_empty());
+        assert_eq!(parsed.view.name, "shards");
+        assert_eq!(parsed.view.locale.as_deref(), Some("en_US"));
+        assert_eq!(parsed.view.filenames[0].kind, FilenamePatternKind::Exact);
+        assert_eq!(parsed.view.filenames[1].kind, FilenamePatternKind::Glob);
+        assert_eq!(
+            parsed.view.columns.get("docs").expect("docs").column_type,
+            Some(ColumnType::Number(NumberKind::Int))
+        );
+        assert_eq!(parsed.view.sort.len(), 1);
+        assert_eq!(parsed.view.filters.len(), 1);
+    }
+
+    #[test]
+    fn invalid_semantic_values_are_warnings() {
+        let parsed = parse_saved_view_yaml(
+            r#"
+name: bad
+locale: "?"
+filenames:
+  - "[broken"
+columns:
+  "*count":
+    type: text
+    format: mask
+    mask: "bad"
+sort:
+  - column: count
+    direction: sideways
+    kind: numeric
+filters:
+  - column: name
+    action: in
+    kind: regex
+    condition: "["
+"#,
+        )
+        .expect("parse");
+
+        assert!(parsed.view.filenames.is_empty());
+        assert!(parsed.view.sort.is_empty());
+        assert!(parsed.view.filters.is_empty());
+        assert!(parsed.warnings.len() >= 5);
+    }
+
+    #[test]
+    fn limits_sort_keys_to_three() {
+        let parsed = parse_saved_view_yaml(
+            r#"
+name: sort
+filenames: [data.csv]
+sort:
+  - { column: a, direction: asc, kind: lexical }
+  - { column: b, direction: asc, kind: lexical }
+  - { column: c, direction: asc, kind: lexical }
+  - { column: d, direction: asc, kind: lexical }
+"#,
+        )
+        .expect("parse");
+
+        assert_eq!(parsed.view.sort.len(), MAX_SORT_KEYS);
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|warning| warning.field == "sort"));
+    }
+
+    #[test]
+    fn saved_view_dir_uses_tabview_views_under_config_root() {
+        assert_eq!(
+            saved_view_dir(Some(Path::new("/tmp/config"))),
+            Some(PathBuf::from("/tmp/config/tabview/views"))
+        );
+    }
+
+    #[test]
+    fn discovers_yml_before_yaml_duplicate_stems() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let views = dir.path().join("views");
+        std::fs::create_dir(&views).expect("views dir");
+        std::fs::write(
+            views.join("cat-shards.yaml"),
+            "name: cat-shards\nfilenames: [ignored.txt]\n",
+        )
+        .expect("write yaml");
+        std::fs::write(
+            views.join("cat-shards.yml"),
+            "name: cat-shards\nfilenames: [cat_shards.txt]\n",
+        )
+        .expect("write yml");
+
+        let discovered = discover_saved_views_in_dir(&views);
+
+        assert_eq!(discovered.views.len(), 1);
+        assert_eq!(discovered.views[0].path, views.join("cat-shards.yml"));
+        assert_eq!(discovered.views[0].canonical_name, "cat-shards");
+        assert_eq!(discovered.warnings.len(), 1);
+    }
+
+    #[test]
+    fn malformed_saved_view_warns_without_blocking_valid_views() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let views = dir.path().join("views");
+        std::fs::create_dir(&views).expect("views dir");
+        std::fs::write(views.join("bad.yml"), "name: [").expect("write bad");
+        std::fs::write(
+            views.join("good.yml"),
+            "name: good\nfilenames: [data.csv]\n",
+        )
+        .expect("write good");
+
+        let discovered = discover_saved_views_in_dir(&views);
+
+        assert_eq!(discovered.views.len(), 1);
+        assert_eq!(discovered.views[0].canonical_name, "good");
+        assert_eq!(discovered.warnings.len(), 1);
+    }
+
+    #[test]
+    fn selects_exact_before_glob_before_regex() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let views = dir.path().join("views");
+        std::fs::create_dir(&views).expect("views dir");
+        std::fs::write(
+            views.join("regex.yml"),
+            "name: regex\nfilenames: ['^cat_.*txt$']\n",
+        )
+        .expect("write regex");
+        std::fs::write(
+            views.join("glob.yml"),
+            "name: glob\nfilenames: ['*shards*']\n",
+        )
+        .expect("write glob");
+        std::fs::write(
+            views.join("exact.yml"),
+            "name: exact\nfilenames: [cat_shards.txt]\n",
+        )
+        .expect("write exact");
+        let discovered = discover_saved_views_in_dir(&views);
+
+        let selected = select_saved_view(
+            &discovered.views,
+            SavedViewSelection::Auto {
+                input_path: Path::new("/tmp/cat_shards.txt"),
+            },
+        )
+        .expect("selected");
+
+        assert_eq!(selected.view.canonical_name, "exact");
+    }
+
+    #[test]
+    fn force_selection_normalizes_yaml_extension() {
+        let view = SavedViewFile {
+            path: PathBuf::from("cat-shards.yml"),
+            canonical_name: "cat-shards".to_owned(),
+            view: SavedView {
+                name: "cat-shards".to_owned(),
+                locale: None,
+                filenames: Vec::new(),
+                columns: BTreeMap::new(),
+                sort: Vec::new(),
+                filters: Vec::new(),
+            },
+            warnings: Vec::new(),
+        };
+
+        let views = [view];
+        let selected = select_saved_view(
+            &views,
+            SavedViewSelection::Force {
+                name: "cat-shards.yaml",
+            },
+        )
+        .expect("selected");
+
+        assert_eq!(selected.view.canonical_name, "cat-shards");
+    }
+
+    #[test]
+    fn resolves_columns_exact_case_insensitive_before_wildcard() {
+        let parsed = parse_saved_view_yaml(
+            r#"
+name: columns
+filenames: [data.csv]
+columns:
+  count:
+    width: 20
+  "*count":
+    visible: false
+"#,
+        )
+        .expect("parse");
+        let headers = vec!["Count".to_owned(), "docs_count".to_owned()];
+
+        let resolved = resolve_columns(&parsed.view, &headers);
+
+        assert!(resolved.warnings.is_empty());
+        assert_eq!(
+            resolved.columns[0].as_ref().expect("count").source_key,
+            "count"
+        );
+        assert_eq!(
+            resolved.columns[0].as_ref().expect("count").view.width,
+            Some(ColumnWidth::Fixed(20))
+        );
+        assert_eq!(
+            resolved.columns[1].as_ref().expect("docs_count").source_key,
+            "*count"
+        );
+        assert_eq!(
+            resolved.columns[1]
+                .as_ref()
+                .expect("docs_count")
+                .view
+                .visible,
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn resolves_wildcard_by_specificity_then_key_order_and_warns_unmatched() {
+        let parsed = parse_saved_view_yaml(
+            r#"
+name: columns
+filenames: [data.csv]
+columns:
+  "*count":
+    visible: false
+  "docs_count*":
+    width: 10
+  missing:
+    width: 5
+"#,
+        )
+        .expect("parse");
+        let headers = vec!["DOCS_COUNT".to_owned()];
+
+        let resolved = resolve_columns(&parsed.view, &headers);
+
+        assert_eq!(
+            resolved.columns[0].as_ref().expect("docs_count").source_key,
+            "docs_count*"
+        );
+        assert_eq!(
+            resolved.columns[0].as_ref().expect("docs_count").view.width,
+            Some(ColumnWidth::Fixed(10))
+        );
+        assert!(resolved
+            .warnings
+            .iter()
+            .any(|warning| warning.field == "columns.missing"));
+    }
+}

@@ -1,0 +1,180 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tabview.local/schemas/view.schema.json",
+  "title": "Tabview Saved View",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "filenames"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Optional human-readable saved view label. The canonical view name is the file stem."
+    },
+    "locale": {
+      "type": "string",
+      "pattern": "^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*(?:\\.[A-Za-z0-9_-]+)?(?:@[A-Za-z0-9_-]+)?$",
+      "minLength": 1,
+      "description": "Optional POSIX-style view-level locale identifier for locale-aware number formatting. Defaults to system locale and falls back to en_US."
+    },
+    "filenames": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "description": "Exact basename, glob pattern, or regex pattern."
+      }
+    },
+    "columns": {
+      "type": "object",
+      "default": {},
+      "propertyNames": {
+        "type": "string",
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/column"
+      }
+    },
+    "sort": {
+      "type": "array",
+      "maxItems": 3,
+      "items": {
+        "$ref": "#/$defs/sort"
+      }
+    },
+    "filters": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/filter"
+      }
+    }
+  },
+  "$defs": {
+    "column": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "type": {
+          "$ref": "#/$defs/columnType"
+        },
+        "format": {
+          "$ref": "#/$defs/format"
+        },
+        "mask": {
+          "type": "string",
+          "pattern": "^(#,##)?0(\\.0+)?$",
+          "description": "Supported numeric masks include 0, 0.00, #,##0, and #,##0.00. Masks override locale separators."
+        },
+        "width": {
+          "oneOf": [
+            {
+              "type": "integer",
+              "minimum": 1
+            },
+            {
+              "type": "string",
+              "enum": ["header", "content", "mode", "max"]
+            }
+          ]
+        },
+        "align": {
+          "type": "string",
+          "enum": ["left", "right"]
+        },
+        "visible": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether the column is initially visible. Omitted defaults to true."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "format": {
+                "const": "mask"
+              }
+            },
+            "required": ["format"]
+          },
+          "then": {
+            "required": ["mask"]
+          }
+        }
+      ]
+    },
+    "columnType": {
+      "type": "string",
+      "enum": [
+        "string",
+        "text",
+        "date",
+        "number",
+        "float",
+        "integer",
+        "semver",
+        "ip",
+        "boolean",
+        "char",
+        "bit",
+        "word"
+      ]
+    },
+    "format": {
+      "type": "string",
+      "enum": [
+        "plain",
+        "locale",
+        "mask",
+        "uppercase",
+        "lowercase",
+        "char",
+        "bit",
+        "word"
+      ]
+    },
+    "sort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["column", "direction", "kind"],
+      "properties": {
+        "column": {
+          "type": "string",
+          "minLength": 1
+        },
+        "direction": {
+          "type": "string",
+          "enum": ["asc", "desc"]
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["lexical", "natural", "numeric", "type"]
+        }
+      }
+    },
+    "filter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["column", "action", "kind", "condition"],
+      "properties": {
+        "column": {
+          "type": "string",
+          "minLength": 1
+        },
+        "action": {
+          "type": "string",
+          "enum": ["in", "out"]
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["text", "regex", "numeric"]
+        },
+        "condition": {
+          "type": "string"
+        }
+      }
+    }
+  }
+}
