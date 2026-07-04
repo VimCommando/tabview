@@ -763,7 +763,7 @@ fn collect_style_specs_at(
 fn is_style_leaf(mapping: &Mapping) -> bool {
     ["fg", "bg", "modifiers"]
         .into_iter()
-        .any(|key| mapping.contains_key(key))
+        .any(|key| mapping_get_string(mapping, key).is_some())
 }
 
 fn is_style_field(key: &str) -> bool {
@@ -788,20 +788,23 @@ fn validate_style_token(token: &str) -> Result<(), String> {
 
 fn style_spec_from_mapping(mapping: &Mapping, path: &[String]) -> Result<StyleSpec, String> {
     let token = path.join(".");
-    let fg = mapping
-        .get("fg")
+    let fg = mapping_get_string(mapping, "fg")
         .map(|value| yaml_string_ref(value, &format!("styles.{token}.fg")))
         .transpose()?;
-    let bg = mapping
-        .get("bg")
+    let bg = mapping_get_string(mapping, "bg")
         .map(|value| yaml_string_ref(value, &format!("styles.{token}.bg")))
         .transpose()?;
-    let modifiers = mapping
-        .get("modifiers")
+    let modifiers = mapping_get_string(mapping, "modifiers")
         .map(|value| yaml_modifier_sequence(value, &format!("styles.{token}.modifiers")))
         .transpose()?
         .unwrap_or_default();
     Ok(StyleSpec { fg, bg, modifiers })
+}
+
+fn mapping_get_string<'a>(mapping: &'a Mapping, key: &str) -> Option<&'a Value> {
+    mapping.iter().find_map(|(candidate, mapped)| {
+        matches!(candidate, Value::String(candidate) if candidate == key).then_some(mapped)
+    })
 }
 
 fn yaml_string_ref(value: &Value, field: &str) -> Result<String, String> {

@@ -133,9 +133,9 @@ pub fn render_table_with_theme(
                     view.source_cell_style_context(idx, source_column, cell, search_query.as_ref()),
                 )
             });
-            let should_preserve_fg = context.as_ref().is_some_and(|(_, context)| {
-                context.conditional_color.is_some() || context.search_match
-            });
+            let should_preserve_fg = context
+                .as_ref()
+                .is_some_and(|(_, context)| context.conditional_color.is_some());
             let mut style = theme.style("table.cell");
             if let Some(color_ref) = context
                 .as_ref()
