@@ -2876,7 +2876,7 @@ columns:
         );
         assert_eq!(
             view.conditional_color_for_visible_cell(1, 1),
-            Some("gradient(4,8,green,yellow)".to_owned())
+            Some("gradient(4;8;5:green6:yellow)".to_owned())
         );
         assert_eq!(
             view.visible_rows_vec(),

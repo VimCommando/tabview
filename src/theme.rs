@@ -405,13 +405,21 @@ fn discover_themes_in_root(
             continue;
         };
         let canonical_name = stem.to_owned();
-        if !seen.insert(canonical_name.clone()) && theme_extension(&path) == Some("yaml") {
-            discovery.warnings.push(ThemeWarning {
-                field: path.display().to_string(),
-                message: format!(
+        if !seen.insert(canonical_name.clone()) {
+            let message = if theme_extension(&path) == Some("yaml") {
+                format!(
                     "duplicate theme '{}': .yml takes precedence over .yaml",
                     canonical_name
-                ),
+                )
+            } else {
+                format!(
+                    "duplicate theme '{}': first discovered file takes precedence",
+                    canonical_name
+                )
+            };
+            discovery.warnings.push(ThemeWarning {
+                field: path.display().to_string(),
+                message,
             });
             continue;
         }
@@ -1340,12 +1348,42 @@ impl ConditionalColorRule {
 pub fn identifier_color_ref(index: usize, colors: &IdentifierColors) -> String {
     match colors {
         IdentifierColors::Auto => format!("identifier({index})"),
-        IdentifierColors::Colors(colors) => format!("identifier({index},{})", colors.join(",")),
+        IdentifierColors::Colors(colors) => {
+            format!("identifier({index};{})", encode_color_list(colors))
+        }
     }
 }
 
 fn gradient_color_ref(colors: &[String], bucket: usize, steps: usize) -> String {
-    format!("gradient({bucket},{steps},{})", colors.join(","))
+    format!("gradient({bucket};{steps};{})", encode_color_list(colors))
+}
+
+fn encode_color_list(colors: &[String]) -> String {
+    let mut encoded = String::new();
+    for color in colors {
+        encoded.push_str(&color.len().to_string());
+        encoded.push(':');
+        encoded.push_str(color);
+    }
+    encoded
+}
+
+fn parse_encoded_color_list(value: &str) -> Option<Vec<String>> {
+    let mut colors = Vec::new();
+    let mut cursor = 0;
+    while cursor < value.len() {
+        let colon = value[cursor..].find(':')? + cursor;
+        let len = value[cursor..colon].parse::<usize>().ok()?;
+        let start = colon + 1;
+        let end = start.checked_add(len)?;
+        let color = value.get(start..end)?;
+        if color.is_empty() {
+            return None;
+        }
+        colors.push(color.to_owned());
+        cursor = end;
+    }
+    Some(colors)
 }
 
 fn conditional_value_matches(
@@ -1386,6 +1424,17 @@ enum IdentifierColorRefColors {
 
 fn parse_identifier_ref(value: &str) -> Option<IdentifierColorRef> {
     let inner = value.strip_prefix("identifier(")?.strip_suffix(')')?;
+    if let Some((index, colors)) = inner.split_once(';') {
+        let colors = parse_encoded_color_list(colors)?;
+        return Some(IdentifierColorRef {
+            index: index.parse().ok()?,
+            colors: if colors.is_empty() {
+                IdentifierColorRefColors::Auto
+            } else {
+                IdentifierColorRefColors::Colors(colors)
+            },
+        });
+    }
     let mut parts = inner.split(',');
     let index = parts.next()?.parse().ok()?;
     let colors = parts
@@ -1411,6 +1460,17 @@ struct GradientColorRef {
 
 fn parse_gradient_ref(value: &str) -> Option<GradientColorRef> {
     let inner = value.strip_prefix("gradient(")?.strip_suffix(')')?;
+    if inner.contains(';') {
+        let mut parts = inner.splitn(3, ';');
+        let bucket = parts.next()?.parse().ok()?;
+        let steps = parts.next()?.parse().ok()?;
+        let colors = parse_encoded_color_list(parts.next()?)?;
+        return (!colors.is_empty()).then_some(GradientColorRef {
+            bucket,
+            steps,
+            colors,
+        });
+    }
     let mut parts = inner.split(',');
     let bucket = parts.next()?.parse().ok()?;
     let steps = parts.next()?.parse().ok()?;
@@ -1732,6 +1792,37 @@ identifiers:
     }
 
     #[test]
+    fn generated_identifier_refs_allow_commas_in_color_aliases() {
+        let theme = parse_theme_yaml(
+            &full_theme(
+                r##"
+  "red,alias": "#ff0000ff"
+  "green,alias": "#00ff00ff"
+"##,
+            ),
+            TerminalColorMode::TrueColor,
+        )
+        .expect("theme");
+        let colors =
+            IdentifierColors::Colors(vec!["red,alias".to_owned(), "green,alias".to_owned()]);
+
+        assert_eq!(
+            theme
+                .conditional_style(&identifier_color_ref(0, &colors))
+                .expect("identifier")
+                .fg,
+            Some(Color::Rgb(128, 0, 0))
+        );
+        assert_eq!(
+            theme
+                .conditional_style(&identifier_color_ref(1, &colors))
+                .expect("identifier")
+                .fg,
+            Some(Color::Rgb(0, 128, 0))
+        );
+    }
+
+    #[test]
     fn blue_identifier_shades_start_from_dim_blue() {
         assert_eq!(dark_identifier_rgb((0, 0, 255)), (0, 0, 128));
     }
@@ -1800,6 +1891,35 @@ styles: nope
             warning
                 .message
                 .contains("does not match file name 'from-file'")
+        }));
+    }
+
+    #[test]
+    fn discovery_warns_and_keeps_first_duplicate_theme_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let theme_dir = dir.path().join(THEME_DIR);
+        fs::create_dir_all(&theme_dir).expect("theme dir");
+        fs::write(
+            theme_dir.join("duplicate.yml"),
+            full_theme_with_text_and_style_overrides("\"#111111ff\"", "", &[]),
+        )
+        .expect("theme file");
+        fs::write(
+            theme_dir.join("duplicate.yaml"),
+            full_theme_with_text_and_style_overrides("\"#eeeeeeff\"", "", &[]),
+        )
+        .expect("theme file");
+
+        let discovery = discover_themes_in_root(dir.path(), None, TerminalColorMode::TrueColor);
+
+        assert_eq!(
+            discovery.themes["duplicate"].style("table.cell").fg,
+            Some(Color::Rgb(17, 17, 17))
+        );
+        assert!(discovery.warnings.iter().any(|warning| {
+            warning
+                .message
+                .contains("duplicate theme 'duplicate': .yml takes precedence over .yaml")
         }));
     }
 
@@ -1881,6 +2001,39 @@ styles: nope
         assert_eq!(
             theme.conditional_style(&middle).expect("middle").fg,
             Some(Color::Rgb(255, 146, 146))
+        );
+        assert_eq!(
+            theme.conditional_style(&end).expect("end").fg,
+            Some(Color::Rgb(255, 0, 0))
+        );
+    }
+
+    #[test]
+    fn generated_gradient_refs_allow_commas_in_color_aliases() {
+        let theme = parse_theme_yaml(
+            &full_theme(
+                r##"
+  "white,alias": "#ffffffff"
+  "red,alias": "#ff0000ff"
+"##,
+            ),
+            TerminalColorMode::TrueColor,
+        )
+        .expect("theme");
+        let rule = ConditionalColorRule::AutoGradient {
+            colors: vec!["white,alias".to_owned(), "red,alias".to_owned()],
+            steps: 2,
+        };
+        let start = rule
+            .color_for("0", "0", Some(0.0), Some((0.0, 1.0)))
+            .expect("start");
+        let end = rule
+            .color_for("1", "1", Some(1.0), Some((0.0, 1.0)))
+            .expect("end");
+
+        assert_eq!(
+            theme.conditional_style(&start).expect("start").fg,
+            Some(Color::Rgb(255, 255, 255))
         );
         assert_eq!(
             theme.conditional_style(&end).expect("end").fg,
