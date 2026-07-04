@@ -166,6 +166,8 @@ styles:
     selected:
       fg: text
       bg: dark_blue
+    hidden_marker:
+      fg: muted
   popup:
     background:
       fg: text
@@ -174,6 +176,15 @@ styles:
       fg: cyan
       bg: dark_blue
     title:
+      fg: gray
+      bg: dark_blue
+    body:
+      fg: text
+      bg: dark_blue
+    disabled:
+      fg: muted
+      bg: dark_blue
+    active:
       fg: gray
       bg: dark_blue
     action:
@@ -186,6 +197,10 @@ styles:
     highlight:
       fg: yellow
       modifiers: [underline]
+  message:
+    footer:
+      fg: yellow
+      bg: ui_blue
 ```
 
 Named 16-color values use tabview's built-in cmdzro base palette; in truecolor
