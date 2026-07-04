@@ -2119,7 +2119,7 @@ fn conditional_value_yaml(value: &ConditionalValue) -> String {
     match value {
         ConditionalValue::Bool(value) => value.to_string(),
         ConditionalValue::Number(value) => value.to_string(),
-        ConditionalValue::String(value) => yaml_scalar(value),
+        ConditionalValue::String(value) => yaml_quoted_scalar(value),
     }
 }
 
@@ -2140,6 +2140,11 @@ fn yaml_scalar(value: &str) -> String {
     } else {
         format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
     }
+}
+
+#[cfg(feature = "saved-views")]
+fn yaml_quoted_scalar(value: &str) -> String {
+    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
 }
 
 pub fn column_widths(rows: &[Vec<String>], mode: ColumnWidthMode, gap: usize) -> Vec<usize> {
@@ -2846,6 +2851,31 @@ columns:
             view.visible_rows_vec(),
             rows(&[&["active", "5%"], &["idle", "50%"], &["down", "95%"]])
         );
+    }
+
+    #[cfg(feature = "saved-views")]
+    #[test]
+    fn saved_view_yaml_quotes_string_match_values_that_look_numeric() {
+        let mut view = TableView::classify(rows(&[&["Code"], &["10"]]), Viewport::new(10, 1));
+        let parsed = crate::saved_views::parse_saved_view_yaml(
+            r#"
+name: colors
+filenames: [data.csv]
+columns:
+  Code:
+    colors:
+      - match:
+          "10": green
+"#,
+        )
+        .expect("parse");
+        let headers = view.header().expect("header").to_vec();
+        let resolved = crate::saved_views::resolve_columns(&parsed.view, &headers);
+        view.apply_saved_columns(&resolved, None);
+
+        let yaml = view.to_saved_view_yaml("colors", "data.csv", None);
+
+        assert!(yaml.contains("          \"10\": green"));
     }
 
     #[cfg(feature = "saved-views")]
