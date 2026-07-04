@@ -369,10 +369,8 @@ fn overlay_style(mut base: Style, overlay: Style) -> Style {
 }
 
 fn overlay_selection_style(mut base: Style, selected: Style) -> Style {
-    if base.fg.is_none() {
-        if let Some(fg) = selected.fg {
-            base = base.fg(fg);
-        }
+    if let Some(fg) = selected.fg {
+        base = base.fg(fg);
     }
     if let Some(bg) = selected.bg {
         base = base.bg(bg);
@@ -980,7 +978,7 @@ mod tests {
 
         assert_eq!(buffer[(0, 2)].style().fg, Some(Color::Cyan));
         assert_eq!(buffer[(7, 2)].style().fg, Some(Color::Indexed(6)));
-        assert_eq!(buffer[(0, 3)].style().fg, Some(Color::Indexed(2)));
+        assert_eq!(buffer[(0, 3)].style().fg, Some(Color::Indexed(248)));
         assert_eq!(buffer[(7, 3)].style().fg, Some(Color::Magenta));
     }
 
@@ -1009,7 +1007,7 @@ columns:
         let mut buffer = Buffer::empty(area);
         render_table(&mut view, area, &mut buffer);
 
-        assert_eq!(buffer[(0, 3)].style().fg, Some(Color::Magenta));
+        assert_eq!(buffer[(0, 3)].style().fg, Some(Color::Indexed(248)));
     }
 
     #[test]
@@ -1376,7 +1374,7 @@ columns:
         let theme = crate::theme::default_theme();
         render_table_with_theme(&mut view, area, &mut buffer, &theme, Some("idle"));
 
-        assert_eq!(buffer[(0, 3)].style().fg, Some(Color::Indexed(2)));
+        assert_eq!(buffer[(0, 3)].style().fg, Some(Color::Indexed(248)));
         assert_eq!(buffer[(0, 4)].style().fg, Some(Color::Yellow));
     }
 
