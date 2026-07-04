@@ -87,7 +87,6 @@ pub fn render_table_with_theme(
                     hidden_boundaries: Some(&hidden_boundaries(view)),
                     marker_style: theme.style("table.hidden_marker"),
                     prefix_style: Some(theme.style_or("table.header_glyph", "table.divider")),
-                    selected_overrides_fg: true,
                     cell_styles: None,
                 },
             );
@@ -149,7 +148,6 @@ pub fn render_table_with_theme(
                 hidden_boundaries: None,
                 marker_style: theme.style("table.hidden_marker"),
                 prefix_style: None,
-                selected_overrides_fg: false,
                 cell_styles: Some(&cell_styles),
             },
         );
@@ -297,7 +295,6 @@ struct RowRender<'a> {
     hidden_boundaries: Option<&'a [bool]>,
     marker_style: Style,
     prefix_style: Option<Style>,
-    selected_overrides_fg: bool,
     cell_styles: Option<&'a [Style]>,
 }
 
@@ -314,11 +311,7 @@ fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
             .copied()
             .unwrap_or(render.style);
         let style = if render.selected_column == Some(column) {
-            if render.selected_overrides_fg {
-                overlay_style(base_style, render.selected_style)
-            } else {
-                overlay_selection_style(base_style, render.selected_style)
-            }
+            overlay_style(base_style, render.selected_style)
         } else {
             base_style
         };
@@ -365,18 +358,6 @@ fn overlay_style(mut base: Style, overlay: Style) -> Style {
     }
     base = base.add_modifier(overlay.add_modifier);
     base = base.remove_modifier(overlay.sub_modifier);
-    base
-}
-
-fn overlay_selection_style(mut base: Style, selected: Style) -> Style {
-    if let Some(fg) = selected.fg {
-        base = base.fg(fg);
-    }
-    if let Some(bg) = selected.bg {
-        base = base.bg(bg);
-    }
-    base = base.add_modifier(selected.add_modifier);
-    base = base.remove_modifier(selected.sub_modifier);
     base
 }
 
