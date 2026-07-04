@@ -1,11 +1,12 @@
 mod column;
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use unicode_width::UnicodeWidthStr;
 
 use crate::ops::filter::{ActiveFilter, FilterCondition, FilterKind, FilterMode, FilterParseError};
-use crate::ops::search::contains_case_insensitive;
+use crate::ops::search::{contains_case_insensitive, CaseInsensitiveQuery};
 use crate::ops::sort::{
     parse_bool_key, parse_numeric_scalar, sort_rows_by_specs, NumericColumnProfile, SortDirection,
     SortMode, SortSpec,
@@ -32,8 +33,8 @@ pub struct Position {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VisibleCellStyleContext {
-    pub conditional_color: Option<String>,
+pub struct VisibleCellStyleContext<'a> {
+    pub conditional_color: Option<Cow<'a, str>>,
     pub search_match: bool,
 }
 
@@ -499,7 +500,10 @@ impl TableView {
         let Some(rendered) = rendered_row.get(visible_column) else {
             return false;
         };
-        self.visible_cell_style_context(row, visible_column, rendered, Some(query))
+        let Some(query) = CaseInsensitiveQuery::new(query) else {
+            return false;
+        };
+        self.visible_cell_style_context(row, visible_column, rendered, Some(&query))
             .search_match
     }
 
@@ -508,8 +512,8 @@ impl TableView {
         row: usize,
         visible_column: usize,
         rendered: &str,
-        query: Option<&str>,
-    ) -> VisibleCellStyleContext {
+        query: Option<&CaseInsensitiveQuery<'_>>,
+    ) -> VisibleCellStyleContext<'_> {
         let Some(source_column) = self.source_column_for_visible(visible_column) else {
             return VisibleCellStyleContext {
                 conditional_color: None,
@@ -533,17 +537,19 @@ impl TableView {
         }
     }
 
-    fn search_matches_cell(&self, raw: &str, rendered: &str, query: Option<&str>) -> bool {
+    fn search_matches_cell(
+        &self,
+        raw: &str,
+        rendered: &str,
+        query: Option<&CaseInsensitiveQuery<'_>>,
+    ) -> bool {
         let Some(query) = query else {
             return false;
         };
-        if query.is_empty() {
-            return false;
-        }
         if rendered == raw {
-            contains_case_insensitive(raw, query)
+            query.matches(raw)
         } else {
-            contains_case_insensitive(raw, query) || contains_case_insensitive(rendered, query)
+            query.matches(raw) || query.matches(rendered)
         }
     }
 
@@ -561,14 +567,15 @@ impl TableView {
             .unwrap_or_default();
         let rendered = self.render_source_cell(source_column, Some(raw));
         self.conditional_color_for_source_cell(source_column, raw, &rendered)
+            .map(Cow::into_owned)
     }
 
-    fn conditional_color_for_source_cell(
-        &self,
+    fn conditional_color_for_source_cell<'a>(
+        &'a self,
         source_column: usize,
         raw: &str,
         rendered: &str,
-    ) -> Option<String> {
+    ) -> Option<Cow<'a, str>> {
         let rules = self.column_color_rules.get(source_column)?;
         if rules.is_empty() {
             return None;
@@ -580,8 +587,8 @@ impl TableView {
         rules.iter().find_map(|rule| match rule {
             ConditionalColorRule::Identifiers { colors } => metadata
                 .and_then(|metadata| metadata.identifier_indexes.get(rendered).copied())
-                .map(|index| identifier_color_ref(index, colors)),
-            _ => rule.color_for(raw, rendered, numeric, min_max),
+                .map(|index| Cow::Owned(identifier_color_ref(index, colors))),
+            _ => rule.color_ref_for(raw, rendered, numeric, min_max),
         })
     }
 

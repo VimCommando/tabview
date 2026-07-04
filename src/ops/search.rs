@@ -6,23 +6,51 @@ pub enum SearchDirection {
     Reverse,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct CaseInsensitiveQuery<'a> {
+    raw: &'a str,
+    folded: Option<String>,
+}
+
+impl<'a> CaseInsensitiveQuery<'a> {
+    pub(crate) fn new(raw: &'a str) -> Option<Self> {
+        (!raw.is_empty()).then(|| Self {
+            raw,
+            folded: (!raw.is_ascii()).then(|| raw.to_lowercase()),
+        })
+    }
+
+    pub(crate) fn matches(&self, value: &str) -> bool {
+        if value.is_ascii() && self.raw.is_ascii() {
+            return value
+                .as_bytes()
+                .windows(self.raw.len())
+                .any(|window| window.eq_ignore_ascii_case(self.raw.as_bytes()));
+        }
+        match &self.folded {
+            Some(query) => value.to_lowercase().contains(query),
+            None => value.to_lowercase().contains(self.raw),
+        }
+    }
+}
+
 pub fn find_match(
     rows: &[Vec<String>],
     start: Position,
     query: &str,
     direction: SearchDirection,
 ) -> Option<Position> {
-    if query.is_empty() || rows.is_empty() {
+    if rows.is_empty() {
         return None;
     }
-    let query = query.to_lowercase();
+    let query = CaseInsensitiveQuery::new(query)?;
     let Some(mut position) = start_or_virtual_wrap_position(rows, start, direction) else {
         return None;
     };
 
     for _ in 0..cell_count(rows) {
         position = next_position(rows, position, direction)?;
-        if contains_case_insensitive_folded_query(&rows[position.row][position.column], &query) {
+        if query.matches(&rows[position.row][position.column]) {
             return Some(position);
         }
     }
@@ -112,31 +140,7 @@ fn cell_count(rows: &[Vec<String>]) -> usize {
 }
 
 pub(crate) fn contains_case_insensitive(value: &str, query: &str) -> bool {
-    if query.is_empty() {
-        return true;
-    }
-    if value.is_ascii() && query.is_ascii() {
-        return value
-            .as_bytes()
-            .windows(query.len())
-            .any(|window| window.eq_ignore_ascii_case(query.as_bytes()));
-    }
-
-    value.to_lowercase().contains(&query.to_lowercase())
-}
-
-fn contains_case_insensitive_folded_query(value: &str, query: &str) -> bool {
-    if query.is_empty() {
-        return true;
-    }
-    if value.is_ascii() && query.is_ascii() {
-        return value
-            .as_bytes()
-            .windows(query.len())
-            .any(|window| window.eq_ignore_ascii_case(query.as_bytes()));
-    }
-
-    value.to_lowercase().contains(query)
+    query.is_empty() || CaseInsensitiveQuery::new(query).is_some_and(|query| query.matches(value))
 }
 
 #[cfg(test)]

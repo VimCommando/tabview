@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -1190,11 +1191,22 @@ impl ConditionalColorRule {
         numeric: Option<f64>,
         column_min_max: Option<(f64, f64)>,
     ) -> Option<String> {
+        self.color_ref_for(raw, rendered, numeric, column_min_max)
+            .map(Cow::into_owned)
+    }
+
+    pub fn color_ref_for<'a>(
+        &'a self,
+        raw: &str,
+        rendered: &str,
+        numeric: Option<f64>,
+        column_min_max: Option<(f64, f64)>,
+    ) -> Option<Cow<'a, str>> {
         match self {
             ConditionalColorRule::Match { entries } => entries
                 .iter()
                 .find(|entry| conditional_value_matches(&entry.value, raw, rendered, numeric))
-                .map(|entry| entry.color.clone()),
+                .map(|entry| Cow::Borrowed(entry.color.as_str())),
             ConditionalColorRule::Range { entries } => {
                 let value = numeric?;
                 entries
@@ -1205,7 +1217,7 @@ impl ConditionalColorRule {
                             && entry.gt.is_none_or(|bound| value > bound)
                             && entry.gte.is_none_or(|bound| value >= bound)
                     })
-                    .map(|entry| entry.color.clone())
+                    .map(|entry| Cow::Borrowed(entry.color.as_str()))
             }
             ConditionalColorRule::FixedGradient { stops } => {
                 let value = numeric?;
@@ -1216,18 +1228,18 @@ impl ConditionalColorRule {
                         value >= stop.value
                             && stops.get(idx + 1).is_none_or(|next| value < next.value)
                     })
-                    .map(|(_, stop)| stop.color.clone())
+                    .map(|(_, stop)| Cow::Borrowed(stop.color.as_str()))
             }
             ConditionalColorRule::AutoGradient { colors, steps } => {
                 let value = numeric?;
                 let (min, max) = column_min_max?;
                 if colors.is_empty() || max <= min {
-                    return colors.first().cloned();
+                    return colors.first().map(|color| Cow::Borrowed(color.as_str()));
                 }
                 let steps = (*steps).max(1);
                 let ratio = ((value - min) / (max - min)).clamp(0.0, 1.0);
                 let bucket = (ratio * steps as f64).floor().min((steps - 1) as f64) as usize;
-                Some(gradient_color_ref(colors, bucket, steps))
+                Some(Cow::Owned(gradient_color_ref(colors, bucket, steps)))
             }
             ConditionalColorRule::Identifiers { .. } => None,
         }

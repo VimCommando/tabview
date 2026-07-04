@@ -7,6 +7,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::command::KeyBinding;
 use crate::ops::filter::{FilterKind, FilterMode};
+use crate::ops::search::CaseInsensitiveQuery;
 use crate::theme::{default_theme, ResolvedTheme};
 use crate::view::{ColumnAlignment, TableView};
 use crate::FilterPromptView;
@@ -35,7 +36,7 @@ pub fn render_table_with_theme(
     theme: &ResolvedTheme,
     search_query: Option<&str>,
 ) {
-    let search_query = search_query.filter(|query| !query.is_empty());
+    let search_query = search_query.and_then(CaseInsensitiveQuery::new);
     let viewport_height = visible_row_capacity(view, area);
     let viewport_width = visible_column_capacity(view, area);
     view.resize_viewport(viewport_height, viewport_width);
@@ -111,7 +112,7 @@ pub fn render_table_with_theme(
             .enumerate()
             .map(|(column, cell)| {
                 let context =
-                    view.visible_cell_style_context(idx, column, cell, search_query.as_deref());
+                    view.visible_cell_style_context(idx, column, cell, search_query.as_ref());
                 let mut style = theme.style_or(
                     view.default_cell_style_token_for_visible_column(column),
                     "table.cell",
