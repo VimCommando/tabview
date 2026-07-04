@@ -401,6 +401,15 @@ fn discover_themes_in_root(
             .and_then(|contents| parse_theme_toml(&contents, terminal_mode))
         {
             Ok(mut theme) => {
+                if theme.name != canonical_name {
+                    discovery.warnings.push(ThemeWarning {
+                        field: path.display().to_string(),
+                        message: format!(
+                            "theme name '{}' does not match file name '{}'; using file name",
+                            theme.name, canonical_name
+                        ),
+                    });
+                }
                 theme.name = canonical_name.clone();
                 discovery.themes.insert(canonical_name, theme);
             }
@@ -1518,6 +1527,23 @@ fg = "a"
         assert!(parse_string(r#""bad\""#)
             .expect_err("invalid")
             .contains("unterminated escape"));
+    }
+
+    #[test]
+    fn discovery_warns_when_theme_name_does_not_match_file_stem() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let theme_dir = dir.path().join(THEME_DIR);
+        fs::create_dir_all(&theme_dir).expect("theme dir");
+        fs::write(theme_dir.join("from-file.toml"), full_theme("")).expect("theme file");
+
+        let discovery = discover_themes_in_root(dir.path(), None, TerminalColorMode::TrueColor);
+
+        assert!(discovery.themes.contains_key("from-file"));
+        assert!(discovery.warnings.iter().any(|warning| {
+            warning
+                .message
+                .contains("does not match file name 'from-file'")
+        }));
     }
 
     #[test]
