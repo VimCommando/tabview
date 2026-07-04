@@ -100,6 +100,7 @@ pub fn render_table_with_theme(
         .row
         .saturating_add(viewport.height)
         .min(view.row_count());
+    let mut cell_styles = Vec::new();
     for idx in viewport.origin.row..row_end {
         if row_y >= area.y + area.height {
             break;
@@ -107,27 +108,23 @@ pub fn render_table_with_theme(
         let Some(row) = view.rendered_visible_row(idx) else {
             break;
         };
-        let cell_styles = row
-            .iter()
-            .enumerate()
-            .map(|(column, cell)| {
-                let context =
-                    view.visible_cell_style_context(idx, column, cell, search_query.as_ref());
-                let mut style = theme.style_or(
-                    view.default_cell_style_token_for_visible_column(column),
-                    "table.cell",
-                );
-                if let Some(color_ref) = context.conditional_color {
-                    if let Some(conditional_style) = theme.conditional_style(&color_ref) {
-                        style = overlay_style(style, conditional_style);
-                    }
+        cell_styles.clear();
+        cell_styles.extend(row.iter().enumerate().map(|(column, cell)| {
+            let context = view.visible_cell_style_context(idx, column, cell, search_query.as_ref());
+            let mut style = theme.style_or(
+                view.default_cell_style_token_for_visible_column(column),
+                "table.cell",
+            );
+            if let Some(color_ref) = context.conditional_color {
+                if let Some(conditional_style) = theme.conditional_style(&color_ref) {
+                    style = overlay_style(style, conditional_style);
                 }
-                if context.search_match {
-                    style = overlay_style(style, theme.style("search.highlight"));
-                }
-                style
-            })
-            .collect::<Vec<_>>();
+            }
+            if context.search_match {
+                style = overlay_style(style, theme.style("search.highlight"));
+            }
+            style
+        }));
         let selected_column = (idx == cursor.row).then_some(cursor.column);
         render_row(
             buffer,

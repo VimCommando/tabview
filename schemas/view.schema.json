@@ -143,7 +143,7 @@
     "colorValue": {
       "type": "string",
       "minLength": 1,
-      "description": "A theme palette alias, 16-color name, palette(N) 256-color value, integer 256-color value, or #RRGGBBAA hex color."
+      "description": "A theme palette alias, 16-color name, palette(N) 256-color value, integer 256-color value, or #RRGGBB/#RRGGBBAA hex color."
     },
     "gradientColorRule": {
       "type": "object",

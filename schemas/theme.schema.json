@@ -44,7 +44,7 @@
     "color": {
       "type": "string",
       "minLength": 1,
-      "description": "A 16-color name, palette(N), 0-255 palette index, #RRGGBBAA hex color, or palette alias."
+      "description": "A 16-color name, palette(N), 0-255 palette index, #RRGGBB or #RRGGBBAA hex color, or palette alias."
     },
     "style": {
       "type": "object",

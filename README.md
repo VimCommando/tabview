@@ -127,6 +127,7 @@ mode = "auto" # auto, ansi16, ansi256, or hex32
 [palette]
 text = "palette(248)"
 gray = "gray"
+muted = "palette(240)"
 ui_blue = "palette(19)"
 blue = "blue"
 dark_blue = "palette(19)"
