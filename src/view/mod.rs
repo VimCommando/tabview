@@ -1813,12 +1813,14 @@ impl TableView {
     }
 
     fn rebuild_column_color_metadata_for(&mut self, source_column: usize) {
-        let rules = self
-            .column_color_rules
-            .get(source_column)
-            .cloned()
-            .unwrap_or_default();
-        let metadata = self.build_column_color_metadata(source_column, &rules);
+        let metadata = {
+            let rules = self
+                .column_color_rules
+                .get(source_column)
+                .map(Vec::as_slice)
+                .unwrap_or_default();
+            self.build_column_color_metadata(source_column, rules)
+        };
         if let Some(slot) = self.column_color_metadata.get_mut(source_column) {
             *slot = metadata;
         }
