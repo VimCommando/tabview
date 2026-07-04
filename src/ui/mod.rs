@@ -157,9 +157,9 @@ pub fn render_table_with_theme(
             let mut should_preserve_fg = false;
             if let Some(color_ref) = context
                 .as_ref()
-                .and_then(|(_, context)| context.conditional_color.as_ref())
+                .and_then(|(_, context)| context.conditional_color.as_deref())
             {
-                if let Some(conditional_style) = theme.conditional_style(&color_ref) {
+                if let Some(conditional_style) = theme.conditional_style(color_ref) {
                     style = overlay_style(style, conditional_style);
                     should_preserve_fg = true;
                 }

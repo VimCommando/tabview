@@ -223,7 +223,7 @@ struct ColumnDisplayMetadata {
 #[derive(Debug, Clone, Default)]
 struct ColumnColorMetadata {
     numeric_min_max: Option<(f64, f64)>,
-    identifier_indexes: BTreeMap<String, usize>,
+    identifier_color_refs: BTreeMap<usize, BTreeMap<String, String>>,
 }
 
 impl Viewport {
@@ -599,17 +599,21 @@ impl TableView {
         let min_max = metadata.and_then(|metadata| metadata.numeric_min_max);
         let mut numeric = None;
 
-        rules.iter().find_map(|rule| match rule {
-            ConditionalColorRule::Identifiers { colors } => metadata
-                .and_then(|metadata| metadata.identifier_indexes.get(rendered).copied())
-                .map(|index| Cow::Owned(identifier_color_ref(index, colors))),
-            _ => {
-                let numeric = *numeric.get_or_insert_with(|| {
-                    parse_numeric_scalar(raw, self.source_numeric_column_profile(source_column))
-                });
-                rule.color_ref_for(raw, rendered, numeric, min_max)
-            }
-        })
+        rules
+            .iter()
+            .enumerate()
+            .find_map(|(rule_idx, rule)| match rule {
+                ConditionalColorRule::Identifiers { .. } => metadata
+                    .and_then(|metadata| metadata.identifier_color_refs.get(&rule_idx))
+                    .and_then(|color_refs| color_refs.get(rendered))
+                    .map(|color_ref| Cow::Borrowed(color_ref.as_str())),
+                _ => {
+                    let numeric = *numeric.get_or_insert_with(|| {
+                        parse_numeric_scalar(raw, self.source_numeric_column_profile(source_column))
+                    });
+                    rule.color_ref_for(raw, rendered, numeric, min_max)
+                }
+            })
     }
 
     pub fn visible_row(&self, row: usize) -> Option<&Vec<String>> {
@@ -1816,9 +1820,23 @@ impl TableView {
             .any(|rule| matches!(rule, ConditionalColorRule::Identifiers { .. }))
             .then(|| self.identifier_indexes(source_column))
             .unwrap_or_default();
+        let identifier_color_refs = rules
+            .iter()
+            .enumerate()
+            .filter_map(|(rule_idx, rule)| {
+                let ConditionalColorRule::Identifiers { colors } = rule else {
+                    return None;
+                };
+                let color_refs = identifier_indexes
+                    .iter()
+                    .map(|(value, index)| (value.clone(), identifier_color_ref(*index, colors)))
+                    .collect::<BTreeMap<_, _>>();
+                Some((rule_idx, color_refs))
+            })
+            .collect();
         ColumnColorMetadata {
             numeric_min_max,
-            identifier_indexes,
+            identifier_color_refs,
         }
     }
 
