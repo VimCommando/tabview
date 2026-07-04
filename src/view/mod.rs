@@ -480,12 +480,11 @@ impl TableView {
         else {
             return false;
         };
-        let query = query.to_lowercase();
-        raw.to_lowercase().contains(&query)
-            || self
-                .render_source_cell(source_column, Some(raw))
-                .to_lowercase()
-                .contains(&query)
+        let Some(query) = CaseInsensitiveQuery::new(query) else {
+            return false;
+        };
+        let rendered = self.render_source_cell(source_column, Some(raw));
+        self.search_matches_cell(raw, &rendered, Some(&query))
     }
 
     fn visible_cell_matches_search_query(
@@ -2267,6 +2266,17 @@ mod tests {
         view.goto(10, 10);
         assert_eq!(view.cursor(), Position { row: 1, column: 1 });
         assert_eq!(view.viewport().origin, Position { row: 1, column: 1 });
+    }
+
+    #[test]
+    fn current_cell_match_uses_case_insensitive_query() {
+        let view = TableView::classify(
+            rows(&[&["Name", "Value"], &["alpha", "1"]]),
+            Viewport::new(10, 2),
+        );
+
+        assert!(view.current_cell_matches("ALP"));
+        assert!(!view.current_cell_matches(""));
     }
 
     #[test]

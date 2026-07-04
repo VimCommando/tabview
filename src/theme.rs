@@ -1053,21 +1053,21 @@ fn parse_modifier_array(value: &str) -> Result<Vec<Modifier>, String> {
 }
 
 fn strip_comment(line: &str) -> String {
-    let mut in_string = false;
+    let mut quote = None;
     let mut escaped = false;
     let mut output = String::new();
     for ch in line.chars() {
         match ch {
-            '\\' if in_string && !escaped => {
+            '\\' if quote == Some('"') && !escaped => {
                 escaped = true;
                 output.push(ch);
                 continue;
             }
-            '"' if !escaped => {
-                in_string = !in_string;
+            '"' | '\'' if !escaped && quote.is_none_or(|current| current == ch) => {
+                quote = if quote == Some(ch) { None } else { Some(ch) };
                 output.push(ch);
             }
-            '#' if !in_string => break,
+            '#' if quote.is_none() => break,
             _ => output.push(ch),
         }
         escaped = false;
@@ -1086,10 +1086,16 @@ fn split_key_value(line: &str) -> Option<(&str, &str)> {
 
 fn parse_string(value: &str) -> Result<String, String> {
     let value = value.trim();
+    if let Some(value) = value
+        .strip_prefix('\'')
+        .and_then(|value| value.strip_suffix('\''))
+    {
+        return Ok(value.to_owned());
+    }
     let value = value
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
-        .ok_or_else(|| format!("expected double-quoted string, got '{value}'"))?;
+        .ok_or_else(|| format!("expected quoted string, got '{value}'"))?;
     let mut output = String::new();
     let mut escaped = false;
     for ch in value.chars() {
@@ -1132,23 +1138,23 @@ fn parse_string_array(value: &str) -> Result<Vec<String>, String> {
 fn split_string_array_items(inner: &str) -> Result<Vec<String>, String> {
     let mut items = Vec::new();
     let mut current = String::new();
-    let mut in_string = false;
+    let mut quote = None;
     let mut escaped = false;
     for ch in inner.chars() {
-        if in_string {
+        if let Some(current_quote) = quote {
             current.push(ch);
-            if escaped {
+            if current_quote == '"' && escaped {
                 escaped = false;
-            } else if ch == '\\' {
+            } else if current_quote == '"' && ch == '\\' {
                 escaped = true;
-            } else if ch == '"' {
-                in_string = false;
+            } else if ch == current_quote {
+                quote = None;
             }
             continue;
         }
         match ch {
-            '"' => {
-                in_string = true;
+            '"' | '\'' => {
+                quote = Some(ch);
                 current.push(ch);
             }
             ',' => {
@@ -1158,7 +1164,7 @@ fn split_string_array_items(inner: &str) -> Result<Vec<String>, String> {
             _ => current.push(ch),
         }
     }
-    if in_string {
+    if quote.is_some() {
         return Err("unterminated string in array".to_owned());
     }
     items.push(current.trim().to_owned());
@@ -1413,6 +1419,14 @@ bg = "black"
     }
 
     #[test]
+    fn config_theme_accepts_toml_literal_strings() {
+        assert_eq!(
+            parse_config_theme("theme = 'ops#dark' # comment\n").expect("parse"),
+            Some("ops#dark".to_owned())
+        );
+    }
+
+    #[test]
     fn detects_terminal_color_mode_from_term_values() {
         assert_eq!(
             terminal_color_mode_from_values(Some("xterm-256color"), None),
@@ -1637,6 +1651,14 @@ fg = "a"
         assert_eq!(
             parse_string_array(r#"["a,b", "c"]"#).expect("array"),
             vec!["a,b".to_owned(), "c".to_owned()]
+        );
+    }
+
+    #[test]
+    fn parse_string_array_accepts_literal_strings() {
+        assert_eq!(
+            parse_string_array(r#"['a,b', 'c\d']"#).expect("array"),
+            vec!["a,b".to_owned(), r"c\d".to_owned()]
         );
     }
 
