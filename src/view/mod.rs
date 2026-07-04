@@ -31,6 +31,12 @@ pub struct Position {
     pub column: usize,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VisibleCellStyleContext {
+    pub conditional_color: Option<String>,
+    pub search_match: bool,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Viewport {
     pub origin: Position,
@@ -487,26 +493,63 @@ impl TableView {
         visible_column: usize,
         lowercase_query: &str,
     ) -> bool {
-        if lowercase_query.is_empty() {
-            return false;
-        }
-        let Some(source_column) = self.source_column_for_visible(visible_column) else {
+        let Some(rendered) = self
+            .rendered_visible_row(row)
+            .and_then(|row| row.get(visible_column).cloned())
+        else {
             return false;
         };
+        self.visible_cell_style_context(row, visible_column, &rendered, Some(lowercase_query))
+            .search_match
+    }
+
+    pub fn visible_cell_style_context(
+        &self,
+        row: usize,
+        visible_column: usize,
+        rendered: &str,
+        lowercase_query: Option<&str>,
+    ) -> VisibleCellStyleContext {
+        let Some(source_column) = self.source_column_for_visible(visible_column) else {
+            return VisibleCellStyleContext {
+                conditional_color: None,
+                search_match: false,
+            };
+        };
         let Some(source_row) = self.source_row_for_visible_row(row) else {
-            return false;
+            return VisibleCellStyleContext {
+                conditional_color: None,
+                search_match: false,
+            };
         };
         let raw = self
             .rows
             .get(source_row)
             .and_then(|row| row.get(source_column).map(String::as_str))
             .unwrap_or_default();
-        let rendered = self.render_source_cell(source_column, Some(raw));
+        VisibleCellStyleContext {
+            conditional_color: self.conditional_color_for_source_cell(source_column, raw, rendered),
+            search_match: self.search_matches_cell(raw, rendered, lowercase_query),
+        }
+    }
+
+    fn search_matches_cell(
+        &self,
+        raw: &str,
+        rendered: &str,
+        lowercase_query: Option<&str>,
+    ) -> bool {
+        let Some(lowercase_query) = lowercase_query else {
+            return false;
+        };
+        if lowercase_query.is_empty() {
+            return false;
+        }
         if rendered == raw {
             contains_case_insensitive(raw, lowercase_query)
         } else {
             contains_case_insensitive(raw, lowercase_query)
-                || contains_case_insensitive(&rendered, lowercase_query)
+                || contains_case_insensitive(rendered, lowercase_query)
         }
     }
 
@@ -516,10 +559,6 @@ impl TableView {
         visible_column: usize,
     ) -> Option<String> {
         let source_column = self.source_column_for_visible(visible_column)?;
-        let rules = self.column_color_rules.get(source_column)?;
-        if rules.is_empty() {
-            return None;
-        }
         let source_row = self.source_row_for_visible_row(row)?;
         let raw = self
             .rows
@@ -527,15 +566,28 @@ impl TableView {
             .and_then(|row| row.get(source_column).map(String::as_str))
             .unwrap_or_default();
         let rendered = self.render_source_cell(source_column, Some(raw));
+        self.conditional_color_for_source_cell(source_column, raw, &rendered)
+    }
+
+    fn conditional_color_for_source_cell(
+        &self,
+        source_column: usize,
+        raw: &str,
+        rendered: &str,
+    ) -> Option<String> {
+        let rules = self.column_color_rules.get(source_column)?;
+        if rules.is_empty() {
+            return None;
+        }
         let numeric = parse_numeric_scalar(raw, self.source_numeric_column_profile(source_column));
         let metadata = self.column_color_metadata.get(source_column);
         let min_max = metadata.and_then(|metadata| metadata.numeric_min_max);
 
         rules.iter().find_map(|rule| match rule {
             ConditionalColorRule::Identifiers { colors } => metadata
-                .and_then(|metadata| metadata.identifier_indexes.get(&rendered).copied())
+                .and_then(|metadata| metadata.identifier_indexes.get(rendered).copied())
                 .map(|index| identifier_color_ref(index, colors)),
-            _ => rule.color_for(raw, &rendered, numeric, min_max),
+            _ => rule.color_for(raw, rendered, numeric, min_max),
         })
     }
 

@@ -25,9 +25,6 @@ const REQUIRED_STYLE_TOKENS: &[&str] = &[
     "popup.action",
     "search.highlight",
     "message.footer",
-    "message.info",
-    "message.warning",
-    "message.error",
 ];
 
 const OPTIONAL_STYLE_TOKENS: &[&str] = &[
@@ -38,6 +35,9 @@ const OPTIONAL_STYLE_TOKENS: &[&str] = &[
     "table.cell.boolean",
     "popup.section_title",
     "popup.option_selected",
+    "message.info",
+    "message.warning",
+    "message.error",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -287,9 +287,10 @@ pub fn load_active_theme(config_root: Option<&Path>) -> Result<ThemeLoad, ThemeE
             warnings: discovery.warnings,
         });
     }
-    if discovery.selected_failed {
+    if let Some(warning) = discovery.selected_failure {
         return Err(ThemeError::Invalid(format!(
-            "selected theme '{selected_name}' could not be loaded"
+            "selected theme '{selected_name}' could not be loaded: {}: {}",
+            warning.field, warning.message
         )));
     }
     Err(ThemeError::Invalid(format!(
@@ -370,7 +371,7 @@ pub fn parse_config_theme(input: &str) -> Result<Option<String>, String> {
 struct ThemeDiscovery {
     themes: BTreeMap<String, ResolvedTheme>,
     warnings: Vec<ThemeWarning>,
-    selected_failed: bool,
+    selected_failure: Option<ThemeWarning>,
 }
 
 fn discover_themes_in_root(
@@ -404,13 +405,14 @@ fn discover_themes_in_root(
                 discovery.themes.insert(canonical_name, theme);
             }
             Err(message) => {
-                if selected.is_some_and(|selected| selected == canonical_name) {
-                    discovery.selected_failed = true;
-                }
-                discovery.warnings.push(ThemeWarning {
+                let warning = ThemeWarning {
                     field: path.display().to_string(),
                     message: format!("failed to load theme: {message}"),
-                });
+                };
+                if selected.is_some_and(|selected| selected == canonical_name) {
+                    discovery.selected_failure = Some(warning.clone());
+                }
+                discovery.warnings.push(warning);
             }
         }
     }
@@ -1055,6 +1057,9 @@ fn parse_string(value: &str) -> Result<String, String> {
             output.push(ch);
         }
     }
+    if escaped {
+        return Err("unterminated escape sequence in string".to_owned());
+    }
     Ok(output)
 }
 
@@ -1506,6 +1511,13 @@ fg = "a"
         assert!(parse_theme_toml(invalid, TerminalColorMode::TrueColor)
             .expect_err("invalid")
             .contains("unsupported style token"));
+    }
+
+    #[test]
+    fn parse_string_rejects_unterminated_escape() {
+        assert!(parse_string(r#""bad\""#)
+            .expect_err("invalid")
+            .contains("unterminated escape"));
     }
 
     #[test]

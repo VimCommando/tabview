@@ -108,27 +108,27 @@ pub fn render_table_with_theme(
         let Some(row) = view.rendered_visible_row(idx) else {
             break;
         };
-        let cell_styles =
-            row.iter()
-                .enumerate()
-                .map(|(column, _cell)| {
-                    let mut style = theme.style_or(
-                        view.default_cell_style_token_for_visible_column(column),
-                        "table.cell",
-                    );
-                    if let Some(color_ref) = view.conditional_color_for_visible_cell(idx, column) {
-                        if let Some(conditional_style) = theme.conditional_style(&color_ref) {
-                            style = overlay_style(style, conditional_style);
-                        }
+        let cell_styles = row
+            .iter()
+            .enumerate()
+            .map(|(column, cell)| {
+                let context =
+                    view.visible_cell_style_context(idx, column, cell, search_query.as_deref());
+                let mut style = theme.style_or(
+                    view.default_cell_style_token_for_visible_column(column),
+                    "table.cell",
+                );
+                if let Some(color_ref) = context.conditional_color {
+                    if let Some(conditional_style) = theme.conditional_style(&color_ref) {
+                        style = overlay_style(style, conditional_style);
                     }
-                    if search_query.as_deref().is_some_and(|query| {
-                        view.visible_cell_matches_search_query(idx, column, query)
-                    }) {
-                        style = overlay_style(style, theme.style("search.highlight"));
-                    }
-                    style
-                })
-                .collect::<Vec<_>>();
+                }
+                if context.search_match {
+                    style = overlay_style(style, theme.style("search.highlight"));
+                }
+                style
+            })
+            .collect::<Vec<_>>();
         let selected_column = (idx == cursor.row).then_some(cursor.column);
         render_row(
             buffer,
