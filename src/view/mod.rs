@@ -580,15 +580,20 @@ impl TableView {
         if rules.is_empty() {
             return None;
         }
-        let numeric = parse_numeric_scalar(raw, self.source_numeric_column_profile(source_column));
         let metadata = self.column_color_metadata.get(source_column);
         let min_max = metadata.and_then(|metadata| metadata.numeric_min_max);
+        let mut numeric = None;
 
         rules.iter().find_map(|rule| match rule {
             ConditionalColorRule::Identifiers { colors } => metadata
                 .and_then(|metadata| metadata.identifier_indexes.get(rendered).copied())
                 .map(|index| Cow::Owned(identifier_color_ref(index, colors))),
-            _ => rule.color_ref_for(raw, rendered, numeric, min_max),
+            _ => {
+                let numeric = *numeric.get_or_insert_with(|| {
+                    parse_numeric_scalar(raw, self.source_numeric_column_profile(source_column))
+                });
+                rule.color_ref_for(raw, rendered, numeric, min_max)
+            }
         })
     }
 
@@ -1126,7 +1131,7 @@ impl TableView {
             display.mask = None;
         }
         self.column_metadata_modified.insert(source_column);
-        self.rebuild_column_color_metadata();
+        self.rebuild_column_color_metadata_for(source_column);
 
         if update.clear_filters {
             self.filters.retain(|filter| filter.column != source_column);
@@ -1785,6 +1790,18 @@ impl TableView {
                 self.build_column_color_metadata(source_column, rules)
             })
             .collect();
+    }
+
+    fn rebuild_column_color_metadata_for(&mut self, source_column: usize) {
+        let rules = self
+            .column_color_rules
+            .get(source_column)
+            .cloned()
+            .unwrap_or_default();
+        let metadata = self.build_column_color_metadata(source_column, &rules);
+        if let Some(slot) = self.column_color_metadata.get_mut(source_column) {
+            *slot = metadata;
+        }
     }
 
     fn build_column_color_metadata(

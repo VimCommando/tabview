@@ -339,8 +339,15 @@ pub fn tabview_config_dir() -> Option<PathBuf> {
 
 fn selected_theme_from_config(root: &Path) -> Result<Option<String>, ThemeError> {
     let path = root.join(CONFIG_FILE);
-    let Ok(contents) = fs::read_to_string(&path) else {
-        return Ok(None);
+    let contents = match fs::read_to_string(&path) {
+        Ok(contents) => contents,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(err) => {
+            return Err(ThemeError::Invalid(format!(
+                "{}: failed to read config: {err}",
+                path.display()
+            )));
+        }
     };
     parse_config_theme(&contents)
         .map_err(|message| ThemeError::Invalid(format!("{}: {message}", path.display())))
