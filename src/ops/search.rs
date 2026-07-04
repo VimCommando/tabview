@@ -14,9 +14,10 @@ pub(crate) struct CaseInsensitiveQuery<'a> {
 
 impl<'a> CaseInsensitiveQuery<'a> {
     pub(crate) fn new(raw: &'a str) -> Option<Self> {
+        let needs_folded = !raw.is_ascii() || raw.bytes().any(|byte| byte.is_ascii_uppercase());
         (!raw.is_empty()).then(|| Self {
             raw,
-            folded: (!raw.is_ascii()).then(|| raw.to_lowercase()),
+            folded: needs_folded.then(|| raw.to_lowercase()),
         })
     }
 
@@ -235,5 +236,12 @@ mod tests {
     #[test]
     fn contains_case_insensitive_handles_empty_query() {
         assert!(contains_case_insensitive("alpha", ""));
+    }
+
+    #[test]
+    fn ascii_uppercase_query_matches_non_ascii_value() {
+        let query = CaseInsensitiveQuery::new("CAF").expect("query");
+
+        assert!(query.matches("café"));
     }
 }

@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use unicode_width::UnicodeWidthStr;
 
 use crate::ops::filter::{ActiveFilter, FilterCondition, FilterKind, FilterMode, FilterParseError};
-use crate::ops::search::{contains_case_insensitive, CaseInsensitiveQuery};
+use crate::ops::search::CaseInsensitiveQuery;
 use crate::ops::sort::{
     parse_bool_key, parse_numeric_scalar, sort_rows_by_specs, NumericColumnProfile, SortDirection,
     SortMode, SortSpec,
