@@ -97,6 +97,7 @@ pub fn render_table_with_theme(
                     prefix_style: Some(theme.style_or("table.header_glyph", "table.divider")),
                     cell_styles: None,
                     preserve_selected_fg: None,
+                    search_matches: None,
                     search_query: None,
                     search_style: Style::default(),
                 },
@@ -112,6 +113,7 @@ pub fn render_table_with_theme(
         .min(view.row_count());
     let mut cell_styles = Vec::new();
     let mut preserve_selected_fg = Vec::new();
+    let mut search_matches = Vec::new();
     for idx in viewport.origin.row..row_end {
         if row_y >= area.y + area.height {
             break;
@@ -121,6 +123,7 @@ pub fn render_table_with_theme(
         };
         cell_styles.clear();
         preserve_selected_fg.clear();
+        search_matches.clear();
         for (column, cell) in row
             .iter()
             .enumerate()
@@ -133,6 +136,9 @@ pub fn render_table_with_theme(
                     view.source_cell_style_context(idx, source_column, cell, search_query.as_ref()),
                 )
             });
+            let search_match = context
+                .as_ref()
+                .is_some_and(|(_, context)| context.search_match);
             let mut style = theme.style("table.cell");
             let mut should_preserve_fg = false;
             if let Some(color_ref) = context
@@ -146,6 +152,7 @@ pub fn render_table_with_theme(
             }
             cell_styles.push(style);
             preserve_selected_fg.push(should_preserve_fg);
+            search_matches.push(search_match);
         }
         let selected_column = (idx == cursor.row).then_some(cursor.column);
         render_row(
@@ -166,6 +173,7 @@ pub fn render_table_with_theme(
                 prefix_style: None,
                 cell_styles: Some(&cell_styles),
                 preserve_selected_fg: Some(&preserve_selected_fg),
+                search_matches: Some(&search_matches),
                 search_query: search_query.as_ref(),
                 search_style: theme.style("search.highlight"),
             },
@@ -314,6 +322,7 @@ struct RowRender<'a> {
     prefix_style: Option<Style>,
     cell_styles: Option<&'a [Style]>,
     preserve_selected_fg: Option<&'a [bool]>,
+    search_matches: Option<&'a [bool]>,
     search_query: Option<&'a CaseInsensitiveQuery<'a>>,
     search_style: Style,
 }
@@ -348,7 +357,7 @@ fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
         let cell = align_cell(cell, width, "…", alignment);
         buffer.set_stringn(x, render.y, &cell, width, style);
         if let Some(query) = render.search_query {
-            highlight_search_matches(
+            let highlighted = highlight_search_matches(
                 buffer,
                 x,
                 render.y,
@@ -357,6 +366,21 @@ fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
                 query,
                 render.search_style,
             );
+            let search_matched = render
+                .search_matches
+                .and_then(|matches| matches.get(column - render.column_offset))
+                .copied()
+                .unwrap_or(false);
+            if !highlighted && search_matched {
+                highlight_visible_cell_content(
+                    buffer,
+                    x,
+                    render.y,
+                    &cell,
+                    width,
+                    render.search_style,
+                );
+            }
         }
         if let Some(prefix_style) = render.prefix_style {
             let prefix_width = header_prefix_width(&cell).min(width);
@@ -390,9 +414,11 @@ fn highlight_search_matches(
     width: usize,
     query: &CaseInsensitiveQuery<'_>,
     search_style: Style,
-) {
+) -> bool {
     let search_style = style_without_bg(search_style);
+    let mut highlighted = false;
     for range in query.find_iter(cell) {
+        highlighted = true;
         let mut offset = UnicodeWidthStr::width(&cell[..range.start]);
         for ch in cell[range].chars() {
             let ch_width = ch.width().unwrap_or(0);
@@ -405,6 +431,34 @@ fn highlight_search_matches(
                 break;
             }
         }
+    }
+    highlighted
+}
+
+fn highlight_visible_cell_content(
+    buffer: &mut Buffer,
+    x: u16,
+    y: u16,
+    cell: &str,
+    width: usize,
+    search_style: Style,
+) {
+    let content = cell.trim();
+    if content.is_empty() {
+        return;
+    }
+    let search_style = style_without_bg(search_style);
+    let start = cell
+        .chars()
+        .take_while(|ch| *ch == ' ')
+        .map(|ch| ch.width().unwrap_or(0))
+        .sum::<usize>();
+    let end = start
+        .saturating_add(UnicodeWidthStr::width(content))
+        .min(width);
+    for cell_offset in start..end {
+        let cell = &mut buffer[(x + cell_offset as u16, y)];
+        cell.set_style(overlay_style(cell.style(), search_style));
     }
 }
 
@@ -1439,6 +1493,42 @@ columns:
                 .contains(ratatui::style::Modifier::UNDERLINED));
         }
         assert_eq!(buffer[(4, 4)].style().fg, Some(Color::Rgb(175, 175, 175)));
+    }
+
+    #[cfg(feature = "saved-views")]
+    #[test]
+    fn search_highlight_marks_rendered_content_for_raw_only_matches() {
+        let mut view = TableView::classify(rows(&[&["Count"], &["1000"]]), Viewport::new(10, 1));
+        let parsed = crate::saved_views::parse_saved_view_yaml(
+            r##"
+name: counts
+filenames: [counts.csv]
+columns:
+  Count:
+    type: integer
+    format: mask
+    mask: "#,##0"
+"##,
+        )
+        .expect("parse");
+        let headers = view.header().expect("header").to_vec();
+        let resolved = crate::saved_views::resolve_columns(&parsed.view, &headers);
+        view.apply_saved_columns(&resolved, None);
+
+        let area = Rect::new(0, 0, 12, 5);
+        let mut buffer = Buffer::empty(area);
+        let theme = crate::theme::default_theme();
+        render_table_with_theme(&mut view, area, &mut buffer, &theme, Some("1000"));
+
+        assert_eq!(buffer_text(&buffer).lines().nth(3), Some("1,000       "));
+        for x in 0..5 {
+            assert_eq!(buffer[(x, 3)].style().fg, Some(Color::Rgb(255, 255, 0)));
+            assert!(buffer[(x, 3)]
+                .style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::UNDERLINED));
+        }
+        assert_ne!(buffer[(5, 3)].style().fg, Some(Color::Rgb(255, 255, 0)));
     }
 
     #[test]
