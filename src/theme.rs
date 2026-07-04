@@ -276,7 +276,7 @@ pub fn load_active_theme(config_root: Option<&Path>) -> Result<ThemeLoad, ThemeE
     let selected = selected_theme_from_config(&root)?;
     let discovery = discover_themes_in_root(&root, selected.as_deref(), terminal_mode);
     let selected_name = selected.as_deref().unwrap_or(DEFAULT_THEME_NAME);
-    if selected_name == DEFAULT_THEME_NAME {
+    if selected.is_none() {
         return Ok(ThemeLoad {
             theme: default_theme_for_terminal(terminal_mode),
             warnings: discovery.warnings,
