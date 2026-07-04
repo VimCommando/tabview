@@ -61,16 +61,7 @@
     },
     "style": {
       "type": "object",
-      "additionalProperties": {
-        "anyOf": [
-          {
-            "$ref": "#/$defs/styleTree"
-          },
-          {
-            "$ref": "#/$defs/style"
-          }
-        ]
-      },
+      "additionalProperties": false,
       "properties": {
         "fg": {
           "$ref": "#/$defs/color"

@@ -133,16 +133,15 @@ pub fn render_table_with_theme(
                     view.source_cell_style_context(idx, source_column, cell, search_query.as_ref()),
                 )
             });
-            let should_preserve_fg = context
-                .as_ref()
-                .is_some_and(|(_, context)| context.conditional_color.is_some());
             let mut style = theme.style("table.cell");
+            let mut should_preserve_fg = false;
             if let Some(color_ref) = context
                 .as_ref()
                 .and_then(|(_, context)| context.conditional_color.as_ref())
             {
                 if let Some(conditional_style) = theme.conditional_style(&color_ref) {
                     style = overlay_style(style, conditional_style);
+                    should_preserve_fg = true;
                 }
             }
             cell_styles.push(style);

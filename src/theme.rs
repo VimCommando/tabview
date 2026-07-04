@@ -293,6 +293,12 @@ pub fn load_active_theme(config_root: Option<&Path>) -> Result<ThemeLoad, ThemeE
             warning.field, warning.message
         )));
     }
+    if selected_name == DEFAULT_THEME_NAME {
+        return Ok(ThemeLoad {
+            theme: default_theme_for_terminal(terminal_mode),
+            warnings: discovery.warnings,
+        });
+    }
     Err(ThemeError::Invalid(format!(
         "selected theme '{selected_name}' was not found"
     )))
@@ -1468,6 +1474,33 @@ palette:
             parse_config_theme("theme: 'ops#dark' # comment\n").expect("parse"),
             Some("ops#dark".to_owned())
         );
+    }
+
+    #[test]
+    fn selecting_builtin_cmdzro_without_theme_file_uses_default_theme() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join(CONFIG_FILE), "theme: cmdzro\n").expect("config file");
+
+        let load = load_active_theme(Some(dir.path())).expect("theme load");
+
+        assert_eq!(load.theme.name(), "cmdzro");
+        assert!(load.warnings.is_empty());
+    }
+
+    #[test]
+    fn selecting_invalid_cmdzro_theme_file_errors() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        fs::write(dir.path().join(CONFIG_FILE), "theme: cmdzro\n").expect("config file");
+        let theme_dir = dir.path().join(THEME_DIR);
+        fs::create_dir_all(&theme_dir).expect("theme dir");
+        fs::write(theme_dir.join("cmdzro.yml"), "name: cmdzro\nstyles: nope\n")
+            .expect("theme file");
+
+        let err = load_active_theme(Some(dir.path())).expect_err("theme error");
+
+        assert!(err
+            .to_string()
+            .contains("selected theme 'cmdzro' could not be loaded"));
     }
 
     #[test]
