@@ -1089,7 +1089,7 @@ fn parse_string(value: &str) -> Result<String, String> {
     let value = value
         .strip_prefix('"')
         .and_then(|value| value.strip_suffix('"'))
-        .ok_or_else(|| format!("expected quoted string, got '{value}'"))?;
+        .ok_or_else(|| format!("expected double-quoted string, got '{value}'"))?;
     let mut output = String::new();
     let mut escaped = false;
     for ch in value.chars() {

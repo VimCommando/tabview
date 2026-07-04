@@ -121,22 +121,36 @@ pub fn render_table_with_theme(
             .skip(viewport.origin.column)
             .take(viewport.width)
         {
-            let Some(source_column) = source_columns.get(column).copied() else {
-                continue;
-            };
-            let context =
-                view.source_cell_style_context(idx, source_column, cell, search_query.as_ref());
-            let should_preserve_fg = context.conditional_color.is_some() || context.search_match;
+            let context = source_columns.get(column).copied().map(|source_column| {
+                (
+                    source_column,
+                    view.source_cell_style_context(idx, source_column, cell, search_query.as_ref()),
+                )
+            });
+            let should_preserve_fg = context.as_ref().is_some_and(|(_, context)| {
+                context.conditional_color.is_some() || context.search_match
+            });
             let mut style = theme.style_or(
-                view.default_cell_style_token_for_source_column(source_column),
+                context
+                    .as_ref()
+                    .map(|(source_column, _)| {
+                        view.default_cell_style_token_for_source_column(*source_column)
+                    })
+                    .unwrap_or("table.cell"),
                 "table.cell",
             );
-            if let Some(color_ref) = context.conditional_color {
+            if let Some(color_ref) = context
+                .as_ref()
+                .and_then(|(_, context)| context.conditional_color.as_ref())
+            {
                 if let Some(conditional_style) = theme.conditional_style(&color_ref) {
                     style = overlay_style(style, conditional_style);
                 }
             }
-            if context.search_match {
+            if context
+                .as_ref()
+                .is_some_and(|(_, context)| context.search_match)
+            {
                 style = overlay_style(style, theme.style("search.highlight"));
             }
             cell_styles.push(style);
