@@ -153,14 +153,19 @@ impl ResolvedTheme {
     }
 
     fn identifier_rgb(&self, index: usize, colors: &[String]) -> Result<(u8, u8, u8), ThemeError> {
-        let colors = if colors.is_empty() {
-            default_identifier_colors()
+        let family_count = if colors.is_empty() {
+            DEFAULT_IDENTIFIER_COLORS.len()
         } else {
-            colors.to_vec()
+            colors.len()
         };
-        let family = index % colors.len();
-        let shade = (index / colors.len()) % IDENTIFIER_SHADES;
-        let target = self.color_ref_rgb(&colors[family])?;
+        let family = index % family_count;
+        let shade = (index / family_count) % IDENTIFIER_SHADES;
+        let color = if colors.is_empty() {
+            DEFAULT_IDENTIFIER_COLORS[family]
+        } else {
+            colors[family].as_str()
+        };
+        let target = self.color_ref_rgb(color)?;
         let start = dark_identifier_rgb(target);
         let ratio = shade as f64 / (IDENTIFIER_SHADES - 1) as f64;
         Ok(interpolate_rgb(start, target, ratio))
@@ -836,10 +841,12 @@ fn interpolate_channel(left: u8, right: u8, ratio: f64) -> u8 {
 }
 
 const IDENTIFIER_SHADES: usize = 16;
+const DEFAULT_IDENTIFIER_COLORS: &[&str] = &["bright-green", "magenta", "cyan", "white"];
 
 fn default_identifier_colors() -> Vec<String> {
-    ["bright-green", "magenta", "cyan", "white"]
-        .into_iter()
+    DEFAULT_IDENTIFIER_COLORS
+        .iter()
+        .copied()
         .map(str::to_owned)
         .collect()
 }

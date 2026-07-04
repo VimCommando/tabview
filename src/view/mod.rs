@@ -5,6 +5,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use unicode_width::UnicodeWidthStr;
 
 use crate::ops::filter::{ActiveFilter, FilterCondition, FilterKind, FilterMode, FilterParseError};
+use crate::ops::search::contains_case_insensitive;
 use crate::ops::sort::{
     parse_bool_key, parse_numeric_scalar, sort_rows_by_specs, NumericColumnProfile, SortDirection,
     SortMode, SortSpec,
@@ -478,6 +479,34 @@ impl TableView {
                 .render_source_cell(source_column, Some(raw))
                 .to_lowercase()
                 .contains(&query)
+    }
+
+    pub fn visible_cell_matches_search_query(
+        &self,
+        row: usize,
+        visible_column: usize,
+        lowercase_query: &str,
+    ) -> bool {
+        if lowercase_query.is_empty() {
+            return false;
+        }
+        let Some(source_column) = self.source_column_for_visible(visible_column) else {
+            return false;
+        };
+        let Some(source_row) = self.source_row_for_visible_row(row) else {
+            return false;
+        };
+        let raw = self
+            .rows
+            .get(source_row)
+            .and_then(|row| row.get(source_column).map(String::as_str))
+            .unwrap_or_default();
+        let rendered = self.render_source_cell(source_column, Some(raw));
+        if rendered == raw {
+            contains_case_insensitive(raw, lowercase_query)
+        } else {
+            contains_case_insensitive(&format!("{raw}\n{rendered}"), lowercase_query)
+        }
     }
 
     pub fn conditional_color_for_visible_cell(
@@ -2679,6 +2708,8 @@ columns:
             view.search_rows_vec(),
             rows(&[&["1000\n1,000"], &["2000\n2,000"]])
         );
+        assert!(view.visible_cell_matches_search_query(0, 0, "1000"));
+        assert!(view.visible_cell_matches_search_query(0, 0, "1,000"));
         view.apply_filter(0, FilterMode::In, FilterKind::Text, "1,000".to_owned())
             .expect("filter");
         assert_eq!(view.visible_raw_rows_vec(), rows(&[&["1000"]]));

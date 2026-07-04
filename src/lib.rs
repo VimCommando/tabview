@@ -39,7 +39,7 @@ pub fn run(args: cli::Args) -> anyhow::Result<()> {
         theme_load
             .warnings
             .first()
-            .map(|warning| format!("theme warning: {}", warning.message))
+            .map(|warning| format!("theme warning: {}: {}", warning.field, warning.message))
     });
     view.goto_user_row(config.start_position.row.max(1));
     if let Some(column) = config.start_position.column {

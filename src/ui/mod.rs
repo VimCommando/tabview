@@ -35,6 +35,9 @@ pub fn render_table_with_theme(
     theme: &ResolvedTheme,
     search_query: Option<&str>,
 ) {
+    let search_query = search_query
+        .filter(|query| !query.is_empty())
+        .map(str::to_lowercase);
     let viewport_height = visible_row_capacity(view, area);
     let viewport_width = visible_column_capacity(view, area);
     view.resize_viewport(viewport_height, viewport_width);
@@ -105,28 +108,27 @@ pub fn render_table_with_theme(
         let Some(row) = view.rendered_visible_row(idx) else {
             break;
         };
-        let cell_styles = row
-            .iter()
-            .enumerate()
-            .map(|(column, cell)| {
-                let mut style = theme.style_or(
-                    view.default_cell_style_token_for_visible_column(column),
-                    "table.cell",
-                );
-                if let Some(color_ref) = view.conditional_color_for_visible_cell(idx, column) {
-                    if let Some(conditional_style) = theme.conditional_style(&color_ref) {
-                        style = overlay_style(style, conditional_style);
+        let cell_styles =
+            row.iter()
+                .enumerate()
+                .map(|(column, _cell)| {
+                    let mut style = theme.style_or(
+                        view.default_cell_style_token_for_visible_column(column),
+                        "table.cell",
+                    );
+                    if let Some(color_ref) = view.conditional_color_for_visible_cell(idx, column) {
+                        if let Some(conditional_style) = theme.conditional_style(&color_ref) {
+                            style = overlay_style(style, conditional_style);
+                        }
                     }
-                }
-                if search_query
-                    .filter(|query| !query.is_empty())
-                    .is_some_and(|query| cell.to_lowercase().contains(&query.to_lowercase()))
-                {
-                    style = overlay_style(style, theme.style("search.highlight"));
-                }
-                style
-            })
-            .collect::<Vec<_>>();
+                    if search_query.as_deref().is_some_and(|query| {
+                        view.visible_cell_matches_search_query(idx, column, query)
+                    }) {
+                        style = overlay_style(style, theme.style("search.highlight"));
+                    }
+                    style
+                })
+                .collect::<Vec<_>>();
         let selected_column = (idx == cursor.row).then_some(cursor.column);
         render_row(
             buffer,
