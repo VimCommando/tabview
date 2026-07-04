@@ -387,29 +387,31 @@ fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
         let cell = align_cell(cell, width, "…", alignment);
         buffer.set_stringn(x, render.y, &cell, width, style);
         if let Some(query) = render.search_query {
-            let highlighted = highlight_search_matches(
-                buffer,
-                x,
-                render.y,
-                &cell,
-                width,
-                query,
-                render.search_style,
-            );
             let search_matched = render
                 .search_matches
                 .and_then(|matches| matches.get(column - render.column_offset))
                 .copied()
                 .unwrap_or(false);
-            if !highlighted && search_matched {
-                highlight_visible_cell_content(
+            if search_matched {
+                let highlighted = highlight_search_matches(
                     buffer,
                     x,
                     render.y,
                     &cell,
                     width,
+                    query,
                     render.search_style,
                 );
+                if !highlighted {
+                    highlight_visible_cell_content(
+                        buffer,
+                        x,
+                        render.y,
+                        &cell,
+                        width,
+                        render.search_style,
+                    );
+                }
             }
         }
         if let Some(prefix_style) = render.prefix_style {
@@ -1559,6 +1561,22 @@ columns:
                 .contains(ratatui::style::Modifier::UNDERLINED));
         }
         assert_ne!(buffer[(5, 3)].style().fg, Some(Color::Rgb(255, 255, 0)));
+    }
+
+    #[test]
+    fn search_highlight_ignores_padding_when_cell_does_not_match() {
+        let mut view = TableView::classify(rows(&[&["N"], &["a"]]), Viewport::new(10, 1));
+        view.set_all_column_widths(4);
+        let area = Rect::new(0, 0, 8, 5);
+        let mut buffer = Buffer::empty(area);
+        let theme = default_theme();
+
+        render_table_with_theme(&mut view, area, &mut buffer, &theme, Some(" "));
+
+        assert_eq!(buffer_text(&buffer).lines().nth(3), Some("a       "));
+        for x in 1..4 {
+            assert_ne!(buffer[(x, 3)].style().fg, Some(Color::Rgb(255, 255, 0)));
+        }
     }
 
     #[test]

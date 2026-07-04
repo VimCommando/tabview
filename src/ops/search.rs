@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::sync::OnceLock;
 
 use regex::{Regex, RegexBuilder};
 
@@ -10,10 +11,10 @@ pub enum SearchDirection {
     Reverse,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub(crate) struct CaseInsensitiveQuery<'a> {
     raw: &'a str,
-    matcher: Regex,
+    matcher: OnceLock<Option<Regex>>,
 }
 
 impl<'a> CaseInsensitiveQuery<'a> {
@@ -21,11 +22,10 @@ impl<'a> CaseInsensitiveQuery<'a> {
         if raw.is_empty() {
             return None;
         }
-        RegexBuilder::new(&regex::escape(raw))
-            .case_insensitive(true)
-            .build()
-            .ok()
-            .map(|matcher| Self { raw, matcher })
+        Some(Self {
+            raw,
+            matcher: OnceLock::new(),
+        })
     }
 
     pub(crate) fn matches(&self, value: &str) -> bool {
@@ -40,7 +40,7 @@ impl<'a> CaseInsensitiveQuery<'a> {
                 .position(|window| window.eq_ignore_ascii_case(self.raw.as_bytes()))
                 .map(|start| start..start + self.raw.len());
         }
-        self.matcher
+        self.unicode_matcher()?
             .find(value)
             .map(|matched| matched.start()..matched.end())
     }
@@ -51,6 +51,17 @@ impl<'a> CaseInsensitiveQuery<'a> {
             value,
             offset: 0,
         }
+    }
+
+    fn unicode_matcher(&self) -> Option<&Regex> {
+        self.matcher
+            .get_or_init(|| {
+                RegexBuilder::new(&regex::escape(self.raw))
+                    .case_insensitive(true)
+                    .build()
+                    .ok()
+            })
+            .as_ref()
     }
 }
 
