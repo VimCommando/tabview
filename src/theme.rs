@@ -748,7 +748,12 @@ fn collect_style_specs_at(
 ) -> Result<(), String> {
     let Value::Mapping(mapping) = value else {
         let token = path.join(".");
-        return Err(format!("styles.{token} must be a mapping"));
+        let field = if token.is_empty() {
+            "styles".to_owned()
+        } else {
+            format!("styles.{token}")
+        };
+        return Err(format!("{field} must be a mapping"));
     };
     if is_style_leaf(&mapping) {
         let token = path.join(".");
@@ -1027,7 +1032,7 @@ fn dim_ansi_rgb(color: AnsiColor) -> (u8, u8, u8) {
         AnsiColor::DarkRed | AnsiColor::Red => (100, 0, 0),
         AnsiColor::DarkGreen | AnsiColor::Green => (0, 100, 0),
         AnsiColor::DarkYellow | AnsiColor::Yellow => (100, 100, 0),
-        AnsiColor::DarkBlue | AnsiColor::Blue => (0, 0, 255),
+        AnsiColor::DarkBlue | AnsiColor::Blue => (0, 0, 100),
         AnsiColor::DarkMagenta | AnsiColor::Magenta => (100, 0, 100),
         AnsiColor::DarkCyan | AnsiColor::Cyan => (0, 100, 100),
         AnsiColor::Gray | AnsiColor::DarkGray | AnsiColor::White => (100, 100, 100),
@@ -1727,6 +1732,11 @@ identifiers:
     }
 
     #[test]
+    fn blue_identifier_shades_start_from_dim_blue() {
+        assert_eq!(dark_identifier_rgb((0, 0, 255)), (0, 0, 128));
+    }
+
+    #[test]
     fn parses_hex32_and_falls_back_to_ansi256() {
         let theme = parse_theme_yaml(
             &full_theme_with_text_and_style_overrides("\"#25A39AFF\"", "", &[]),
@@ -1761,6 +1771,19 @@ styles:
         assert!(parse_theme_yaml(invalid, TerminalColorMode::TrueColor)
             .expect_err("invalid")
             .contains("unsupported style token"));
+    }
+
+    #[test]
+    fn root_styles_type_error_names_styles_without_empty_token() {
+        let invalid = r#"
+name: bad
+styles: nope
+"#;
+
+        assert_eq!(
+            parse_theme_yaml(invalid, TerminalColorMode::TrueColor).expect_err("invalid"),
+            "styles must be a mapping"
+        );
     }
 
     #[test]
