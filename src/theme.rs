@@ -656,6 +656,7 @@ pub fn parse_theme_yaml(
         palette,
         identifier_colors,
     };
+    validate_theme_identifier_colors(&theme)?;
     for token in REQUIRED_STYLE_TOKENS {
         let spec = style_specs
             .get(*token)
@@ -1206,6 +1207,15 @@ fn validate_identifier_colors(colors: Vec<String>) -> Result<Vec<String>, String
     Ok(colors)
 }
 
+fn validate_theme_identifier_colors(theme: &ResolvedTheme) -> Result<(), String> {
+    for (idx, color) in theme.identifier_colors.iter().enumerate() {
+        theme
+            .color_ref_rgb(color)
+            .map_err(|err| format!("identifiers.colors.{idx}: {err}"))?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum ConditionalColorRule {
     Match { entries: Vec<MatchEntry> },
@@ -1677,6 +1687,23 @@ identifiers:
                 .fg,
             Some(Color::Rgb(136, 0, 0))
         );
+    }
+
+    #[test]
+    fn theme_identifier_colors_validate_color_refs() {
+        let err = parse_theme_yaml(
+            &full_theme(
+                r##"
+identifiers:
+  colors: [missing-alias]
+"##,
+            ),
+            TerminalColorMode::TrueColor,
+        )
+        .expect_err("invalid theme");
+
+        assert!(err.contains("identifiers.colors.0"));
+        assert!(err.contains("unknown color alias 'missing-alias'"));
     }
 
     #[test]

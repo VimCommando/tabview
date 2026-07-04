@@ -10,9 +10,12 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::command::KeyBinding;
 use crate::ops::filter::{FilterKind, FilterMode};
 use crate::ops::search::CaseInsensitiveQuery;
-use crate::theme::{default_theme, ResolvedTheme};
+use crate::theme::{default_theme_for_terminal, terminal_color_mode_from_env, ResolvedTheme};
 use crate::view::{ColumnAlignment, TableView};
 use crate::FilterPromptView;
+
+#[cfg(test)]
+use crate::theme::default_theme;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Popup {
@@ -33,7 +36,17 @@ pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
 
 fn default_ui_theme() -> &'static ResolvedTheme {
     static DEFAULT_THEME: OnceLock<ResolvedTheme> = OnceLock::new();
-    DEFAULT_THEME.get_or_init(default_theme)
+    DEFAULT_THEME.get_or_init(default_ui_theme_value)
+}
+
+#[cfg(test)]
+fn default_ui_theme_value() -> ResolvedTheme {
+    default_theme()
+}
+
+#[cfg(not(test))]
+fn default_ui_theme_value() -> ResolvedTheme {
+    default_theme_for_terminal(terminal_color_mode_from_env())
 }
 
 pub fn render_table_with_theme(
