@@ -1840,15 +1840,13 @@ impl TableView {
     }
 
     fn identifier_indexes(&self, source_column: usize) -> BTreeMap<String, usize> {
-        let mut values = self
+        let values = self
             .rows
             .iter()
             .filter_map(|row| row.get(source_column).map(String::as_str))
             .map(|raw| self.render_source_cell(source_column, Some(raw)))
             .filter(|value| !value.is_empty())
-            .collect::<Vec<_>>();
-        values.sort();
-        values.dedup();
+            .collect::<BTreeSet<_>>();
         values
             .into_iter()
             .enumerate()

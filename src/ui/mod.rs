@@ -88,6 +88,7 @@ pub fn render_table_with_theme(
                     marker_style: theme.style("table.hidden_marker"),
                     prefix_style: Some(theme.style_or("table.header_glyph", "table.divider")),
                     cell_styles: None,
+                    preserve_selected_fg: None,
                 },
             );
             row_y += 1;
@@ -100,6 +101,7 @@ pub fn render_table_with_theme(
         .saturating_add(viewport.height)
         .min(view.row_count());
     let mut cell_styles = Vec::new();
+    let mut preserve_selected_fg = Vec::new();
     for idx in viewport.origin.row..row_end {
         if row_y >= area.y + area.height {
             break;
@@ -108,29 +110,30 @@ pub fn render_table_with_theme(
             break;
         };
         cell_styles.clear();
-        cell_styles.extend(
-            row.iter()
-                .enumerate()
-                .skip(viewport.origin.column)
-                .take(viewport.width)
-                .map(|(column, cell)| {
-                    let context =
-                        view.visible_cell_style_context(idx, column, cell, search_query.as_ref());
-                    let mut style = theme.style_or(
-                        view.default_cell_style_token_for_visible_column(column),
-                        "table.cell",
-                    );
-                    if let Some(color_ref) = context.conditional_color {
-                        if let Some(conditional_style) = theme.conditional_style(&color_ref) {
-                            style = overlay_style(style, conditional_style);
-                        }
-                    }
-                    if context.search_match {
-                        style = overlay_style(style, theme.style("search.highlight"));
-                    }
-                    style
-                }),
-        );
+        preserve_selected_fg.clear();
+        for (column, cell) in row
+            .iter()
+            .enumerate()
+            .skip(viewport.origin.column)
+            .take(viewport.width)
+        {
+            let context = view.visible_cell_style_context(idx, column, cell, search_query.as_ref());
+            let should_preserve_fg = context.conditional_color.is_some() || context.search_match;
+            let mut style = theme.style_or(
+                view.default_cell_style_token_for_visible_column(column),
+                "table.cell",
+            );
+            if let Some(color_ref) = context.conditional_color {
+                if let Some(conditional_style) = theme.conditional_style(&color_ref) {
+                    style = overlay_style(style, conditional_style);
+                }
+            }
+            if context.search_match {
+                style = overlay_style(style, theme.style("search.highlight"));
+            }
+            cell_styles.push(style);
+            preserve_selected_fg.push(should_preserve_fg);
+        }
         let selected_column = (idx == cursor.row).then_some(cursor.column);
         render_row(
             buffer,
@@ -149,6 +152,7 @@ pub fn render_table_with_theme(
                 marker_style: theme.style("table.hidden_marker"),
                 prefix_style: None,
                 cell_styles: Some(&cell_styles),
+                preserve_selected_fg: Some(&preserve_selected_fg),
             },
         );
         row_y += 1;
@@ -296,6 +300,7 @@ struct RowRender<'a> {
     marker_style: Style,
     prefix_style: Option<Style>,
     cell_styles: Option<&'a [Style]>,
+    preserve_selected_fg: Option<&'a [bool]>,
 }
 
 fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
@@ -311,7 +316,16 @@ fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
             .copied()
             .unwrap_or(render.style);
         let style = if render.selected_column == Some(column) {
-            overlay_style(base_style, render.selected_style)
+            let preserve_fg = render
+                .preserve_selected_fg
+                .and_then(|preserve| preserve.get(column - render.column_offset))
+                .copied()
+                .unwrap_or(false);
+            if preserve_fg {
+                overlay_style_without_fg(base_style, render.selected_style)
+            } else {
+                overlay_style(base_style, render.selected_style)
+            }
         } else {
             base_style
         };
@@ -353,6 +367,15 @@ fn overlay_style(mut base: Style, overlay: Style) -> Style {
     if let Some(fg) = overlay.fg {
         base = base.fg(fg);
     }
+    if let Some(bg) = overlay.bg {
+        base = base.bg(bg);
+    }
+    base = base.add_modifier(overlay.add_modifier);
+    base = base.remove_modifier(overlay.sub_modifier);
+    base
+}
+
+fn overlay_style_without_fg(mut base: Style, overlay: Style) -> Style {
     if let Some(bg) = overlay.bg {
         base = base.bg(bg);
     }
@@ -1355,7 +1378,7 @@ columns:
         let theme = crate::theme::default_theme();
         render_table_with_theme(&mut view, area, &mut buffer, &theme, Some("idle"));
 
-        assert_eq!(buffer[(0, 3)].style().fg, Some(Color::Indexed(248)));
+        assert_eq!(buffer[(0, 3)].style().fg, Some(Color::Indexed(2)));
         assert_eq!(buffer[(0, 4)].style().fg, Some(Color::Yellow));
     }
 
