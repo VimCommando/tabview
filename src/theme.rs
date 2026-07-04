@@ -1099,7 +1099,7 @@ fn parse_string(value: &str) -> Result<String, String> {
                 '\\' => '\\',
                 'n' => '\n',
                 't' => '\t',
-                other => other,
+                other => return Err(format!("unsupported escape sequence '\\{other}'")),
             });
             escaped = false;
         } else if ch == '\\' {
@@ -1123,10 +1123,46 @@ fn parse_string_array(value: &str) -> Result<Vec<String>, String> {
     if inner.trim().is_empty() {
         return Ok(Vec::new());
     }
-    inner
-        .split(',')
+    split_string_array_items(inner)?
+        .into_iter()
         .map(|item| parse_string(item.trim()))
         .collect()
+}
+
+fn split_string_array_items(inner: &str) -> Result<Vec<String>, String> {
+    let mut items = Vec::new();
+    let mut current = String::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in inner.chars() {
+        if in_string {
+            current.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+            continue;
+        }
+        match ch {
+            '"' => {
+                in_string = true;
+                current.push(ch);
+            }
+            ',' => {
+                items.push(current.trim().to_owned());
+                current.clear();
+            }
+            _ => current.push(ch),
+        }
+    }
+    if in_string {
+        return Err("unterminated string in array".to_owned());
+    }
+    items.push(current.trim().to_owned());
+    Ok(items)
 }
 
 fn parse_identifier_colors(value: &str) -> Result<Vec<String>, String> {
@@ -1587,6 +1623,21 @@ fg = "a"
         assert!(parse_string(r#""bad\""#)
             .expect_err("invalid")
             .contains("unterminated escape"));
+    }
+
+    #[test]
+    fn parse_string_rejects_unknown_escape() {
+        assert!(parse_string(r#""bad\q""#)
+            .expect_err("invalid")
+            .contains("unsupported escape"));
+    }
+
+    #[test]
+    fn parse_string_array_keeps_commas_inside_strings() {
+        assert_eq!(
+            parse_string_array(r#"["a,b", "c"]"#).expect("array"),
+            vec!["a,b".to_owned(), "c".to_owned()]
+        );
     }
 
     #[test]

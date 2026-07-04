@@ -1045,7 +1045,13 @@ fn match_value_from_yaml_key(
             }
             Some(ConditionalValue::Number(value))
         }
-        Value::String(value) => Some(ConditionalValue::String(value)),
+        Value::String(value) => {
+            if value.is_empty() {
+                warnings.push(warning(field, "match string value must not be empty"));
+                return None;
+            }
+            Some(ConditionalValue::String(value))
+        }
         _ => {
             warnings.push(warning(
                 field,
@@ -1668,6 +1674,7 @@ columns:
       - match:
           true: green
           false: muted
+          "": red
       - range:
           "<10": red
           ">=90": red
@@ -1751,6 +1758,10 @@ columns:
                 ]
             }
         );
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|warning| warning.field.contains("colors.0.match")));
         assert!(parsed
             .warnings
             .iter()
