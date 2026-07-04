@@ -31,10 +31,10 @@ The system SHALL allow selecting a theme by name through configuration and SHALL
 - **THEN** the system logs the failure, records a TUI warning, and continues opening the input with the selected or default theme
 
 ### Requirement: Theme TOML schema
-The system SHALL ship and document a TOML theme schema covering theme metadata, color mode, palette aliases, and named UI style tokens.
+The system SHALL ship and document a TOML theme schema covering theme metadata, color mode, palette aliases, identifier color families, and named UI style tokens.
 
 #### Scenario: Valid theme file
-- **WHEN** a theme TOML file defines `name`, `mode`, palette aliases, and required style tokens
+- **WHEN** a theme TOML file defines `name`, `mode`, palette aliases, identifier color families, and required style tokens
 - **THEN** the theme validates and can be applied
 
 #### Scenario: Unknown style token
@@ -44,6 +44,21 @@ The system SHALL ship and document a TOML theme schema covering theme metadata, 
 #### Scenario: Missing required token
 - **WHEN** a selected theme omits a required style token
 - **THEN** the system reports a clear configuration error and does not start the viewer
+
+### Requirement: Theme identifier families
+The system SHALL allow themes to define identifier color families used by saved-view `identifiers` conditional colors.
+
+#### Scenario: Theme identifier colors
+- **WHEN** a theme defines `[identifiers] colors = ["bright-green", "magenta", "cyan", "white"]`
+- **THEN** `identifiers` conditional colors using `colors: auto` are generated from those families
+
+#### Scenario: Identifier family shades
+- **WHEN** an identifier family color is configured
+- **THEN** the system generates 16 dark-to-light shades for that family before repeating, with the darkest shade no darker than the ANSI dark/dim foreground equivalent
+
+#### Scenario: Built-in identifier families
+- **WHEN** no user theme is selected
+- **THEN** the built-in `cmdzro` theme provides green, magenta, cyan, and white identifier families
 
 ### Requirement: Color value modes
 The system SHALL support 16-color names, 256-color palette indexes, and 32-bit hex colors in theme files and conditional color rules.

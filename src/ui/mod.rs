@@ -2,11 +2,12 @@ pub mod terminal;
 
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
-use ratatui::style::{Color, Modifier, Style};
+use ratatui::style::Style;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::command::KeyBinding;
 use crate::ops::filter::{FilterKind, FilterMode};
+use crate::theme::{default_theme, ResolvedTheme};
 use crate::view::{ColumnAlignment, TableView};
 use crate::FilterPromptView;
 
@@ -23,6 +24,17 @@ pub enum Popup {
 }
 
 pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
+    let theme = default_theme();
+    render_table_with_theme(view, area, buffer, &theme, None);
+}
+
+pub fn render_table_with_theme(
+    view: &mut TableView,
+    area: Rect,
+    buffer: &mut Buffer,
+    theme: &ResolvedTheme,
+    search_query: Option<&str>,
+) {
     let viewport_height = visible_row_capacity(view, area);
     let viewport_width = visible_column_capacity(view, area);
     view.resize_viewport(viewport_height, viewport_width);
@@ -30,19 +42,14 @@ pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
     let cursor = view.cursor();
     let viewport = view.viewport();
     let location = format!(" ({},{}) ", cursor.row + 1, cursor.column + 1);
-    buffer.set_string(
-        area.x,
-        area.y,
-        &location,
-        Style::default().add_modifier(Modifier::REVERSED),
-    );
+    buffer.set_string(area.x, area.y, &location, theme.style("table.location"));
 
     if let Some(cell) = view.current_cell() {
         buffer.set_string(
             area.x + location.len() as u16 + 1,
             area.y,
             cell,
-            Style::default(),
+            theme.style("table.current_cell"),
         );
     }
 
@@ -52,6 +59,7 @@ pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
 
     for x in area.x..area.x + area.width {
         buffer[(x, area.y + 1)].set_symbol("─");
+        buffer[(x, area.y + 1)].set_style(theme.style("table.divider"));
     }
 
     let mut row_y = area.y + 2;
@@ -68,12 +76,17 @@ pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
                     area,
                     y: row_y,
                     widths: &widths,
-                    style: Style::default().add_modifier(Modifier::BOLD),
-                    selected_column: None,
+                    style: theme.style("table.header"),
+                    selected_style: theme.style_or("table.header_selected", "table.header"),
+                    selected_column: Some(cursor.column),
                     column_offset: viewport.origin.column,
                     column_gap: view.column_gap(),
                     alignments: &left_alignments,
                     hidden_boundaries: Some(&hidden_boundaries(view)),
+                    marker_style: theme.style("table.hidden_marker"),
+                    prefix_style: Some(theme.style_or("table.header_glyph", "table.divider")),
+                    selected_overrides_fg: true,
+                    cell_styles: None,
                 },
             );
             row_y += 1;
@@ -92,6 +105,28 @@ pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
         let Some(row) = view.rendered_visible_row(idx) else {
             break;
         };
+        let cell_styles = row
+            .iter()
+            .enumerate()
+            .map(|(column, cell)| {
+                let mut style = theme.style_or(
+                    view.default_cell_style_token_for_visible_column(column),
+                    "table.cell",
+                );
+                if let Some(color_ref) = view.conditional_color_for_visible_cell(idx, column) {
+                    if let Some(conditional_style) = theme.conditional_style(&color_ref) {
+                        style = overlay_style(style, conditional_style);
+                    }
+                }
+                if search_query
+                    .filter(|query| !query.is_empty())
+                    .is_some_and(|query| cell.to_lowercase().contains(&query.to_lowercase()))
+                {
+                    style = overlay_style(style, theme.style("search.highlight"));
+                }
+                style
+            })
+            .collect::<Vec<_>>();
         let selected_column = (idx == cursor.row).then_some(cursor.column);
         render_row(
             buffer,
@@ -100,12 +135,17 @@ pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
                 area,
                 y: row_y,
                 widths: &widths,
-                style: Style::default(),
+                style: theme.style("table.cell"),
+                selected_style: theme.style("table.selected"),
                 selected_column,
                 column_offset: viewport.origin.column,
                 column_gap: view.column_gap(),
                 alignments: &alignments,
                 hidden_boundaries: None,
+                marker_style: theme.style("table.hidden_marker"),
+                prefix_style: None,
+                selected_overrides_fg: false,
+                cell_styles: Some(&cell_styles),
             },
         );
         row_y += 1;
@@ -113,6 +153,16 @@ pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
 }
 
 pub fn render_footer(message: Option<&str>, area: Rect, buffer: &mut Buffer) {
+    let theme = default_theme();
+    render_footer_with_theme(message, area, buffer, &theme);
+}
+
+pub fn render_footer_with_theme(
+    message: Option<&str>,
+    area: Rect,
+    buffer: &mut Buffer,
+    theme: &ResolvedTheme,
+) {
     if area.height == 0 {
         return;
     }
@@ -127,13 +177,14 @@ pub fn render_footer(message: Option<&str>, area: Rect, buffer: &mut Buffer) {
             y,
             &text,
             area.width as usize,
-            Style::default().add_modifier(Modifier::REVERSED),
+            theme.style("message.footer"),
         );
     }
 }
 
 pub fn render_popup(title: &str, body: &str, area: Rect, buffer: &mut Buffer) {
-    render_popup_with_actions(title, body, &[], area, buffer);
+    let theme = default_theme();
+    render_popup_with_actions(title, body, &[], area, buffer, &theme);
 }
 
 fn render_popup_with_actions(
@@ -142,11 +193,13 @@ fn render_popup_with_actions(
     actions: &[&str],
     area: Rect,
     buffer: &mut Buffer,
+    theme: &ResolvedTheme,
 ) {
     if area.width < 2 || area.height < 2 {
         return;
     }
-    let popup_style = Style::default().fg(Color::White).bg(Color::Black);
+    let popup_style = theme.style("popup.background");
+    let border_style = theme.style("popup.border");
     let x2 = area.x + area.width - 1;
     let y2 = area.y + area.height - 1;
 
@@ -161,16 +214,24 @@ fn render_popup_with_actions(
 
     for x in area.x..=x2 {
         buffer[(x, area.y)].set_symbol("─");
+        buffer[(x, area.y)].set_style(border_style);
         buffer[(x, y2)].set_symbol("─");
+        buffer[(x, y2)].set_style(border_style);
     }
     for y in area.y..=y2 {
         buffer[(area.x, y)].set_symbol("│");
+        buffer[(area.x, y)].set_style(border_style);
         buffer[(x2, y)].set_symbol("│");
+        buffer[(x2, y)].set_style(border_style);
     }
     buffer[(area.x, area.y)].set_symbol("┌");
     buffer[(x2, area.y)].set_symbol("┐");
     buffer[(area.x, y2)].set_symbol("└");
     buffer[(x2, y2)].set_symbol("┘");
+    buffer[(area.x, area.y)].set_style(border_style);
+    buffer[(x2, area.y)].set_style(border_style);
+    buffer[(area.x, y2)].set_style(border_style);
+    buffer[(x2, y2)].set_style(border_style);
 
     let title_width = area.width.saturating_sub(4) as usize;
     if title_width > 0 {
@@ -181,7 +242,7 @@ fn render_popup_with_actions(
             area.y,
             &title,
             area.width.saturating_sub(2) as usize,
-            popup_style.add_modifier(Modifier::BOLD),
+            theme.style("popup.title"),
         );
     }
     if !actions.is_empty() {
@@ -196,13 +257,7 @@ fn render_popup_with_actions(
             let text = truncate_cell(&footer, available, "…").trim_end().to_owned();
             let width = width.min(available as u16);
             let x = x2.saturating_sub(width).saturating_sub(1);
-            buffer.set_stringn(
-                x,
-                y2,
-                &text,
-                available,
-                popup_style.add_modifier(Modifier::BOLD),
-            );
+            buffer.set_stringn(x, y2, &text, available, theme.style("popup.action"));
         }
     }
     for (offset, line) in body
@@ -219,7 +274,7 @@ fn render_popup_with_actions(
             area.y + 2 + offset as u16,
             truncate_cell(line, content_width, "…"),
             content_width,
-            popup_style,
+            theme.style("popup.body"),
         );
     }
 }
@@ -229,11 +284,16 @@ struct RowRender<'a> {
     y: u16,
     widths: &'a [usize],
     style: Style,
+    selected_style: Style,
     selected_column: Option<usize>,
     column_offset: usize,
     column_gap: usize,
     alignments: &'a [Alignment],
     hidden_boundaries: Option<&'a [bool]>,
+    marker_style: Style,
+    prefix_style: Option<Style>,
+    selected_overrides_fg: bool,
+    cell_styles: Option<&'a [Style]>,
 }
 
 fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
@@ -243,14 +303,29 @@ fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
             break;
         }
         let width = render.widths.get(column).copied().unwrap_or(1);
+        let base_style = render
+            .cell_styles
+            .and_then(|styles| styles.get(column))
+            .copied()
+            .unwrap_or(render.style);
         let style = if render.selected_column == Some(column) {
-            render.style.add_modifier(Modifier::REVERSED)
+            if render.selected_overrides_fg {
+                overlay_style(base_style, render.selected_style)
+            } else {
+                overlay_selection_style(base_style, render.selected_style)
+            }
         } else {
-            render.style
+            base_style
         };
         let alignment = render.alignments.get(column).copied().unwrap_or_default();
         let cell = align_cell(cell, width, "…", alignment);
         buffer.set_stringn(x, render.y, &cell, width, style);
+        if let Some(prefix_style) = render.prefix_style {
+            let prefix_width = header_prefix_width(&cell).min(width);
+            for offset in 0..prefix_width {
+                buffer[(x + offset as u16, render.y)].set_style(prefix_style);
+            }
+        }
         let gap_start = x.saturating_add(width as u16);
         let marker_x = gap_start.saturating_add(render.column_gap.saturating_sub(1) as u16);
         if render.column_gap > 0
@@ -261,12 +336,45 @@ fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
                 .unwrap_or(false)
             && marker_x < render.area.x + render.area.width
         {
-            buffer.set_stringn(marker_x, render.y, "|", 1, render.style);
+            buffer.set_stringn(marker_x, render.y, "|", 1, render.marker_style);
         }
         x = x
             .saturating_add(width as u16)
             .saturating_add(render.column_gap as u16);
     }
+}
+
+fn header_prefix_width(cell: &str) -> usize {
+    cell.chars()
+        .take_while(|ch| matches!(ch, '▲' | '▼' | '+' | '-' | '±'))
+        .map(|ch| ch.width().unwrap_or(0))
+        .sum()
+}
+
+fn overlay_style(mut base: Style, overlay: Style) -> Style {
+    if let Some(fg) = overlay.fg {
+        base = base.fg(fg);
+    }
+    if let Some(bg) = overlay.bg {
+        base = base.bg(bg);
+    }
+    base = base.add_modifier(overlay.add_modifier);
+    base = base.remove_modifier(overlay.sub_modifier);
+    base
+}
+
+fn overlay_selection_style(mut base: Style, selected: Style) -> Style {
+    if base.fg.is_none() {
+        if let Some(fg) = selected.fg {
+            base = base.fg(fg);
+        }
+    }
+    if let Some(bg) = selected.bg {
+        base = base.bg(bg);
+    }
+    base = base.add_modifier(selected.add_modifier);
+    base = base.remove_modifier(selected.sub_modifier);
+    base
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -317,15 +425,36 @@ fn visible_column_capacity(view: &mut TableView, area: Rect) -> usize {
 }
 
 pub fn render_cell_popup(cell: &str, title: &str, area: Rect, buffer: &mut Buffer) -> bool {
+    let theme = default_theme();
+    render_cell_popup_with_theme(cell, title, area, buffer, &theme)
+}
+
+pub fn render_cell_popup_with_theme(
+    cell: &str,
+    title: &str,
+    area: Rect,
+    buffer: &mut Buffer,
+    theme: &ResolvedTheme,
+) -> bool {
     if cell.is_empty() {
         return false;
     }
-    render_popup_with_actions(title, cell, &["Close"], area, buffer);
+    render_popup_with_actions(title, cell, &["Close"], area, buffer, theme);
     true
 }
 
 pub fn render_info_popup(info: &str, area: Rect, buffer: &mut Buffer) {
-    render_popup_with_actions("Info", info, &["Close"], area, buffer);
+    let theme = default_theme();
+    render_info_popup_with_theme(info, area, buffer, &theme);
+}
+
+pub fn render_info_popup_with_theme(
+    info: &str,
+    area: Rect,
+    buffer: &mut Buffer,
+    theme: &ResolvedTheme,
+) {
+    render_popup_with_actions("Info", info, &["Close"], area, buffer, theme);
 }
 
 #[cfg(feature = "saved-views")]
@@ -336,6 +465,28 @@ pub fn render_saved_view_popup(
     confirming_overwrite: bool,
     area: Rect,
     buffer: &mut Buffer,
+) {
+    let theme = default_theme();
+    render_saved_view_popup_with_theme(
+        filename,
+        yaml,
+        scroll,
+        confirming_overwrite,
+        area,
+        buffer,
+        &theme,
+    );
+}
+
+#[cfg(feature = "saved-views")]
+pub fn render_saved_view_popup_with_theme(
+    filename: &str,
+    yaml: &str,
+    scroll: usize,
+    confirming_overwrite: bool,
+    area: Rect,
+    buffer: &mut Buffer,
+    theme: &ResolvedTheme,
 ) {
     let actions: &[&str] = if confirming_overwrite {
         &["Yes", "No"]
@@ -354,7 +505,7 @@ pub fn render_saved_view_popup(
     } else {
         format!("{filename}\n{yaml_body}")
     };
-    render_popup_with_actions("View", &body, actions, area, buffer);
+    render_popup_with_actions("View", &body, actions, area, buffer, theme);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -379,15 +530,32 @@ pub(crate) struct ColumnInfoOption {
     pub enabled: bool,
 }
 
+#[allow(
+    dead_code,
+    reason = "default-theme wrapper is used by tests and callers"
+)]
 pub(crate) fn render_column_info_popup(popup: &ColumnInfoPopup, area: Rect, buffer: &mut Buffer) {
-    render_popup_with_actions(&popup.title, "", &["Save", "Cancel"], area, buffer);
+    let theme = default_theme();
+    render_column_info_popup_with_theme(popup, area, buffer, &theme);
+}
+
+pub(crate) fn render_column_info_popup_with_theme(
+    popup: &ColumnInfoPopup,
+    area: Rect,
+    buffer: &mut Buffer,
+    theme: &ResolvedTheme,
+) {
+    render_popup_with_actions(&popup.title, "", &["Save", "Cancel"], area, buffer, theme);
     if area.width < 4 || area.height < 4 {
         return;
     }
 
-    let popup_style = Style::default().fg(Color::White).bg(Color::Black);
-    let disabled_style = popup_style.fg(Color::DarkGray);
-    let active_style = popup_style.add_modifier(Modifier::BOLD);
+    let popup_style = theme.style("popup.body");
+    let disabled_style = theme.style("popup.disabled");
+    let active_style = theme.style("popup.active");
+    let section_title_style = theme.style_or("popup.section_title", "popup.active");
+    let option_style = theme.style("popup.action");
+    let selected_option_style = theme.style_or("popup.option_selected", "popup.action");
     let content_x = area.x + 2;
     let content_y = area.y + 2;
     let content_width = area.width.saturating_sub(4) as usize;
@@ -430,6 +598,9 @@ pub(crate) fn render_column_info_popup(popup: &ColumnInfoPopup, area: Rect, buff
             max_y,
             buffer,
             active_style,
+            section_title_style,
+            option_style,
+            selected_option_style,
             popup_style,
             disabled_style,
         );
@@ -445,6 +616,9 @@ fn render_column_info_section(
     max_y: u16,
     buffer: &mut Buffer,
     active_style: Style,
+    section_title_style: Style,
+    option_style: Style,
+    selected_option_style: Style,
     popup_style: Style,
     disabled_style: Style,
 ) {
@@ -461,7 +635,7 @@ fn render_column_info_section(
         if section.active {
             active_style
         } else {
-            popup_style.add_modifier(Modifier::BOLD)
+            section_title_style
         },
     );
     *y += 1;
@@ -477,10 +651,12 @@ fn render_column_info_section(
             *y,
             truncate_cell(&text, width, "…"),
             width,
-            if option.enabled {
-                popup_style
-            } else {
+            if !option.enabled {
                 disabled_style
+            } else if option.selected {
+                selected_option_style
+            } else {
+                option_style
             },
         );
         *y += 1;
@@ -498,6 +674,16 @@ fn render_column_info_section(
 }
 
 pub fn render_help_popup(bindings: &[KeyBinding], area: Rect, buffer: &mut Buffer) {
+    let theme = default_theme();
+    render_help_popup_with_theme(bindings, area, buffer, &theme);
+}
+
+pub fn render_help_popup_with_theme(
+    bindings: &[KeyBinding],
+    area: Rect,
+    buffer: &mut Buffer,
+    theme: &ResolvedTheme,
+) {
     let content_width = area.width.saturating_sub(4) as usize;
     let key_width = bindings
         .iter()
@@ -528,7 +714,7 @@ pub fn render_help_popup(bindings: &[KeyBinding], area: Rect, buffer: &mut Buffe
             .collect::<Vec<_>>()
             .join("\n")
     };
-    render_popup_with_actions("Help", &body, &["Close"], area, buffer);
+    render_popup_with_actions("Help", &body, &["Close"], area, buffer, theme);
 }
 
 fn format_binding(binding: &KeyBinding, key_width: usize, column_width: usize) -> String {
@@ -565,27 +751,53 @@ fn align_cell(cell: &str, width: usize, truncation: &str, alignment: Alignment) 
 }
 
 pub fn render_search_prompt(query: &str, area: Rect, buffer: &mut Buffer) {
+    let theme = default_theme();
+    render_search_prompt_with_theme(query, area, buffer, &theme);
+}
+
+pub fn render_search_prompt_with_theme(
+    query: &str,
+    area: Rect,
+    buffer: &mut Buffer,
+    theme: &ResolvedTheme,
+) {
     render_popup_with_actions(
         "Search",
         &format!("Search: {query}"),
         &["Close", "Cancel"],
         area,
         buffer,
+        theme,
     );
 }
 
+#[allow(
+    dead_code,
+    reason = "default-theme wrapper is used by tests and callers"
+)]
 pub(crate) fn render_filter_prompt(prompt: &FilterPromptView<'_>, area: Rect, buffer: &mut Buffer) {
+    let theme = default_theme();
+    render_filter_prompt_with_theme(prompt, area, buffer, &theme);
+}
+
+pub(crate) fn render_filter_prompt_with_theme(
+    prompt: &FilterPromptView<'_>,
+    area: Rect,
+    buffer: &mut Buffer,
+    theme: &ResolvedTheme,
+) {
     let mode = match prompt.mode {
         FilterMode::In => "Filter in",
         FilterMode::Out => "Filter out",
     };
-    render_popup_with_actions("Filter", "", &["Apply", "Cancel"], area, buffer);
+    render_popup_with_actions("Filter", "", &["Apply", "Cancel"], area, buffer, theme);
     if area.width < 5 || area.height < 5 {
         return;
     }
 
-    let popup_style = Style::default().fg(Color::White).bg(Color::Black);
-    let disabled_style = popup_style.fg(Color::DarkGray);
+    let popup_style = theme.style("popup.body");
+    let option_style = theme.style("popup.action");
+    let disabled_style = theme.style("popup.disabled");
     let content_x = area.x + 2;
     let content_width = area.width.saturating_sub(4) as usize;
     let mut y = area.y + 2;
@@ -613,7 +825,7 @@ pub(crate) fn render_filter_prompt(prompt: &FilterPromptView<'_>, area: Rect, bu
         y,
         content_width,
         buffer,
-        popup_style,
+        option_style,
         disabled_style,
     );
     y += 1;
@@ -715,6 +927,7 @@ mod tests {
     use super::*;
     use crate::ops::filter::{FilterKind, FilterMode};
     use crate::view::Viewport;
+    use ratatui::style::Color;
 
     fn rows(values: &[&[&str]]) -> Vec<Vec<String>> {
         values
@@ -748,6 +961,50 @@ mod tests {
         assert!(text.contains("(1,1)"));
         assert!(text.contains("Name"));
         assert!(text.contains("alpha"));
+    }
+
+    #[test]
+    fn default_theme_colors_headers_strings_and_numbers() {
+        let mut view = TableView::classify(
+            rows(&[&["Name", "Value"], &["alpha", "1"]]),
+            Viewport::new(10, 2),
+        );
+        let area = Rect::new(0, 0, 24, 6);
+        let mut buffer = Buffer::empty(area);
+        render_table(&mut view, area, &mut buffer);
+
+        assert_eq!(buffer[(0, 2)].style().fg, Some(Color::Cyan));
+        assert_eq!(buffer[(7, 2)].style().fg, Some(Color::Indexed(6)));
+        assert_eq!(buffer[(0, 3)].style().fg, Some(Color::Indexed(2)));
+        assert_eq!(buffer[(7, 3)].style().fg, Some(Color::Magenta));
+    }
+
+    #[cfg(feature = "saved-views")]
+    #[test]
+    fn default_theme_colors_boolean_columns_magenta() {
+        let mut view = TableView::classify(
+            rows(&[&["Flag"], &["true"], &["false"]]),
+            Viewport::new(10, 1),
+        );
+        let parsed = crate::saved_views::parse_saved_view_yaml(
+            r#"
+name: flags
+filenames: [flags.csv]
+columns:
+  Flag:
+    type: boolean
+"#,
+        )
+        .expect("parse");
+        let headers = view.header().expect("header").to_vec();
+        let resolved = crate::saved_views::resolve_columns(&parsed.view, &headers);
+        view.apply_saved_columns(&resolved, None);
+
+        let area = Rect::new(0, 0, 16, 5);
+        let mut buffer = Buffer::empty(area);
+        render_table(&mut view, area, &mut buffer);
+
+        assert_eq!(buffer[(0, 3)].style().fg, Some(Color::Magenta));
     }
 
     #[test]
@@ -841,6 +1098,9 @@ mod tests {
         assert_eq!(buffer[(1, 2)].symbol(), "+");
         assert_eq!(buffer[(2, 2)].symbol(), "N");
         assert_eq!(buffer[(3, 2)].symbol(), "…");
+        assert_eq!(buffer[(0, 2)].style().fg, Some(Color::Indexed(242)));
+        assert_eq!(buffer[(1, 2)].style().fg, Some(Color::Indexed(242)));
+        assert_eq!(buffer[(2, 2)].style().fg, Some(Color::Cyan));
     }
 
     #[test]
@@ -974,7 +1234,9 @@ mod tests {
         assert!(text.contains("Cell"));
         assert!(text.contains("contents"));
         assert!(text.contains("┌"));
-        assert_eq!(buffer[(1, 1)].style().bg, Some(Color::Black));
+        assert_eq!(buffer[(1, 1)].style().bg, Some(Color::Indexed(19)));
+        assert_eq!(buffer[(0, 0)].style().fg, Some(Color::Cyan));
+        assert_eq!(buffer[(2, 0)].style().fg, Some(Color::Gray));
         assert_eq!(buffer[(1, 1)].symbol(), " ");
         assert_eq!(buffer[(1, 2)].symbol(), " ");
         assert_eq!(buffer[(2, 2)].symbol(), "c");
@@ -1008,7 +1270,10 @@ mod tests {
 
         render_column_info_popup(&popup, area, &mut buffer);
 
-        assert_eq!(buffer[(2, 6)].style().fg, Some(Color::DarkGray));
+        assert_eq!(buffer[(2, 4)].style().fg, Some(Color::Gray));
+        assert_eq!(buffer[(4, 5)].style().fg, Some(Color::Cyan));
+        assert_eq!(buffer[(4, 5)].style().bg, Some(Color::Indexed(19)));
+        assert_eq!(buffer[(2, 6)].style().fg, Some(Color::Indexed(240)));
         assert_eq!(buffer[(4, 6)].symbol(), "(");
         assert!(buffer_text(&buffer).contains("[ Save ] [ Cancel ]"));
         assert_eq!(buffer[(46, 11)].symbol(), "─");
@@ -1055,7 +1320,8 @@ mod tests {
         assert!(text.contains("( ) text"));
         assert!(text.contains("(*) regex"));
         assert!(text.contains("( ) numeric"));
-        assert_eq!(buffer[(23, 3)].style().fg, Some(Color::DarkGray));
+        assert_eq!(buffer[(23, 3)].style().fg, Some(Color::Indexed(240)));
+        assert_eq!(buffer[(4, 3)].style().fg, Some(Color::Cyan));
         assert!(text.contains("Condition: ^foo"));
         assert!(text.contains("invalid regex"));
     }
@@ -1075,6 +1341,38 @@ mod tests {
             .last()
             .expect("last line")
             .contains("saved view warning"));
+    }
+
+    #[cfg(feature = "saved-views")]
+    #[test]
+    fn themed_rendering_applies_conditional_colors_and_search_highlight() {
+        let mut view = TableView::classify(
+            rows(&[&["Status"], &["active"], &["idle"]]),
+            Viewport::new(10, 1),
+        );
+        let parsed = crate::saved_views::parse_saved_view_yaml(
+            r#"
+name: colors
+filenames: [data.csv]
+columns:
+  Status:
+    colors:
+      - match:
+          active: green
+"#,
+        )
+        .expect("parse");
+        let headers = view.header().expect("header").to_vec();
+        let resolved = crate::saved_views::resolve_columns(&parsed.view, &headers);
+        view.apply_saved_columns(&resolved, None);
+
+        let area = Rect::new(0, 0, 20, 5);
+        let mut buffer = Buffer::empty(area);
+        let theme = crate::theme::default_theme();
+        render_table_with_theme(&mut view, area, &mut buffer, &theme, Some("idle"));
+
+        assert_eq!(buffer[(0, 3)].style().fg, Some(Color::Indexed(2)));
+        assert_eq!(buffer[(0, 4)].style().fg, Some(Color::Yellow));
     }
 
     #[test]

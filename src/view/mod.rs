@@ -1,6 +1,6 @@
 mod column;
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use unicode_width::UnicodeWidthStr;
 
@@ -9,6 +9,9 @@ use crate::ops::sort::{
     parse_bool_key, parse_numeric_scalar, sort_rows_by_specs, NumericColumnProfile, SortDirection,
     SortMode, SortSpec,
 };
+#[cfg(feature = "saved-views")]
+use crate::theme::ConditionalValue;
+use crate::theme::{identifier_color_ref, ConditionalColorRule};
 use column::{ColumnIndex, Columns};
 
 const MAX_ACTIVE_SORT_KEYS: usize = 3;
@@ -209,6 +212,12 @@ struct ColumnDisplayMetadata {
     locale: LocaleMetadata,
 }
 
+#[derive(Debug, Clone, Default)]
+struct ColumnColorMetadata {
+    numeric_min_max: Option<(f64, f64)>,
+    identifier_indexes: BTreeMap<String, usize>,
+}
+
 impl Viewport {
     pub fn new(height: usize, width: usize) -> Self {
         Self {
@@ -237,6 +246,8 @@ pub struct TableView {
     hidden_columns: BTreeSet<usize>,
     column_alignment_overrides: Vec<Option<ColumnAlignment>>,
     column_display: Vec<ColumnDisplayMetadata>,
+    column_color_rules: Vec<Vec<ConditionalColorRule>>,
+    column_color_metadata: Vec<ColumnColorMetadata>,
     column_metadata_modified: BTreeSet<usize>,
     sort_keys: Vec<ActiveSortKey>,
     columns: Columns,
@@ -310,6 +321,8 @@ impl TableView {
             hidden_columns: BTreeSet::new(),
             column_alignment_overrides: vec![None; columns.len()],
             column_display: vec![ColumnDisplayMetadata::default(); columns.len()],
+            column_color_rules: vec![Vec::new(); columns.len()],
+            column_color_metadata: vec![ColumnColorMetadata::default(); columns.len()],
             column_metadata_modified: BTreeSet::new(),
             sort_keys: Vec::new(),
             columns,
@@ -465,6 +478,59 @@ impl TableView {
                 .render_source_cell(source_column, Some(raw))
                 .to_lowercase()
                 .contains(&query)
+    }
+
+    pub fn conditional_color_for_visible_cell(
+        &self,
+        row: usize,
+        visible_column: usize,
+    ) -> Option<String> {
+        let source_column = self.source_column_for_visible(visible_column)?;
+        let rules = self.column_color_rules.get(source_column)?;
+        if rules.is_empty() {
+            return None;
+        }
+        let source_row = self.source_row_for_visible_row(row)?;
+        let raw = self
+            .rows
+            .get(source_row)
+            .and_then(|row| row.get(source_column).map(String::as_str))
+            .unwrap_or_default();
+        let rendered = self.render_source_cell(source_column, Some(raw));
+        let numeric = parse_numeric_scalar(raw, self.source_numeric_column_profile(source_column));
+        let metadata = self.column_color_metadata.get(source_column);
+        let min_max = metadata.and_then(|metadata| metadata.numeric_min_max);
+
+        rules.iter().find_map(|rule| match rule {
+            ConditionalColorRule::Identifiers { colors } => metadata
+                .and_then(|metadata| metadata.identifier_indexes.get(&rendered).copied())
+                .map(|index| identifier_color_ref(index, colors)),
+            _ => rule.color_for(raw, &rendered, numeric, min_max),
+        })
+    }
+
+    pub fn default_cell_style_token_for_visible_column(
+        &self,
+        visible_column: usize,
+    ) -> &'static str {
+        let Some(source_column) = self.source_column_for_visible(visible_column) else {
+            return "table.cell";
+        };
+        match self
+            .column_display
+            .get(source_column)
+            .map(|metadata| metadata.column_type)
+            .unwrap_or_default()
+        {
+            ColumnTypeMetadata::BooleanWord
+            | ColumnTypeMetadata::BooleanChar
+            | ColumnTypeMetadata::BooleanBit => "table.cell.boolean",
+            ColumnTypeMetadata::Float | ColumnTypeMetadata::Int | ColumnTypeMetadata::SemVer => {
+                "table.cell.number"
+            }
+            _ if self.columns.is_numeric(ColumnIndex::new(source_column)) => "table.cell.number",
+            _ => "table.cell.string",
+        }
     }
 
     pub fn visible_row(&self, row: usize) -> Option<&Vec<String>> {
@@ -1023,6 +1089,10 @@ impl TableView {
         self.column_display = previous.column_display.clone();
         self.column_display
             .resize(source_column_count, ColumnDisplayMetadata::default());
+        self.column_color_rules = previous.column_color_rules.clone();
+        self.column_color_rules
+            .resize(source_column_count, Vec::new());
+        self.rebuild_column_color_metadata();
         self.column_metadata_modified = previous.column_metadata_modified.clone();
         self.column_metadata_modified
             .retain(|source_column| *source_column < source_column_count);
@@ -1175,6 +1245,17 @@ impl TableView {
                     self.column_metadata_modified.insert(source_column);
                 }
             }
+            let colors = column_view.colors.clone();
+            let color_metadata = self.build_column_color_metadata(source_column, &colors);
+            if let Some(slot) = self.column_color_rules.get_mut(source_column) {
+                *slot = colors;
+                if !slot.is_empty() {
+                    self.column_metadata_modified.insert(source_column);
+                }
+            }
+            if let Some(slot) = self.column_color_metadata.get_mut(source_column) {
+                *slot = color_metadata;
+            }
             if let Some(width) = column_view.width {
                 if let Some(target) = self.column_widths.get_mut(source_column) {
                     *target = match width {
@@ -1298,7 +1379,11 @@ impl TableView {
                     .column_alignment_overrides
                     .get(source_column)
                     .is_some_and(Option::is_some)
-                || self.column_metadata_modified.contains(&source_column);
+                || self.column_metadata_modified.contains(&source_column)
+                || self
+                    .column_color_rules
+                    .get(source_column)
+                    .is_some_and(|rules| !rules.is_empty());
             if !include_column {
                 continue;
             }
@@ -1349,6 +1434,14 @@ impl TableView {
                     ColumnAlignment::Right => "right",
                 };
                 block.push_str(&format!("    align: {align}\n"));
+            }
+            if let Some(rules) = self.column_color_rules.get(source_column) {
+                if !rules.is_empty() {
+                    block.push_str("    colors:\n");
+                    for rule in rules {
+                        push_color_rule_yaml(&mut block, rule);
+                    }
+                }
             }
             column_blocks.push(block);
         }
@@ -1596,6 +1689,71 @@ impl TableView {
             LocaleMetadata::en_us(),
         ))
     }
+
+    fn rebuild_column_color_metadata(&mut self) {
+        self.column_color_metadata = (0..self.source_column_count())
+            .map(|source_column| {
+                let rules = self
+                    .column_color_rules
+                    .get(source_column)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default();
+                self.build_column_color_metadata(source_column, rules)
+            })
+            .collect();
+    }
+
+    fn build_column_color_metadata(
+        &self,
+        source_column: usize,
+        rules: &[ConditionalColorRule],
+    ) -> ColumnColorMetadata {
+        let numeric_min_max = rules
+            .iter()
+            .any(|rule| matches!(rule, ConditionalColorRule::AutoGradient { .. }))
+            .then(|| self.numeric_min_max(source_column))
+            .flatten();
+        let identifier_indexes = rules
+            .iter()
+            .any(|rule| matches!(rule, ConditionalColorRule::Identifiers { .. }))
+            .then(|| self.identifier_indexes(source_column))
+            .unwrap_or_default();
+        ColumnColorMetadata {
+            numeric_min_max,
+            identifier_indexes,
+        }
+    }
+
+    fn numeric_min_max(&self, source_column: usize) -> Option<(f64, f64)> {
+        let profile = self.source_numeric_column_profile(source_column);
+        let mut values = self
+            .rows
+            .iter()
+            .filter_map(|row| row.get(source_column))
+            .filter_map(|value| parse_numeric_scalar(value, profile))
+            .filter(|value| value.is_finite());
+        let first = values.next()?;
+        Some(values.fold((first, first), |(min, max), value| {
+            (min.min(value), max.max(value))
+        }))
+    }
+
+    fn identifier_indexes(&self, source_column: usize) -> BTreeMap<String, usize> {
+        let mut values = self
+            .rows
+            .iter()
+            .filter_map(|row| row.get(source_column).map(String::as_str))
+            .map(|raw| self.render_source_cell(source_column, Some(raw)))
+            .filter(|value| !value.is_empty())
+            .collect::<Vec<_>>();
+        values.sort();
+        values.dedup();
+        values
+            .into_iter()
+            .enumerate()
+            .map(|(index, value)| (value, index))
+            .collect()
+    }
 }
 
 fn format_number_parts(
@@ -1778,6 +1936,94 @@ fn filter_kind_name(kind: FilterKind) -> &'static str {
         FilterKind::Text => "text",
         FilterKind::Regex => "regex",
         FilterKind::Numeric => "numeric",
+    }
+}
+
+#[cfg(feature = "saved-views")]
+fn push_color_rule_yaml(block: &mut String, rule: &ConditionalColorRule) {
+    match rule {
+        ConditionalColorRule::Match { entries } => {
+            block.push_str("      - match:\n");
+            for entry in entries {
+                block.push_str(&format!(
+                    "          {}: {}\n",
+                    conditional_value_yaml(&entry.value),
+                    yaml_scalar(&entry.color)
+                ));
+            }
+        }
+        ConditionalColorRule::Range { entries } => {
+            block.push_str("      - range:\n");
+            for entry in entries {
+                block.push_str(&format!(
+                    "          {}: {}\n",
+                    yaml_scalar(&range_entry_expression(entry)),
+                    yaml_scalar(&entry.color)
+                ));
+            }
+        }
+        ConditionalColorRule::FixedGradient { stops } => {
+            block.push_str("      - gradient:\n");
+            block.push_str("          mode: fixed\n");
+            block.push_str("          stops:\n");
+            for stop in stops {
+                block.push_str(&format!(
+                    "            {}: {}\n",
+                    yaml_scalar(&stop.value.to_string()),
+                    yaml_scalar(&stop.color)
+                ));
+            }
+        }
+        ConditionalColorRule::AutoGradient { colors, steps } => {
+            block.push_str("      - gradient:\n");
+            block.push_str("          mode: auto\n");
+            block.push_str(&format!("          steps: {steps}\n"));
+            block.push_str("          colors:\n");
+            for color in colors {
+                block.push_str(&format!("            - {}\n", yaml_scalar(color)));
+            }
+        }
+        ConditionalColorRule::Identifiers { colors } => {
+            block.push_str("      - identifiers:\n");
+            match colors {
+                crate::theme::IdentifierColors::Auto => {
+                    block.push_str("          colors: auto\n");
+                }
+                crate::theme::IdentifierColors::Colors(colors) => {
+                    block.push_str("          colors:\n");
+                    for color in colors {
+                        block.push_str(&format!("            - {}\n", yaml_scalar(color)));
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(feature = "saved-views")]
+fn range_entry_expression(entry: &crate::theme::RangeEntry) -> String {
+    let mut parts = Vec::new();
+    if let Some(value) = entry.gte {
+        parts.push(format!(">={value}"));
+    }
+    if let Some(value) = entry.gt {
+        parts.push(format!(">{value}"));
+    }
+    if let Some(value) = entry.lte {
+        parts.push(format!("<={value}"));
+    }
+    if let Some(value) = entry.lt {
+        parts.push(format!("<{value}"));
+    }
+    parts.join(" ")
+}
+
+#[cfg(feature = "saved-views")]
+fn conditional_value_yaml(value: &ConditionalValue) -> String {
+    match value {
+        ConditionalValue::Bool(value) => value.to_string(),
+        ConditionalValue::Number(value) => value.to_string(),
+        ConditionalValue::String(value) => yaml_scalar(value),
     }
 }
 
@@ -2437,6 +2683,133 @@ columns:
             .expect("filter");
         assert_eq!(view.visible_raw_rows_vec(), rows(&[&["1000"]]));
         assert_eq!(view.visible_rows_vec(), rows(&[&["1,000"]]));
+    }
+
+    #[cfg(feature = "saved-views")]
+    #[test]
+    fn conditional_colors_apply_without_changing_values() {
+        let mut view = TableView::classify(
+            rows(&[
+                &["Status", "Percent"],
+                &["active", "5%"],
+                &["idle", "50%"],
+                &["down", "95%"],
+            ]),
+            Viewport::new(10, 2),
+        );
+        let parsed = crate::saved_views::parse_saved_view_yaml(
+            r#"
+name: colors
+filenames: [data.csv]
+columns:
+  Status:
+    colors:
+      - match:
+          active: green
+  Percent:
+    type: number
+    colors:
+      - range:
+          "<10": red
+      - gradient:
+          mode: auto
+          colors: [green, yellow]
+"#,
+        )
+        .expect("parse");
+        let headers = view.header().expect("header").to_vec();
+        let resolved = crate::saved_views::resolve_columns(&parsed.view, &headers);
+        view.apply_saved_columns(&resolved, None);
+
+        assert_eq!(
+            view.conditional_color_for_visible_cell(0, 0),
+            Some("green".to_owned())
+        );
+        assert_eq!(
+            view.conditional_color_for_visible_cell(0, 1),
+            Some("red".to_owned())
+        );
+        assert_eq!(
+            view.conditional_color_for_visible_cell(1, 1),
+            Some("gradient(4,8,green,yellow)".to_owned())
+        );
+        assert_eq!(
+            view.visible_rows_vec(),
+            rows(&[&["active", "5%"], &["idle", "50%"], &["down", "95%"]])
+        );
+    }
+
+    #[cfg(feature = "saved-views")]
+    #[test]
+    fn identifier_colors_are_stable_for_unique_rendered_values() {
+        let mut view = TableView::classify(
+            rows(&[&["Address"], &["10.0.0.2"], &["10.0.0.1"], &["10.0.0.2"]]),
+            Viewport::new(10, 1),
+        );
+        let parsed = crate::saved_views::parse_saved_view_yaml(
+            r#"
+name: identifiers
+filenames: [data.csv]
+columns:
+  Address:
+    type: ip
+    colors:
+      - identifiers: {}
+"#,
+        )
+        .expect("parse");
+        let headers = view.header().expect("header").to_vec();
+        let resolved = crate::saved_views::resolve_columns(&parsed.view, &headers);
+        view.apply_saved_columns(&resolved, None);
+
+        let first = view
+            .conditional_color_for_visible_cell(0, 0)
+            .expect("first color");
+        let second = view
+            .conditional_color_for_visible_cell(1, 0)
+            .expect("second color");
+        let repeated = view
+            .conditional_color_for_visible_cell(2, 0)
+            .expect("repeated color");
+
+        assert_ne!(first, second);
+        assert_eq!(first, repeated);
+        assert!(first.starts_with("identifier("));
+    }
+
+    #[cfg(feature = "saved-views")]
+    #[test]
+    fn restored_view_settings_preserve_conditional_color_cache() {
+        let mut view = TableView::classify(
+            rows(&[&["Address"], &["10.0.0.2"], &["10.0.0.1"]]),
+            Viewport::new(10, 1),
+        );
+        let parsed = crate::saved_views::parse_saved_view_yaml(
+            r#"
+name: identifiers
+filenames: [data.csv]
+columns:
+  Address:
+    type: ip
+    colors:
+      - identifiers: {}
+"#,
+        )
+        .expect("parse");
+        let headers = view.header().expect("header").to_vec();
+        let resolved = crate::saved_views::resolve_columns(&parsed.view, &headers);
+        view.apply_saved_columns(&resolved, None);
+
+        let mut restored = TableView::classify(
+            rows(&[&["Address"], &["10.0.0.2"], &["10.0.0.1"]]),
+            Viewport::new(10, 1),
+        );
+        restored.restore_view_settings_from(&view);
+
+        assert_eq!(
+            restored.conditional_color_for_visible_cell(0, 0),
+            view.conditional_color_for_visible_cell(0, 0)
+        );
     }
 
     #[cfg(feature = "saved-views")]

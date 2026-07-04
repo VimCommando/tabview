@@ -11,7 +11,7 @@ name = "tabview"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["saved-views"]
 clipboard = ["dep:arboard"]
 saved-views = [
     "dep:num-format",

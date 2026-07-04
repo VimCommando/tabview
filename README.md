@@ -47,7 +47,8 @@ contents of that cell are shown next to it.
 
 - Rust toolchain for installation with Cargo.
 - Optional clipboard support can be enabled with the `clipboard` Cargo feature.
-- Optional saved views can be enabled with the `saved-views` Cargo feature.
+- Saved views are enabled by default. Build with `--no-default-features` to omit
+  saved view support.
 
 ## Installation
 
@@ -67,12 +68,6 @@ Build with clipboard support:
 
 ```sh
 cargo install tabview --features clipboard
-```
-
-Build with saved view support:
-
-```sh
-cargo install tabview --features saved-views
 ```
 
 ## Usage
@@ -108,9 +103,114 @@ silent
 The Rust rewrite supports the `tabview` CLI only. The former Python import API
 (`import tabview` and `tabview.view(...)`) is not part of the supported surface.
 
+## Color Themes
+
+Tabview loads theme settings from `$XDG_CONFIG_HOME/tabview/config.toml`, or
+`~/.config/tabview/config.toml` when `XDG_CONFIG_HOME` is unset:
+
+```toml
+theme = "cmdzro-sample"
+```
+
+Theme files live in `tabview/themes/*.toml` under the same config directory.
+If no theme is configured, tabview uses the built-in `cmdzro` theme based on
+`~/.config/nvim/colors/cmdzro.vim`: neutral gray text, blue reserved for UI
+surfaces, yellow reserved for search and UI emphasis, and red reserved for
+errors or unhealthy states.
+
+Theme colors accept 16-color names, 256-color palette values, and 32-bit hex:
+
+```toml
+name = "ops-dark"
+mode = "auto" # auto, ansi16, ansi256, or hex32
+
+[palette]
+text = "palette(248)"
+gray = "gray"
+ui_blue = "palette(19)"
+blue = "blue"
+dark_blue = "palette(19)"
+cyan = "cyan"
+dark_cyan = "dark-cyan"
+green = "dark-green"
+magenta = "magenta"
+yellow = "yellow"
+error = "dark-red"
+teal = "#25A39AFF"
+
+[identifiers]
+colors = ["bright-green", "magenta", "cyan", "white"]
+
+[styles.table.cell]
+fg = "text"
+
+[styles.table.location]
+fg = "gray"
+bg = "black"
+
+[styles.table.current_cell]
+fg = "cyan"
+bg = "dark_blue"
+
+[styles.table.divider]
+fg = "gray"
+
+[styles.table.header]
+fg = "dark_cyan"
+modifiers = ["bold"]
+
+[styles.table.header_selected]
+fg = "cyan"
+modifiers = ["bold"]
+
+[styles.table.header_glyph]
+fg = "muted"
+
+[styles.table.cell.string]
+fg = "green"
+
+[styles.table.cell.number]
+fg = "magenta"
+
+[styles.table.cell.boolean]
+fg = "magenta"
+
+[styles.table.selected]
+fg = "text"
+bg = "dark_blue"
+
+[styles.popup.background]
+fg = "text"
+bg = "dark_blue"
+
+[styles.popup.border]
+fg = "cyan"
+bg = "dark_blue"
+
+[styles.popup.title]
+fg = "gray"
+bg = "dark_blue"
+
+[styles.popup.action]
+fg = "cyan"
+bg = "dark_blue"
+
+[styles.popup.option_selected]
+fg = "cyan"
+bg = "dark_blue"
+
+[styles.search.highlight]
+fg = "yellow"
+bg = "dark_blue"
+modifiers = ["underline"]
+```
+
+See `sample/config/themes/cmdzro-sample.toml` for a complete theme file. The
+theme schema is shipped at `schemas/theme.schema.json`.
+
 ## Saved Views
 
-When built with `--features saved-views`, tabview loads user-defined YAML views
+By default, tabview loads user-defined YAML views
 from `$XDG_CONFIG_HOME/tabview/views`, or `~/.config/tabview/views` when
 `XDG_CONFIG_HOME` is unset. This POSIX-style path is used on every platform,
 including macOS. Files ending in `.yml` and `.yaml` are accepted. If both
@@ -161,6 +261,64 @@ uses the system POSIX locale with `en_US` fallback, or a top-level `locale`.
 Headers are prefixed first with sort state, then filter state: `▲` for
 ascending sort, `▼` for descending sort, `+` for filter-in, `-` for filter-out,
 and `±` for multiple filters. Truncation applies after those prefix markers.
+
+Columns can also define ordered conditional color rules. The first matching
+rule wins, and colors affect only cell styling; raw values, formatted values,
+sorting, filtering, search, copy, and popups are unchanged.
+
+```yaml
+columns:
+  active:
+    type: boolean
+    colors:
+      - match:
+          true: green
+          false: muted
+  prirep:
+    type: string
+    colors:
+      - match:
+          p: darkgreen
+          r: blue
+  used_percent:
+    type: number
+    colors:
+      - range:
+          "<10": red
+          ">=90": red
+      - gradient:
+          mode: auto
+          steps: 8
+          colors: [green, yellow]
+  latency_ms:
+    type: number
+    colors:
+      - gradient:
+          mode: fixed
+          stops:
+            0: green
+            100: yellow
+            500: red
+  ip_address:
+    type: ip
+    colors:
+      - identifiers:
+          colors: auto
+  host:
+    type: string
+    colors:
+      - identifiers:
+          colors: [cyan, "palette(198)", "#25A39AFF"]
+```
+
+The `identifiers` rule is for string-like discrete values. It assigns each
+unique rendered value in the column, such as an IP address or host name, to a
+stable generated color. `colors: auto` uses the active theme's
+`[identifiers].colors` families; a view can override those families with a
+color array. Each family generates 16 dark-to-light shades, and identifiers
+cycle across families before advancing shades. The darkest generated shade is
+kept at the ANSI dark/dim foreground equivalent for that family rather than
+near-black.
 
 Press `v` to inspect the current generated YAML. Press `s` to save it to the
 loaded view file, or to a placeholder file named from the current input with

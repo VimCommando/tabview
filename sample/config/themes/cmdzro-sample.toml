@@ -1,0 +1,126 @@
+name = "cmdzro-sample"
+mode = "hex32"
+
+[palette]
+text = "palette(248)"
+muted = "palette(242)"
+dim = "palette(240)"
+bg = "black"
+ui_blue = "palette(19)"
+blue = "blue"
+dark_blue = "palette(19)"
+gray = "gray"
+green = "dark-green"
+cyan = "cyan"
+dark_cyan = "dark-cyan"
+magenta = "magenta"
+yellow = "yellow"
+red = "dark-red"
+white = "bright-white"
+hex_teal = "#25A39AFF"
+
+[identifiers]
+colors = ["bright-green", "magenta", "cyan", "white"]
+
+[styles.table.location]
+fg = "gray"
+bg = "bg"
+
+[styles.table.current_cell]
+fg = "cyan"
+bg = "dark_blue"
+
+[styles.table.divider]
+fg = "gray"
+
+[styles.table.header]
+fg = "dark_cyan"
+modifiers = ["bold"]
+
+[styles.table.header_selected]
+fg = "cyan"
+modifiers = ["bold"]
+
+[styles.table.header_glyph]
+fg = "muted"
+
+[styles.table.cell]
+fg = "text"
+
+[styles.table.cell.string]
+fg = "green"
+
+[styles.table.cell.number]
+fg = "magenta"
+
+[styles.table.cell.boolean]
+fg = "magenta"
+
+[styles.table.selected]
+fg = "text"
+bg = "dark_blue"
+
+[styles.table.hidden_marker]
+fg = "muted"
+
+[styles.popup.background]
+fg = "text"
+bg = "dark_blue"
+
+[styles.popup.border]
+fg = "cyan"
+bg = "dark_blue"
+
+[styles.popup.title]
+fg = "gray"
+bg = "dark_blue"
+modifiers = ["bold"]
+
+[styles.popup.body]
+fg = "text"
+bg = "dark_blue"
+
+[styles.popup.disabled]
+fg = "dim"
+bg = "dark_blue"
+
+[styles.popup.section_title]
+fg = "gray"
+bg = "dark_blue"
+modifiers = ["bold"]
+
+[styles.popup.active]
+fg = "gray"
+bg = "dark_blue"
+modifiers = ["bold"]
+
+[styles.popup.action]
+fg = "cyan"
+bg = "dark_blue"
+modifiers = ["bold"]
+
+[styles.popup.option_selected]
+fg = "cyan"
+bg = "dark_blue"
+modifiers = ["bold"]
+
+[styles.search.highlight]
+fg = "yellow"
+bg = "dark_blue"
+modifiers = ["underline"]
+
+[styles.message.footer]
+fg = "yellow"
+bg = "ui_blue"
+
+[styles.message.info]
+fg = "yellow"
+bg = "ui_blue"
+
+[styles.message.warning]
+fg = "yellow"
+bg = "ui_blue"
+
+[styles.message.error]
+fg = "white"
+bg = "red"

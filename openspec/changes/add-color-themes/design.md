@@ -42,6 +42,9 @@ magenta = "palette(198)"
 yellow = "yellow"
 error = "dark-red"
 
+[identifiers]
+colors = ["bright-green", "magenta", "cyan", "white"]
+
 [styles.table.cell]
 fg = "text"
 
@@ -121,29 +124,30 @@ columns:
     type: number
     colors:
       - range:
-          lt: 10
-          color: red
-      - range:
-          gte: 90
-          color: red
+          "<10": red
+          ">=90": red
       - gradient:
           mode: fixed
           stops:
-            - value: 10
-              color: green
-            - value: 50
-              color: yellow
-            - value: 75
-              color: magenta
+            10: green
+            50: yellow
+            75: magenta
   active:
     type: boolean
     colors:
       - match:
-          value: true
-          color: green
-      - match:
-          value: false
-          color: muted
+          true: green
+          false: muted
+  ip:
+    type: ip
+    colors:
+      - identifiers:
+          colors: auto
+  host:
+    type: string
+    colors:
+      - identifiers:
+          colors: [cyan, "palette(198)", "#25A39AFF"]
 ```
 
 Use first-match-wins within a column. A matched conditional color overrides the cell foreground but does not replace selected-cell background or other readability-critical selection styling.
@@ -152,9 +156,11 @@ Alternative considered: put conditional color rules in theme files. Rejected bec
 
 ### Gradient semantics
 
-`mode: fixed` requires explicit numeric stop values. Each stop owns the half-open interval from its value inclusive to the next stop exclusive; the last stop includes all values greater than or equal to its value. Values below the first stop are uncolored.
+`mode: fixed` requires explicit numeric stop values in a `stops` map where each key is the stop value and each value is the color. Each stop owns the half-open interval from its value inclusive to the next stop exclusive; the last stop includes all values greater than or equal to its value. Values below the first stop are uncolored.
 
 `mode: auto` calculates buckets from observed parseable numeric values in the column. It accepts two or more colors and optional `steps`, defaulting to `8`. Non-numeric values do not affect min/max and remain uncolored unless another rule matches. Auto gradients can interpolate between RGB values in truecolor mode and otherwise choose nearest configured palette colors per bucket.
+
+`identifiers` is a string-mode rule. It maps each unique rendered value in the source column to a stable identifier index, then resolves that index through color families. `colors: auto` uses the active theme's `[identifiers].colors`; a saved view can override the families with an explicit color array. Each family generates 16 dark-to-light shades, and identifiers cycle across families before advancing shades. The darkest generated shade is clamped to the ANSI dark/dim foreground equivalent for contrast on black backgrounds.
 
 ### Schema and validation
 
