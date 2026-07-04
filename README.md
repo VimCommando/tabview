@@ -123,7 +123,7 @@ Theme colors accept 16-color names, 256-color palette values, and 32-bit hex:
 
 ```yaml
 name: ops-dark
-mode: auto # auto, ansi16, ansi256, or hex32
+mode: auto # auto, ansi16, ansi256, hex32, or truecolor
 
 palette:
   text: "#AFAFAFFF"
