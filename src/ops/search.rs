@@ -15,13 +15,14 @@ pub fn find_match(
     if query.is_empty() || rows.is_empty() {
         return None;
     }
+    let query = query.to_lowercase();
     let Some(mut position) = start_or_virtual_wrap_position(rows, start, direction) else {
         return None;
     };
 
     for _ in 0..cell_count(rows) {
         position = next_position(rows, position, direction)?;
-        if contains_case_insensitive(&rows[position.row][position.column], &query) {
+        if contains_case_insensitive_folded_query(&rows[position.row][position.column], &query) {
             return Some(position);
         }
     }
@@ -119,6 +120,17 @@ pub(crate) fn contains_case_insensitive(value: &str, query: &str) -> bool {
     }
 
     value.to_lowercase().contains(&query.to_lowercase())
+}
+
+fn contains_case_insensitive_folded_query(value: &str, query: &str) -> bool {
+    if value.is_ascii() && query.is_ascii() {
+        return value
+            .as_bytes()
+            .windows(query.len())
+            .any(|window| window.eq_ignore_ascii_case(query.as_bytes()));
+    }
+
+    value.to_lowercase().contains(query)
 }
 
 #[cfg(test)]

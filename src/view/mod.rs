@@ -493,13 +493,13 @@ impl TableView {
         visible_column: usize,
         query: &str,
     ) -> bool {
-        let Some(rendered) = self
-            .rendered_visible_row(row)
-            .and_then(|row| row.get(visible_column).cloned())
-        else {
+        let Some(rendered_row) = self.rendered_visible_row(row) else {
             return false;
         };
-        self.visible_cell_style_context(row, visible_column, &rendered, Some(query))
+        let Some(rendered) = rendered_row.get(visible_column) else {
+            return false;
+        };
+        self.visible_cell_style_context(row, visible_column, rendered, Some(query))
             .search_match
     }
 
