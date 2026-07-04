@@ -27,9 +27,13 @@ pub enum Popup {
 }
 
 pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
-    static DEFAULT_THEME: OnceLock<ResolvedTheme> = OnceLock::new();
-    let theme = DEFAULT_THEME.get_or_init(default_theme);
+    let theme = default_ui_theme();
     render_table_with_theme(view, area, buffer, theme, None);
+}
+
+fn default_ui_theme() -> &'static ResolvedTheme {
+    static DEFAULT_THEME: OnceLock<ResolvedTheme> = OnceLock::new();
+    DEFAULT_THEME.get_or_init(default_theme)
 }
 
 pub fn render_table_with_theme(
@@ -182,8 +186,7 @@ pub fn render_table_with_theme(
 }
 
 pub fn render_footer(message: Option<&str>, area: Rect, buffer: &mut Buffer) {
-    let theme = default_theme();
-    render_footer_with_theme(message, area, buffer, &theme);
+    render_footer_with_theme(message, area, buffer, default_ui_theme());
 }
 
 pub fn render_footer_with_theme(
@@ -212,8 +215,7 @@ pub fn render_footer_with_theme(
 }
 
 pub fn render_popup(title: &str, body: &str, area: Rect, buffer: &mut Buffer) {
-    let theme = default_theme();
-    render_popup_with_actions(title, body, &[], area, buffer, &theme);
+    render_popup_with_actions(title, body, &[], area, buffer, default_ui_theme());
 }
 
 fn render_popup_with_actions(
@@ -454,8 +456,7 @@ fn visible_column_capacity(view: &mut TableView, area: Rect) -> usize {
 }
 
 pub fn render_cell_popup(cell: &str, title: &str, area: Rect, buffer: &mut Buffer) -> bool {
-    let theme = default_theme();
-    render_cell_popup_with_theme(cell, title, area, buffer, &theme)
+    render_cell_popup_with_theme(cell, title, area, buffer, default_ui_theme())
 }
 
 pub fn render_cell_popup_with_theme(
@@ -473,8 +474,7 @@ pub fn render_cell_popup_with_theme(
 }
 
 pub fn render_info_popup(info: &str, area: Rect, buffer: &mut Buffer) {
-    let theme = default_theme();
-    render_info_popup_with_theme(info, area, buffer, &theme);
+    render_info_popup_with_theme(info, area, buffer, default_ui_theme());
 }
 
 pub fn render_info_popup_with_theme(
@@ -495,7 +495,6 @@ pub fn render_saved_view_popup(
     area: Rect,
     buffer: &mut Buffer,
 ) {
-    let theme = default_theme();
     render_saved_view_popup_with_theme(
         filename,
         yaml,
@@ -503,7 +502,7 @@ pub fn render_saved_view_popup(
         confirming_overwrite,
         area,
         buffer,
-        &theme,
+        default_ui_theme(),
     );
 }
 
@@ -564,8 +563,7 @@ pub(crate) struct ColumnInfoOption {
     reason = "default-theme wrapper is used by tests and callers"
 )]
 pub(crate) fn render_column_info_popup(popup: &ColumnInfoPopup, area: Rect, buffer: &mut Buffer) {
-    let theme = default_theme();
-    render_column_info_popup_with_theme(popup, area, buffer, &theme);
+    render_column_info_popup_with_theme(popup, area, buffer, default_ui_theme());
 }
 
 pub(crate) fn render_column_info_popup_with_theme(
@@ -703,8 +701,7 @@ fn render_column_info_section(
 }
 
 pub fn render_help_popup(bindings: &[KeyBinding], area: Rect, buffer: &mut Buffer) {
-    let theme = default_theme();
-    render_help_popup_with_theme(bindings, area, buffer, &theme);
+    render_help_popup_with_theme(bindings, area, buffer, default_ui_theme());
 }
 
 pub fn render_help_popup_with_theme(
@@ -780,8 +777,7 @@ fn align_cell(cell: &str, width: usize, truncation: &str, alignment: Alignment) 
 }
 
 pub fn render_search_prompt(query: &str, area: Rect, buffer: &mut Buffer) {
-    let theme = default_theme();
-    render_search_prompt_with_theme(query, area, buffer, &theme);
+    render_search_prompt_with_theme(query, area, buffer, default_ui_theme());
 }
 
 pub fn render_search_prompt_with_theme(
@@ -805,8 +801,7 @@ pub fn render_search_prompt_with_theme(
     reason = "default-theme wrapper is used by tests and callers"
 )]
 pub(crate) fn render_filter_prompt(prompt: &FilterPromptView<'_>, area: Rect, buffer: &mut Buffer) {
-    let theme = default_theme();
-    render_filter_prompt_with_theme(prompt, area, buffer, &theme);
+    render_filter_prompt_with_theme(prompt, area, buffer, default_ui_theme());
 }
 
 pub(crate) fn render_filter_prompt_with_theme(
