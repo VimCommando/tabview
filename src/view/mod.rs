@@ -1126,6 +1126,7 @@ impl TableView {
             display.mask = None;
         }
         self.column_metadata_modified.insert(source_column);
+        self.rebuild_column_color_metadata();
 
         if update.clear_filters {
             self.filters.retain(|filter| filter.column != source_column);
@@ -2821,6 +2822,50 @@ columns:
         assert_eq!(
             view.visible_rows_vec(),
             rows(&[&["active", "5%"], &["idle", "50%"], &["down", "95%"]])
+        );
+    }
+
+    #[cfg(feature = "saved-views")]
+    #[test]
+    fn column_info_updates_rebuild_identifier_color_metadata() {
+        let mut view = TableView::classify(rows(&[&["Name"], &["alpha"]]), Viewport::new(10, 1));
+        let parsed = crate::saved_views::parse_saved_view_yaml(
+            r#"
+name: identifiers
+filenames: [data.csv]
+columns:
+  Name:
+    type: text
+    format: uppercase
+    colors:
+      - identifiers:
+          colors: auto
+"#,
+        )
+        .expect("parse");
+        let headers = view.header().expect("header").to_vec();
+        let resolved = crate::saved_views::resolve_columns(&parsed.view, &headers);
+        view.apply_saved_columns(&resolved, None);
+
+        assert_eq!(view.visible_rows_vec(), rows(&[&["ALPHA"]]));
+        assert_eq!(
+            view.conditional_color_for_visible_cell(0, 0),
+            Some("identifier(0)".to_owned())
+        );
+
+        view.apply_current_column_info(ColumnInfoUpdate {
+            visible: true,
+            alignment: None,
+            column_type: ColumnTypeChoice::Text,
+            format: ColumnFormatChoice::Lowercase,
+            sort: ColumnSortChoice::None,
+            clear_filters: false,
+        });
+
+        assert_eq!(view.visible_rows_vec(), rows(&[&["alpha"]]));
+        assert_eq!(
+            view.conditional_color_for_visible_cell(0, 0),
+            Some("identifier(0)".to_owned())
         );
     }
 
