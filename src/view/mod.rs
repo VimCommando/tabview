@@ -2156,13 +2156,26 @@ fn yaml_scalar(value: &str) -> String {
     {
         value.to_owned()
     } else {
-        format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+        yaml_quoted_scalar(value)
     }
 }
 
 #[cfg(feature = "saved-views")]
 fn yaml_quoted_scalar(value: &str) -> String {
-    format!("\"{}\"", value.replace('\\', "\\\\").replace('"', "\\\""))
+    let mut quoted = String::from("\"");
+    for ch in value.chars() {
+        match ch {
+            '\\' => quoted.push_str("\\\\"),
+            '"' => quoted.push_str("\\\""),
+            '\n' => quoted.push_str("\\n"),
+            '\r' => quoted.push_str("\\r"),
+            '\t' => quoted.push_str("\\t"),
+            ch if ch.is_control() => quoted.push_str(&format!("\\x{:02X}", ch as u32)),
+            ch => quoted.push(ch),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 pub fn column_widths(rows: &[Vec<String>], mode: ColumnWidthMode, gap: usize) -> Vec<usize> {
@@ -2894,6 +2907,10 @@ columns:
         let yaml = view.to_saved_view_yaml("colors", "data.csv", None);
 
         assert!(yaml.contains("          \"10\": green"));
+        assert_eq!(
+            conditional_value_yaml(&ConditionalValue::String("a\nb".to_owned())),
+            "\"a\\nb\""
+        );
     }
 
     #[cfg(feature = "saved-views")]
