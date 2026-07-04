@@ -33,9 +33,9 @@ pub struct Position {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct VisibleCellStyleContext<'a> {
-    pub conditional_color: Option<Cow<'a, str>>,
-    pub search_match: bool,
+pub(crate) struct VisibleCellStyleContext<'a> {
+    pub(crate) conditional_color: Option<Cow<'a, str>>,
+    pub(crate) search_match: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -488,7 +488,7 @@ impl TableView {
                 .contains(&query)
     }
 
-    pub fn visible_cell_matches_search_query(
+    fn visible_cell_matches_search_query(
         &self,
         row: usize,
         visible_column: usize,
@@ -507,7 +507,7 @@ impl TableView {
             .search_match
     }
 
-    pub fn visible_cell_style_context(
+    fn visible_cell_style_context(
         &self,
         row: usize,
         visible_column: usize,
@@ -563,7 +563,7 @@ impl TableView {
         }
     }
 
-    pub fn conditional_color_for_visible_cell(
+    fn conditional_color_for_visible_cell(
         &self,
         row: usize,
         visible_column: usize,

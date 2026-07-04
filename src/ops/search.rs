@@ -140,7 +140,7 @@ fn cell_count(rows: &[Vec<String>]) -> usize {
     rows.iter().map(Vec::len).sum()
 }
 
-pub(crate) fn contains_case_insensitive(value: &str, query: &str) -> bool {
+fn contains_case_insensitive(value: &str, query: &str) -> bool {
     query.is_empty() || CaseInsensitiveQuery::new(query).is_some_and(|query| query.matches(value))
 }
 
