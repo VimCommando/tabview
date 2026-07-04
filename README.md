@@ -35,7 +35,7 @@ contents of that cell are shown next to it.
 - Persistent header row toggling.
 - Lexical, natural, and numeric sorting by the current column.
 - Dynamic column width and gap adjustment.
-- Full-text incremental search with `n` and `p` result navigation.
+- Full-text incremental search with `n` and `N` result navigation.
 - Current-column filter-in and filter-out with text, regex, and numeric modes.
 - Full-cell popup with `Enter`.
 - Optional clipboard support for yanking the current cell.
@@ -105,14 +105,15 @@ The Rust rewrite supports the `tabview` CLI only. The former Python import API
 
 ## Color Themes
 
-Tabview loads theme settings from `$XDG_CONFIG_HOME/tabview/config.toml`, or
-`~/.config/tabview/config.toml` when `XDG_CONFIG_HOME` is unset:
+Tabview loads theme settings from `$XDG_CONFIG_HOME/tabview/config.yml`, or
+`~/.config/tabview/config.yml` when `XDG_CONFIG_HOME` is unset:
 
-```toml
-theme = "cmdzro-sample"
+```yaml
+theme: cmdzro
 ```
 
-Theme files live in `tabview/themes/*.toml` under the same config directory.
+Theme files live in `tabview/themes/*.yml` or `tabview/themes/*.yaml` under the
+same config directory. If both `name.yml` and `name.yaml` exist, `.yml` wins.
 If no theme is configured, tabview uses the built-in `cmdzro` theme based on
 `~/.config/nvim/colors/cmdzro.vim`: neutral gray text, blue reserved for UI
 surfaces, yellow reserved for search and UI emphasis, and red reserved for
@@ -120,93 +121,78 @@ errors or unhealthy states.
 
 Theme colors accept 16-color names, 256-color palette values, and 32-bit hex:
 
-```toml
-name = "ops-dark"
-mode = "auto" # auto, ansi16, ansi256, or hex32
+```yaml
+name: ops-dark
+mode: auto # auto, ansi16, ansi256, or hex32
 
-[palette]
-text = "palette(248)"
-gray = "gray"
-muted = "palette(240)"
-ui_blue = "palette(19)"
-blue = "blue"
-dark_blue = "palette(19)"
-cyan = "cyan"
-dark_cyan = "dark-cyan"
-green = "dark-green"
-magenta = "magenta"
-yellow = "yellow"
-error = "dark-red"
-teal = "#25A39AFF"
+palette:
+  text: "#AFAFAFFF"
+  gray: gray
+  muted: palette(240)
+  ui_blue: palette(19)
+  blue: blue
+  dark_blue: palette(19)
+  cyan: cyan
+  dark_cyan: dark-cyan
+  green: dark-green
+  magenta: magenta
+  yellow: yellow
+  error: dark-red
+  teal: "#25A39AFF"
 
-[identifiers]
-colors = ["bright-green", "magenta", "cyan", "white"]
+identifiers:
+  colors: [bright-green, magenta, cyan, white]
 
-[styles.table.cell]
-fg = "text"
-
-[styles.table.location]
-fg = "gray"
-bg = "black"
-
-[styles.table.current_cell]
-fg = "cyan"
-bg = "dark_blue"
-
-[styles.table.divider]
-fg = "gray"
-
-[styles.table.header]
-fg = "dark_cyan"
-modifiers = ["bold"]
-
-[styles.table.header_selected]
-fg = "cyan"
-modifiers = ["bold"]
-
-[styles.table.header_glyph]
-fg = "muted"
-
-[styles.table.cell.string]
-fg = "green"
-
-[styles.table.cell.number]
-fg = "magenta"
-
-[styles.table.cell.boolean]
-fg = "magenta"
-
-[styles.table.selected]
-fg = "text"
-bg = "dark_blue"
-
-[styles.popup.background]
-fg = "text"
-bg = "dark_blue"
-
-[styles.popup.border]
-fg = "cyan"
-bg = "dark_blue"
-
-[styles.popup.title]
-fg = "gray"
-bg = "dark_blue"
-
-[styles.popup.action]
-fg = "cyan"
-bg = "dark_blue"
-
-[styles.popup.option_selected]
-fg = "cyan"
-bg = "dark_blue"
-
-[styles.search.highlight]
-fg = "yellow"
-bg = "dark_blue"
-modifiers = ["underline"]
+styles:
+  table:
+    location:
+      fg: gray
+      bg: black
+    current_cell:
+      fg: cyan
+      bg: dark_blue
+    divider:
+      fg: gray
+    header:
+      fg: dark_cyan
+      modifiers: [bold]
+    header_selected:
+      fg: cyan
+      modifiers: [bold]
+    header_glyph:
+      fg: muted
+    cell:
+      fg: text
+    selected:
+      fg: text
+      bg: dark_blue
+  popup:
+    background:
+      fg: text
+      bg: dark_blue
+    border:
+      fg: cyan
+      bg: dark_blue
+    title:
+      fg: gray
+      bg: dark_blue
+    action:
+      fg: cyan
+      bg: dark_blue
+    option_selected:
+      fg: cyan
+      bg: dark_blue
+  search:
+    highlight:
+      fg: yellow
+      modifiers: [underline]
 ```
 
-See `sample/config/themes/cmdzro-sample.toml` for a complete theme file. The
+Named 16-color values use the built-in base palette from
+`/Users/reno/.alacritty.toml`; in truecolor mode they resolve to those RGB
+values, while `mode: ansi16` emits ANSI colors for the terminal palette.
+
+See `sample/config/themes/cmdzro.yml` for a complete theme file. The
 theme schema is shipped at `schemas/theme.schema.json`.
 
 ## Saved Views
@@ -358,7 +344,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 | `i` | Edit the current column view configuration, sort state, and filter action. |
 | `f`, `F` | Filter in or filter out rows by the current column. `Tab` cycles text, regex, and numeric modes; submitting an empty condition clears filters for the current column. |
 | `n` | Go to the next search result. |
-| `p` | Go to the previous search result. |
+| `N` | Go to the previous search result. |
 | `t` | Toggle fixed header row. |
 | `<`, `>` | Decrease or increase all column widths. |
 | `,`, `.` | Decrease or increase the current column width. |

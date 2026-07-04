@@ -1,3 +1,5 @@
+use std::ops::Range;
+
 use crate::view::Position;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,16 +24,74 @@ impl<'a> CaseInsensitiveQuery<'a> {
     }
 
     pub(crate) fn matches(&self, value: &str) -> bool {
+        self.find(value).is_some()
+    }
+
+    pub(crate) fn find(&self, value: &str) -> Option<Range<usize>> {
         if value.is_ascii() && self.raw.is_ascii() {
             return value
                 .as_bytes()
                 .windows(self.raw.len())
-                .any(|window| window.eq_ignore_ascii_case(self.raw.as_bytes()));
+                .position(|window| window.eq_ignore_ascii_case(self.raw.as_bytes()))
+                .map(|start| start..start + self.raw.len());
         }
-        match &self.folded {
-            Some(query) => value.to_lowercase().contains(query),
-            None => value.to_lowercase().contains(self.raw),
+        let query = self.folded.as_deref().unwrap_or(self.raw);
+        let mut boundaries = value.char_indices().map(|(idx, _)| idx).collect::<Vec<_>>();
+        boundaries.push(value.len());
+        for (start_idx, start) in boundaries.iter().copied().enumerate() {
+            for end in boundaries.iter().copied().skip(start_idx + 1) {
+                if value[start..end].to_lowercase() == query {
+                    return Some(start..end);
+                }
+            }
         }
+        None
+    }
+
+    pub(crate) fn find_iter<'b>(&'b self, value: &'b str) -> MatchRanges<'a, 'b> {
+        MatchRanges {
+            query: self,
+            value,
+            offset: 0,
+        }
+    }
+}
+
+pub(crate) struct MatchRanges<'a, 'b> {
+    query: &'b CaseInsensitiveQuery<'a>,
+    value: &'b str,
+    offset: usize,
+}
+
+impl Iterator for MatchRanges<'_, '_> {
+    type Item = Range<usize>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let range = self.query.find(self.value.get(self.offset..)?)?;
+        let start = self.offset + range.start;
+        let end = self.offset + range.end;
+        self.offset = end.max(start + 1);
+        Some(start..end)
+    }
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::*;
+
+    #[test]
+    fn query_finds_ascii_case_insensitive_ranges() {
+        let query = CaseInsensitiveQuery::new("AL").expect("query");
+        assert_eq!(query.find("alpha"), Some(0..2));
+    }
+
+    #[test]
+    fn query_iterates_non_overlapping_ranges() {
+        let query = CaseInsensitiveQuery::new("a").expect("query");
+        assert_eq!(
+            query.find_iter("banana").collect::<Vec<_>>(),
+            vec![1..2, 3..4, 5..6]
+        );
     }
 }
 
@@ -140,6 +200,7 @@ fn cell_count(rows: &[Vec<String>]) -> usize {
     rows.iter().map(Vec::len).sum()
 }
 
+#[cfg(test)]
 fn contains_case_insensitive(value: &str, query: &str) -> bool {
     query.is_empty() || CaseInsensitiveQuery::new(query).is_some_and(|query| query.matches(value))
 }

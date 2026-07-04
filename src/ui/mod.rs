@@ -97,6 +97,8 @@ pub fn render_table_with_theme(
                     prefix_style: Some(theme.style_or("table.header_glyph", "table.divider")),
                     cell_styles: None,
                     preserve_selected_fg: None,
+                    search_query: None,
+                    search_style: Style::default(),
                 },
             );
             row_y += 1;
@@ -134,15 +136,7 @@ pub fn render_table_with_theme(
             let should_preserve_fg = context.as_ref().is_some_and(|(_, context)| {
                 context.conditional_color.is_some() || context.search_match
             });
-            let mut style = theme.style_or(
-                context
-                    .as_ref()
-                    .map(|(source_column, _)| {
-                        view.default_cell_style_token_for_source_column(*source_column)
-                    })
-                    .unwrap_or("table.cell"),
-                "table.cell",
-            );
+            let mut style = theme.style("table.cell");
             if let Some(color_ref) = context
                 .as_ref()
                 .and_then(|(_, context)| context.conditional_color.as_ref())
@@ -150,12 +144,6 @@ pub fn render_table_with_theme(
                 if let Some(conditional_style) = theme.conditional_style(&color_ref) {
                     style = overlay_style(style, conditional_style);
                 }
-            }
-            if context
-                .as_ref()
-                .is_some_and(|(_, context)| context.search_match)
-            {
-                style = overlay_style(style, theme.style("search.highlight"));
             }
             cell_styles.push(style);
             preserve_selected_fg.push(should_preserve_fg);
@@ -179,6 +167,8 @@ pub fn render_table_with_theme(
                 prefix_style: None,
                 cell_styles: Some(&cell_styles),
                 preserve_selected_fg: Some(&preserve_selected_fg),
+                search_query: search_query.as_ref(),
+                search_style: theme.style("search.highlight"),
             },
         );
         row_y += 1;
@@ -325,6 +315,8 @@ struct RowRender<'a> {
     prefix_style: Option<Style>,
     cell_styles: Option<&'a [Style]>,
     preserve_selected_fg: Option<&'a [bool]>,
+    search_query: Option<&'a CaseInsensitiveQuery<'a>>,
+    search_style: Style,
 }
 
 fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
@@ -356,6 +348,17 @@ fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
         let alignment = render.alignments.get(column).copied().unwrap_or_default();
         let cell = align_cell(cell, width, "…", alignment);
         buffer.set_stringn(x, render.y, &cell, width, style);
+        if let Some(query) = render.search_query {
+            highlight_search_matches(
+                buffer,
+                x,
+                render.y,
+                &cell,
+                width,
+                query,
+                render.search_style,
+            );
+        }
         if let Some(prefix_style) = render.prefix_style {
             let prefix_width = header_prefix_width(&cell).min(width);
             for offset in 0..prefix_width {
@@ -377,6 +380,32 @@ fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
         x = x
             .saturating_add(width as u16)
             .saturating_add(render.column_gap as u16);
+    }
+}
+
+fn highlight_search_matches(
+    buffer: &mut Buffer,
+    x: u16,
+    y: u16,
+    cell: &str,
+    width: usize,
+    query: &CaseInsensitiveQuery<'_>,
+    search_style: Style,
+) {
+    let search_style = style_without_bg(search_style);
+    for range in query.find_iter(cell) {
+        let mut offset = UnicodeWidthStr::width(&cell[..range.start]);
+        for ch in cell[range].chars() {
+            let ch_width = ch.width().unwrap_or(0);
+            for cell_offset in offset..offset.saturating_add(ch_width).min(width) {
+                let cell = &mut buffer[(x + cell_offset as u16, y)];
+                cell.set_style(overlay_style(cell.style(), search_style));
+            }
+            offset = offset.saturating_add(ch_width);
+            if offset >= width {
+                break;
+            }
+        }
     }
 }
 
@@ -406,6 +435,11 @@ fn overlay_style_without_fg(mut base: Style, overlay: Style) -> Style {
     base = base.add_modifier(overlay.add_modifier);
     base = base.remove_modifier(overlay.sub_modifier);
     base
+}
+
+fn style_without_bg(mut style: Style) -> Style {
+    style.bg = None;
+    style
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -988,7 +1022,7 @@ mod tests {
     }
 
     #[test]
-    fn default_theme_colors_headers_strings_and_numbers() {
+    fn default_theme_uses_plain_text_for_string_and_number_cells() {
         let mut view = TableView::classify(
             rows(&[&["Name", "Value"], &["alpha", "1"]]),
             Viewport::new(10, 2),
@@ -997,15 +1031,15 @@ mod tests {
         let mut buffer = Buffer::empty(area);
         render_table(&mut view, area, &mut buffer);
 
-        assert_eq!(buffer[(0, 2)].style().fg, Some(Color::Cyan));
-        assert_eq!(buffer[(7, 2)].style().fg, Some(Color::Indexed(6)));
-        assert_eq!(buffer[(0, 3)].style().fg, Some(Color::Indexed(248)));
-        assert_eq!(buffer[(7, 3)].style().fg, Some(Color::Magenta));
+        assert_eq!(buffer[(0, 2)].style().fg, Some(Color::Rgb(0, 255, 255)));
+        assert_eq!(buffer[(7, 2)].style().fg, Some(Color::Rgb(0, 192, 192)));
+        assert_eq!(buffer[(0, 3)].style().fg, Some(Color::Rgb(175, 175, 175)));
+        assert_eq!(buffer[(7, 3)].style().fg, Some(Color::Rgb(175, 175, 175)));
     }
 
     #[cfg(feature = "saved-views")]
     #[test]
-    fn default_theme_colors_boolean_columns_magenta() {
+    fn default_theme_uses_plain_text_for_boolean_columns() {
         let mut view = TableView::classify(
             rows(&[&["Flag"], &["true"], &["false"]]),
             Viewport::new(10, 1),
@@ -1028,7 +1062,7 @@ columns:
         let mut buffer = Buffer::empty(area);
         render_table(&mut view, area, &mut buffer);
 
-        assert_eq!(buffer[(0, 3)].style().fg, Some(Color::Indexed(248)));
+        assert_eq!(buffer[(0, 3)].style().fg, Some(Color::Rgb(175, 175, 175)));
     }
 
     #[test]
@@ -1124,7 +1158,7 @@ columns:
         assert_eq!(buffer[(3, 2)].symbol(), "…");
         assert_eq!(buffer[(0, 2)].style().fg, Some(Color::Indexed(242)));
         assert_eq!(buffer[(1, 2)].style().fg, Some(Color::Indexed(242)));
-        assert_eq!(buffer[(2, 2)].style().fg, Some(Color::Cyan));
+        assert_eq!(buffer[(2, 2)].style().fg, Some(Color::Rgb(0, 255, 255)));
     }
 
     #[test]
@@ -1259,8 +1293,8 @@ columns:
         assert!(text.contains("contents"));
         assert!(text.contains("┌"));
         assert_eq!(buffer[(1, 1)].style().bg, Some(Color::Indexed(19)));
-        assert_eq!(buffer[(0, 0)].style().fg, Some(Color::Cyan));
-        assert_eq!(buffer[(2, 0)].style().fg, Some(Color::Gray));
+        assert_eq!(buffer[(0, 0)].style().fg, Some(Color::Rgb(0, 255, 255)));
+        assert_eq!(buffer[(2, 0)].style().fg, Some(Color::Rgb(160, 160, 160)));
         assert_eq!(buffer[(1, 1)].symbol(), " ");
         assert_eq!(buffer[(1, 2)].symbol(), " ");
         assert_eq!(buffer[(2, 2)].symbol(), "c");
@@ -1294,8 +1328,8 @@ columns:
 
         render_column_info_popup(&popup, area, &mut buffer);
 
-        assert_eq!(buffer[(2, 4)].style().fg, Some(Color::Gray));
-        assert_eq!(buffer[(4, 5)].style().fg, Some(Color::Cyan));
+        assert_eq!(buffer[(2, 4)].style().fg, Some(Color::Rgb(160, 160, 160)));
+        assert_eq!(buffer[(4, 5)].style().fg, Some(Color::Rgb(0, 255, 255)));
         assert_eq!(buffer[(4, 5)].style().bg, Some(Color::Indexed(19)));
         assert_eq!(buffer[(2, 6)].style().fg, Some(Color::Indexed(240)));
         assert_eq!(buffer[(4, 6)].symbol(), "(");
@@ -1345,7 +1379,7 @@ columns:
         assert!(text.contains("(*) regex"));
         assert!(text.contains("( ) numeric"));
         assert_eq!(buffer[(23, 3)].style().fg, Some(Color::Indexed(240)));
-        assert_eq!(buffer[(4, 3)].style().fg, Some(Color::Cyan));
+        assert_eq!(buffer[(4, 3)].style().fg, Some(Color::Rgb(0, 255, 255)));
         assert!(text.contains("Condition: ^foo"));
         assert!(text.contains("invalid regex"));
     }
@@ -1395,8 +1429,17 @@ columns:
         let theme = crate::theme::default_theme();
         render_table_with_theme(&mut view, area, &mut buffer, &theme, Some("idle"));
 
-        assert_eq!(buffer[(0, 3)].style().fg, Some(Color::Indexed(2)));
-        assert_eq!(buffer[(0, 4)].style().fg, Some(Color::Yellow));
+        assert_eq!(buffer[(0, 3)].style().fg, Some(Color::Rgb(0, 192, 0)));
+        let unchanged_bg = buffer[(4, 4)].style().bg;
+        for x in 0..4 {
+            assert_eq!(buffer[(x, 4)].style().fg, Some(Color::Rgb(255, 255, 0)));
+            assert_eq!(buffer[(x, 4)].style().bg, unchanged_bg);
+            assert!(buffer[(x, 4)]
+                .style()
+                .add_modifier
+                .contains(ratatui::style::Modifier::UNDERLINED));
+        }
+        assert_eq!(buffer[(4, 4)].style().fg, Some(Color::Rgb(175, 175, 175)));
     }
 
     #[test]

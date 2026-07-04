@@ -4,8 +4,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use ratatui::style::{Color, Modifier, Style};
+use serde::Deserialize;
+use yaml_serde::{Mapping, Value};
 
-const CONFIG_FILE: &str = "config.toml";
+const CONFIG_FILE: &str = "config.yml";
 const THEME_DIR: &str = "themes";
 const DEFAULT_THEME_NAME: &str = "cmdzro";
 
@@ -31,9 +33,6 @@ const REQUIRED_STYLE_TOKENS: &[&str] = &[
 const OPTIONAL_STYLE_TOKENS: &[&str] = &[
     "table.header_glyph",
     "table.header_selected",
-    "table.cell.string",
-    "table.cell.number",
-    "table.cell.boolean",
     "popup.section_title",
     "popup.option_selected",
     "message.info",
@@ -354,29 +353,15 @@ fn selected_theme_from_config(root: &Path) -> Result<Option<String>, ThemeError>
 }
 
 pub fn parse_config_theme(input: &str) -> Result<Option<String>, String> {
-    let mut selected = None;
-    let mut section = String::new();
-    for (line_idx, raw_line) in input.lines().enumerate() {
-        let stripped = strip_comment(raw_line);
-        let line = stripped.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some(name) = parse_section(line) {
-            section = name.to_owned();
-            continue;
-        }
-        let (key, value) = split_key_value(line)
-            .ok_or_else(|| format!("line {} is not a TOML key/value", line_idx + 1))?;
-        if !section.is_empty() {
-            return Err(format!("unsupported config section '{section}'"));
-        }
-        match key {
-            "theme" => selected = Some(parse_string(value)?),
-            other => return Err(format!("unsupported config key '{other}'")),
-        }
-    }
-    Ok(selected)
+    let raw: Option<RawTabviewConfig> =
+        yaml_serde::from_str(input).map_err(|err| format!("invalid config yaml: {err}"))?;
+    Ok(raw.and_then(|config| config.theme))
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTabviewConfig {
+    theme: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -399,18 +384,34 @@ fn discover_themes_in_root(
     let mut paths = entries
         .filter_map(Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("toml"))
+        .filter(|path| matches!(theme_extension(path), Some("yml" | "yaml")))
         .collect::<Vec<_>>();
-    paths.sort();
+    paths.sort_by(|left, right| {
+        theme_stem(left)
+            .cmp(&theme_stem(right))
+            .then_with(|| theme_extension_priority(left).cmp(&theme_extension_priority(right)))
+            .then_with(|| left.cmp(right))
+    });
 
+    let mut seen = BTreeSet::new();
     for path in paths {
-        let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+        let Some(stem) = theme_stem(&path) else {
             continue;
         };
         let canonical_name = stem.to_owned();
+        if !seen.insert(canonical_name.clone()) && theme_extension(&path) == Some("yaml") {
+            discovery.warnings.push(ThemeWarning {
+                field: path.display().to_string(),
+                message: format!(
+                    "duplicate theme '{}': .yml takes precedence over .yaml",
+                    canonical_name
+                ),
+            });
+            continue;
+        }
         match fs::read_to_string(&path)
             .map_err(|err| err.to_string())
-            .and_then(|contents| parse_theme_toml(&contents, terminal_mode))
+            .and_then(|contents| parse_theme_yaml(&contents, terminal_mode))
         {
             Ok(mut theme) => {
                 if theme.name != canonical_name {
@@ -440,13 +441,37 @@ fn discover_themes_in_root(
     discovery
 }
 
+fn theme_stem(path: &Path) -> Option<&str> {
+    path.file_stem().and_then(|stem| stem.to_str())
+}
+
+fn theme_extension(path: &Path) -> Option<&str> {
+    path.extension().and_then(|extension| extension.to_str())
+}
+
+fn theme_extension_priority(path: &Path) -> u8 {
+    match theme_extension(path) {
+        Some("yml") => 0,
+        Some("yaml") => 1,
+        _ => 2,
+    }
+}
+
 pub fn default_theme() -> ResolvedTheme {
     default_theme_for_terminal(TerminalColorMode::TrueColor)
 }
 
 pub fn default_theme_for_terminal(terminal_mode: TerminalColorMode) -> ResolvedTheme {
     let palette = BTreeMap::from([
-        ("text".to_owned(), ConfiguredColor::Ansi256(248)),
+        (
+            "text".to_owned(),
+            ConfiguredColor::Rgb {
+                r: 175,
+                g: 175,
+                b: 175,
+                a: 255,
+            },
+        ),
         ("muted".to_owned(), ConfiguredColor::Ansi256(242)),
         ("dim".to_owned(), ConfiguredColor::Ansi256(240)),
         (
@@ -516,9 +541,6 @@ pub fn default_theme_for_terminal(terminal_mode: TerminalColorMode) -> ResolvedT
         ),
         ("table.header_glyph", StyleSpec::new().fg("muted")),
         ("table.cell", StyleSpec::new().fg("text")),
-        ("table.cell.string", StyleSpec::new().fg("green")),
-        ("table.cell.number", StyleSpec::new().fg("magenta")),
-        ("table.cell.boolean", StyleSpec::new().fg("magenta")),
         (
             "table.selected",
             StyleSpec::new().fg("text").bg("dark_blue"),
@@ -568,10 +590,7 @@ pub fn default_theme_for_terminal(terminal_mode: TerminalColorMode) -> ResolvedT
         ),
         (
             "search.highlight",
-            StyleSpec::new()
-                .fg("yellow")
-                .bg("dark_blue")
-                .modifier(Modifier::UNDERLINED),
+            StyleSpec::new().fg("yellow").modifier(Modifier::UNDERLINED),
         ),
         (
             "message.footer",
@@ -592,71 +611,44 @@ pub fn default_theme_for_terminal(terminal_mode: TerminalColorMode) -> ResolvedT
     theme
 }
 
-pub fn parse_theme_toml(
+pub fn parse_theme_yaml(
     input: &str,
     terminal_mode: TerminalColorMode,
 ) -> Result<ResolvedTheme, String> {
-    let mut name = None;
-    let mut mode = ColorMode::Auto;
-    let mut section = String::new();
-    let mut palette = BTreeMap::new();
-    let mut style_specs = BTreeMap::new();
-    let mut identifier_colors = None;
-
-    for (line_idx, raw_line) in input.lines().enumerate() {
-        let stripped = strip_comment(raw_line);
-        let line = stripped.trim();
-        if line.is_empty() {
-            continue;
-        }
-        if let Some(name) = parse_section(line) {
-            section = name.to_owned();
-            continue;
-        }
-        let (key, value) = split_key_value(line)
-            .ok_or_else(|| format!("line {} is not a TOML key/value", line_idx + 1))?;
-        match section.as_str() {
-            "" => match key {
-                "name" => name = Some(parse_string(value)?),
-                "mode" => mode = parse_mode(&parse_string(value)?)?,
-                other => return Err(format!("unsupported root key '{other}'")),
-            },
-            "palette" => {
-                palette.insert(key.to_owned(), parse_color_or_alias(value)?);
-            }
-            "identifiers" => match key {
-                "colors" => identifier_colors = Some(parse_identifier_colors(value)?),
-                other => return Err(format!("unsupported identifiers key '{other}'")),
-            },
-            section if section.starts_with("styles.") => {
-                let token = section
-                    .strip_prefix("styles.")
-                    .expect("checked prefix")
-                    .to_owned();
-                if !REQUIRED_STYLE_TOKENS.contains(&token.as_str())
-                    && !OPTIONAL_STYLE_TOKENS.contains(&token.as_str())
-                {
-                    return Err(format!("unsupported style token '{token}'"));
+    let raw: RawTheme =
+        yaml_serde::from_str(input).map_err(|err| format!("invalid theme yaml: {err}"))?;
+    let mode = raw
+        .mode
+        .as_deref()
+        .map(parse_mode)
+        .transpose()?
+        .unwrap_or(ColorMode::Auto);
+    let palette = raw
+        .palette
+        .into_iter()
+        .map(|(name, value)| {
+            parse_color_or_alias_value(value).and_then(|color| {
+                if name.trim().is_empty() {
+                    Err("palette alias names must not be empty".to_owned())
+                } else {
+                    Ok((name, color))
                 }
-                let spec = style_specs.entry(token).or_insert_with(StyleSpec::new);
-                match key {
-                    "fg" => spec.fg = Some(parse_string(value)?),
-                    "bg" => spec.bg = Some(parse_string(value)?),
-                    "modifiers" => spec.modifiers = parse_modifier_array(value)?,
-                    other => return Err(format!("unsupported style key '{section}.{other}'")),
-                }
-            }
-            other => return Err(format!("unsupported section '{other}'")),
-        }
-    }
+            })
+        })
+        .collect::<Result<BTreeMap<_, _>, _>>()?;
+    let style_specs = collect_style_specs(raw.styles)?;
+    let identifier_colors = match raw.identifiers.colors {
+        None => default_identifier_colors(),
+        Some(colors) => validate_identifier_colors(colors)?,
+    };
 
     let mut theme = ResolvedTheme {
-        name: name.ok_or_else(|| "missing required root key 'name'".to_owned())?,
+        name: raw.name,
         mode,
         resolved_mode: resolve_terminal_mode(mode, terminal_mode),
         styles: BTreeMap::new(),
         palette,
-        identifier_colors: identifier_colors.unwrap_or_else(default_identifier_colors),
+        identifier_colors,
     };
     for token in REQUIRED_STYLE_TOKENS {
         let spec = style_specs
@@ -686,6 +678,25 @@ fn resolve_terminal_mode(mode: ColorMode, terminal_mode: TerminalColorMode) -> T
     }
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTheme {
+    name: String,
+    mode: Option<String>,
+    #[serde(default)]
+    palette: BTreeMap<String, String>,
+    #[serde(default)]
+    identifiers: RawThemeIdentifiers,
+    #[serde(default)]
+    styles: Value,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawThemeIdentifiers {
+    colors: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 struct StyleSpec {
     fg: Option<String>,
@@ -712,6 +723,107 @@ impl StyleSpec {
         self.modifiers.push(value);
         self
     }
+}
+
+fn collect_style_specs(styles: Value) -> Result<BTreeMap<String, StyleSpec>, String> {
+    let mut specs = BTreeMap::new();
+    if matches!(styles, Value::Null) {
+        return Ok(specs);
+    }
+    collect_style_specs_at(Vec::new(), styles, &mut specs)?;
+    Ok(specs)
+}
+
+fn collect_style_specs_at(
+    path: Vec<String>,
+    value: Value,
+    specs: &mut BTreeMap<String, StyleSpec>,
+) -> Result<(), String> {
+    let Value::Mapping(mapping) = value else {
+        let token = path.join(".");
+        return Err(format!("styles.{token} must be a mapping"));
+    };
+    if is_style_leaf(&mapping) {
+        let token = path.join(".");
+        validate_style_token(&token)?;
+        specs.insert(token, style_spec_from_mapping(&mapping, &path)?);
+    }
+    for (key, child) in mapping {
+        let key = yaml_key_string(key)?;
+        if is_style_field(&key) {
+            continue;
+        }
+        let mut child_path = path.clone();
+        child_path.push(key);
+        collect_style_specs_at(child_path, child, specs)?;
+    }
+    Ok(())
+}
+
+fn is_style_leaf(mapping: &Mapping) -> bool {
+    ["fg", "bg", "modifiers"]
+        .into_iter()
+        .any(|key| mapping.contains_key(key))
+}
+
+fn is_style_field(key: &str) -> bool {
+    matches!(key, "fg" | "bg" | "modifiers")
+}
+
+fn yaml_key_string(key: Value) -> Result<String, String> {
+    match key {
+        Value::String(key) if !key.trim().is_empty() => Ok(key),
+        Value::String(_) => Err("style path keys must not be empty".to_owned()),
+        _ => Err("style path keys must be strings".to_owned()),
+    }
+}
+
+fn validate_style_token(token: &str) -> Result<(), String> {
+    if REQUIRED_STYLE_TOKENS.contains(&token) || OPTIONAL_STYLE_TOKENS.contains(&token) {
+        Ok(())
+    } else {
+        Err(format!("unsupported style token '{token}'"))
+    }
+}
+
+fn style_spec_from_mapping(mapping: &Mapping, path: &[String]) -> Result<StyleSpec, String> {
+    let token = path.join(".");
+    let fg = mapping
+        .get("fg")
+        .map(|value| yaml_string_ref(value, &format!("styles.{token}.fg")))
+        .transpose()?;
+    let bg = mapping
+        .get("bg")
+        .map(|value| yaml_string_ref(value, &format!("styles.{token}.bg")))
+        .transpose()?;
+    let modifiers = mapping
+        .get("modifiers")
+        .map(|value| yaml_modifier_sequence(value, &format!("styles.{token}.modifiers")))
+        .transpose()?
+        .unwrap_or_default();
+    Ok(StyleSpec { fg, bg, modifiers })
+}
+
+fn yaml_string_ref(value: &Value, field: &str) -> Result<String, String> {
+    match value {
+        Value::String(value) if !value.trim().is_empty() => Ok(value.clone()),
+        Value::String(_) => Err(format!("{field} must not be empty")),
+        _ => Err(format!("{field} must be a string")),
+    }
+}
+
+fn yaml_modifier_sequence(value: &Value, field: &str) -> Result<Vec<Modifier>, String> {
+    let Value::Sequence(values) = value else {
+        return Err(format!("{field} must be an array of strings"));
+    };
+    values
+        .iter()
+        .enumerate()
+        .map(|(idx, value)| {
+            let modifier = yaml_string_ref(value, &format!("{field}.{idx}"))?;
+            modifier_from_name(&modifier)
+        })
+        .collect()
 }
 
 fn resolve_style_spec(theme: &ResolvedTheme, spec: &StyleSpec) -> Result<Style, ThemeError> {
@@ -763,8 +875,10 @@ enum AnsiColor {
     White,
 }
 
-fn parse_color_or_alias(value: &str) -> Result<ConfiguredColor, String> {
-    let value = parse_string(value)?;
+fn parse_color_or_alias_value(value: String) -> Result<ConfiguredColor, String> {
+    if value.trim().is_empty() {
+        return Err("color value must not be empty".to_owned());
+    }
     Ok(parse_configured_color(&value).unwrap_or(ConfiguredColor::Alias(value)))
 }
 
@@ -827,7 +941,15 @@ fn parse_hex_color(value: &str) -> Option<ConfiguredColor> {
 
 fn color_for_terminal(color: ResolvedColor, mode: TerminalColorMode) -> Color {
     match (color, mode) {
-        (ResolvedColor::Ansi16(color), _) => ansi_color(color),
+        (ResolvedColor::Ansi16(color), TerminalColorMode::Ansi16) => ansi_color(color),
+        (ResolvedColor::Ansi16(color), TerminalColorMode::Ansi256) => {
+            let (r, g, b) = ansi_rgb(color);
+            Color::Indexed(nearest_xterm_256(r, g, b))
+        }
+        (ResolvedColor::Ansi16(color), TerminalColorMode::TrueColor) => {
+            let (r, g, b) = ansi_rgb(color);
+            Color::Rgb(r, g, b)
+        }
         (ResolvedColor::Ansi256(color), TerminalColorMode::Ansi16) => {
             ansi_color(nearest_ansi16(xterm_256_rgb(color)))
         }
@@ -876,11 +998,30 @@ fn default_identifier_colors() -> Vec<String> {
 
 fn dark_identifier_rgb(target: (u8, u8, u8)) -> (u8, u8, u8) {
     const DARK_RATIO: f64 = 0.5;
-    (
+    let dim = dim_ansi_rgb(nearest_ansi16(target));
+    max_rgb(
         (target.0 as f64 * DARK_RATIO).round() as u8,
         (target.1 as f64 * DARK_RATIO).round() as u8,
         (target.2 as f64 * DARK_RATIO).round() as u8,
+        dim,
     )
+}
+
+fn max_rgb(r: u8, g: u8, b: u8, floor: (u8, u8, u8)) -> (u8, u8, u8) {
+    (r.max(floor.0), g.max(floor.1), b.max(floor.2))
+}
+
+fn dim_ansi_rgb(color: AnsiColor) -> (u8, u8, u8) {
+    match color {
+        AnsiColor::Black => (0, 0, 0),
+        AnsiColor::DarkRed | AnsiColor::Red => (100, 0, 0),
+        AnsiColor::DarkGreen | AnsiColor::Green => (0, 100, 0),
+        AnsiColor::DarkYellow | AnsiColor::Yellow => (100, 100, 0),
+        AnsiColor::DarkBlue | AnsiColor::Blue => (0, 0, 255),
+        AnsiColor::DarkMagenta | AnsiColor::Magenta => (100, 0, 100),
+        AnsiColor::DarkCyan | AnsiColor::Cyan => (0, 100, 100),
+        AnsiColor::Gray | AnsiColor::DarkGray | AnsiColor::White => (100, 100, 100),
+    }
 }
 
 fn ansi_color(color: AnsiColor) -> Color {
@@ -907,18 +1048,18 @@ fn ansi_color(color: AnsiColor) -> Color {
 fn ansi_rgb(color: AnsiColor) -> (u8, u8, u8) {
     match color {
         AnsiColor::Black => (0, 0, 0),
-        AnsiColor::DarkRed => (128, 0, 0),
-        AnsiColor::DarkGreen => (0, 128, 0),
-        AnsiColor::DarkYellow => (128, 128, 0),
-        AnsiColor::DarkBlue => (0, 0, 128),
-        AnsiColor::DarkMagenta => (128, 0, 128),
-        AnsiColor::DarkCyan => (0, 128, 128),
-        AnsiColor::Gray => (192, 192, 192),
-        AnsiColor::DarkGray => (128, 128, 128),
+        AnsiColor::DarkRed => (192, 0, 0),
+        AnsiColor::DarkGreen => (0, 192, 0),
+        AnsiColor::DarkYellow => (192, 192, 0),
+        AnsiColor::DarkBlue => (0, 50, 255),
+        AnsiColor::DarkMagenta => (192, 0, 192),
+        AnsiColor::DarkCyan => (0, 192, 192),
+        AnsiColor::Gray => (160, 160, 160),
+        AnsiColor::DarkGray => (100, 100, 100),
         AnsiColor::Red => (255, 0, 0),
         AnsiColor::Green => (0, 255, 0),
         AnsiColor::Yellow => (255, 255, 0),
-        AnsiColor::Blue => (0, 0, 255),
+        AnsiColor::Blue => (0, 100, 255),
         AnsiColor::Magenta => (255, 0, 255),
         AnsiColor::Cyan => (0, 255, 255),
         AnsiColor::White => (255, 255, 255),
@@ -1038,141 +1179,18 @@ fn parse_mode(value: &str) -> Result<ColorMode, String> {
     }
 }
 
-fn parse_modifier_array(value: &str) -> Result<Vec<Modifier>, String> {
-    parse_string_array(value)?
-        .into_iter()
-        .map(|value| match value.as_str() {
-            "bold" => Ok(Modifier::BOLD),
-            "italic" => Ok(Modifier::ITALIC),
-            "underline" => Ok(Modifier::UNDERLINED),
-            "reversed" => Ok(Modifier::REVERSED),
-            "dim" => Ok(Modifier::DIM),
-            _ => Err(format!("unknown style modifier '{value}'")),
-        })
-        .collect()
+fn modifier_from_name(value: &str) -> Result<Modifier, String> {
+    match value {
+        "bold" => Ok(Modifier::BOLD),
+        "italic" => Ok(Modifier::ITALIC),
+        "underline" => Ok(Modifier::UNDERLINED),
+        "reversed" => Ok(Modifier::REVERSED),
+        "dim" => Ok(Modifier::DIM),
+        _ => Err(format!("unknown style modifier '{value}'")),
+    }
 }
 
-fn strip_comment(line: &str) -> String {
-    let mut quote = None;
-    let mut escaped = false;
-    let mut output = String::new();
-    for ch in line.chars() {
-        match ch {
-            '\\' if quote == Some('"') && !escaped => {
-                escaped = true;
-                output.push(ch);
-                continue;
-            }
-            '"' | '\'' if !escaped && quote.is_none_or(|current| current == ch) => {
-                quote = if quote == Some(ch) { None } else { Some(ch) };
-                output.push(ch);
-            }
-            '#' if quote.is_none() => break,
-            _ => output.push(ch),
-        }
-        escaped = false;
-    }
-    output
-}
-
-fn parse_section(line: &str) -> Option<&str> {
-    line.strip_prefix('[')?.strip_suffix(']')
-}
-
-fn split_key_value(line: &str) -> Option<(&str, &str)> {
-    let (key, value) = line.split_once('=')?;
-    Some((key.trim(), value.trim()))
-}
-
-fn parse_string(value: &str) -> Result<String, String> {
-    let value = value.trim();
-    if let Some(value) = value
-        .strip_prefix('\'')
-        .and_then(|value| value.strip_suffix('\''))
-    {
-        return Ok(value.to_owned());
-    }
-    let value = value
-        .strip_prefix('"')
-        .and_then(|value| value.strip_suffix('"'))
-        .ok_or_else(|| format!("expected quoted string, got '{value}'"))?;
-    let mut output = String::new();
-    let mut escaped = false;
-    for ch in value.chars() {
-        if escaped {
-            output.push(match ch {
-                '"' => '"',
-                '\\' => '\\',
-                'n' => '\n',
-                't' => '\t',
-                other => return Err(format!("unsupported escape sequence '\\{other}'")),
-            });
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
-        } else {
-            output.push(ch);
-        }
-    }
-    if escaped {
-        return Err("unterminated escape sequence in string".to_owned());
-    }
-    Ok(output)
-}
-
-fn parse_string_array(value: &str) -> Result<Vec<String>, String> {
-    let value = value.trim();
-    let inner = value
-        .strip_prefix('[')
-        .and_then(|value| value.strip_suffix(']'))
-        .ok_or_else(|| format!("expected array, got '{value}'"))?;
-    if inner.trim().is_empty() {
-        return Ok(Vec::new());
-    }
-    split_string_array_items(inner)?
-        .into_iter()
-        .map(|item| parse_string(item.trim()))
-        .collect()
-}
-
-fn split_string_array_items(inner: &str) -> Result<Vec<String>, String> {
-    let mut items = Vec::new();
-    let mut current = String::new();
-    let mut quote = None;
-    let mut escaped = false;
-    for ch in inner.chars() {
-        if let Some(current_quote) = quote {
-            current.push(ch);
-            if current_quote == '"' && escaped {
-                escaped = false;
-            } else if current_quote == '"' && ch == '\\' {
-                escaped = true;
-            } else if ch == current_quote {
-                quote = None;
-            }
-            continue;
-        }
-        match ch {
-            '"' | '\'' => {
-                quote = Some(ch);
-                current.push(ch);
-            }
-            ',' => {
-                items.push(current.trim().to_owned());
-                current.clear();
-            }
-            _ => current.push(ch),
-        }
-    }
-    if quote.is_some() {
-        return Err("unterminated string in array".to_owned());
-    }
-    items.push(current.trim().to_owned());
-    Ok(items)
-}
-
-fn parse_identifier_colors(value: &str) -> Result<Vec<String>, String> {
-    let colors = parse_string_array(value)?;
+fn validate_identifier_colors(colors: Vec<String>) -> Result<Vec<String>, String> {
     if colors.is_empty() || colors.iter().any(|color| color.trim().is_empty()) {
         return Err("identifiers.colors requires at least one color".to_owned());
     }
@@ -1389,39 +1407,62 @@ mod tests {
     use super::*;
 
     fn full_theme(extra: &str) -> String {
-        let mut theme = String::from(
+        full_theme_with_text_and_style_overrides("\"#AFAFAFFF\"", extra, &[])
+    }
+
+    fn full_theme_with_style_overrides(extra: &str, overrides: &[(&str, &str)]) -> String {
+        full_theme_with_text_and_style_overrides("\"#AFAFAFFF\"", extra, overrides)
+    }
+
+    fn full_theme_with_text_and_style_overrides(
+        text: &str,
+        extra: &str,
+        overrides: &[(&str, &str)],
+    ) -> String {
+        let mut theme = format!(
             r##"
-name = "custom"
-mode = "hex32"
-
-[palette]
-text = "palette(248)"
-blue_ui = "palette(19)"
-yellow = "yellow"
-error = "dark-red"
-bg = "black"
-
+name: custom
+mode: hex32
+palette:
+  text: {text}
+  blue_ui: palette(19)
+  yellow: yellow
+  error: dark-red
+  bg: black
 "##,
         );
-        for token in REQUIRED_STYLE_TOKENS {
-            theme.push_str(&format!("[styles.{token}]\nfg = \"text\"\n\n"));
-        }
         theme.push_str(extra);
+        theme.push_str("styles:\n");
+        for token in REQUIRED_STYLE_TOKENS {
+            theme.push_str(&format!("  \"{token}\":\n"));
+            if let Some((_, override_spec)) = overrides
+                .iter()
+                .find(|(override_token, _)| *override_token == *token)
+            {
+                for line in override_spec.lines() {
+                    theme.push_str("    ");
+                    theme.push_str(line);
+                    theme.push('\n');
+                }
+            } else {
+                theme.push_str("    fg: text\n");
+            }
+        }
         theme
     }
 
     #[test]
     fn config_theme_parses_top_level_theme() {
         assert_eq!(
-            parse_config_theme("theme = \"ops\"\n").expect("parse"),
+            parse_config_theme("theme: ops\n").expect("parse"),
             Some("ops".to_owned())
         );
     }
 
     #[test]
-    fn config_theme_accepts_toml_literal_strings() {
+    fn config_theme_accepts_yaml_quoted_strings() {
         assert_eq!(
-            parse_config_theme("theme = 'ops#dark' # comment\n").expect("parse"),
+            parse_config_theme("theme: 'ops#dark' # comment\n").expect("parse"),
             Some("ops#dark".to_owned())
         );
     }
@@ -1451,29 +1492,53 @@ bg = "black"
         let theme = default_theme();
         assert_eq!(theme.name(), "cmdzro");
         assert_eq!(theme.resolved_mode(), TerminalColorMode::TrueColor);
-        assert_eq!(theme.style("table.cell").fg, Some(Color::Indexed(248)));
-        assert_eq!(theme.style("table.location").fg, Some(Color::Gray));
-        assert_eq!(theme.style("table.location").bg, Some(Color::Black));
-        assert_eq!(theme.style("table.current_cell").fg, Some(Color::Cyan));
+        assert_eq!(
+            theme.style("table.cell").fg,
+            Some(Color::Rgb(175, 175, 175))
+        );
+        assert_eq!(
+            theme.style("table.location").fg,
+            Some(Color::Rgb(160, 160, 160))
+        );
+        assert_eq!(theme.style("table.location").bg, Some(Color::Rgb(0, 0, 0)));
+        assert_eq!(
+            theme.style("table.current_cell").fg,
+            Some(Color::Rgb(0, 255, 255))
+        );
         assert_eq!(
             theme.style("table.current_cell").bg,
             Some(Color::Indexed(19))
         );
-        assert_eq!(theme.style("table.divider").fg, Some(Color::Gray));
-        assert_eq!(theme.style("table.header").fg, Some(Color::Indexed(6)));
-        assert_eq!(theme.style("table.header_selected").fg, Some(Color::Cyan));
-        assert_eq!(theme.style("table.cell.string").fg, Some(Color::Indexed(2)));
-        assert_eq!(theme.style("table.cell.number").fg, Some(Color::Magenta));
-        assert_eq!(theme.style("table.cell.boolean").fg, Some(Color::Magenta));
+        assert_eq!(
+            theme.style("table.divider").fg,
+            Some(Color::Rgb(160, 160, 160))
+        );
+        assert_eq!(
+            theme.style("table.header").fg,
+            Some(Color::Rgb(0, 192, 192))
+        );
+        assert_eq!(
+            theme.style("table.header_selected").fg,
+            Some(Color::Rgb(0, 255, 255))
+        );
         assert_eq!(theme.style("table.selected").bg, Some(Color::Indexed(19)));
         assert!(!theme
             .style("table.selected")
             .add_modifier
             .contains(Modifier::REVERSED));
         assert_eq!(theme.style("popup.background").bg, Some(Color::Indexed(19)));
-        assert_eq!(theme.style("popup.border").fg, Some(Color::Cyan));
-        assert_eq!(theme.style("popup.title").fg, Some(Color::Gray));
-        assert_eq!(theme.style("popup.action").fg, Some(Color::Cyan));
+        assert_eq!(
+            theme.style("popup.border").fg,
+            Some(Color::Rgb(0, 255, 255))
+        );
+        assert_eq!(
+            theme.style("popup.title").fg,
+            Some(Color::Rgb(160, 160, 160))
+        );
+        assert_eq!(
+            theme.style("popup.action").fg,
+            Some(Color::Rgb(0, 255, 255))
+        );
         assert_eq!(
             theme
                 .conditional_style("identifier(0)")
@@ -1496,9 +1561,16 @@ bg = "black"
             Some(Color::Rgb(0, 136, 0))
         );
         assert_ne!(theme.style("table.cell").fg, Some(Color::Blue));
-        assert_eq!(theme.style("search.highlight").fg, Some(Color::Yellow));
-        assert_eq!(theme.style("search.highlight").bg, Some(Color::Indexed(19)));
-        assert_eq!(theme.style("message.error").bg, Some(Color::Indexed(1)));
+        assert_eq!(
+            theme.style("search.highlight").fg,
+            Some(Color::Rgb(255, 255, 0))
+        );
+        assert_eq!(theme.style("search.highlight").bg, None);
+        assert!(theme
+            .style("search.highlight")
+            .add_modifier
+            .contains(Modifier::UNDERLINED));
+        assert_eq!(theme.style("message.error").bg, Some(Color::Rgb(192, 0, 0)));
     }
 
     #[test]
@@ -1513,20 +1585,20 @@ bg = "black"
 
     #[test]
     fn parses_colors_aliases_and_modifiers() {
-        let theme = parse_theme_toml(
-            &full_theme(
-                r#"
-[styles.table.header]
-fg = "yellow"
-modifiers = ["bold", "underline"]
-"#,
+        let theme = parse_theme_yaml(
+            &full_theme_with_style_overrides(
+                "",
+                &[("table.header", "fg: yellow\nmodifiers: [bold, underline]")],
             ),
             TerminalColorMode::TrueColor,
         )
         .expect("theme");
 
         assert_eq!(theme.mode(), ColorMode::Hex32);
-        assert_eq!(theme.style("table.header").fg, Some(Color::Yellow));
+        assert_eq!(
+            theme.style("table.header").fg,
+            Some(Color::Rgb(255, 255, 0))
+        );
         assert!(theme
             .style("table.header")
             .add_modifier
@@ -1537,11 +1609,11 @@ modifiers = ["bold", "underline"]
 
     #[test]
     fn theme_identifier_colors_override_default_families() {
-        let theme = parse_theme_toml(
+        let theme = parse_theme_yaml(
             &full_theme(
                 r##"
-[identifiers]
-colors = ["#ff0000ff", "#00ff00ff"]
+identifiers:
+  colors: ["#ff0000ff", "#00ff00ff"]
 "##,
             ),
             TerminalColorMode::TrueColor,
@@ -1593,13 +1665,8 @@ colors = ["#ff0000ff", "#00ff00ff"]
 
     #[test]
     fn parses_hex32_and_falls_back_to_ansi256() {
-        let theme = parse_theme_toml(
-            &full_theme(
-                r##"
-[palette]
-text = "#25A39AFF"
-"##,
-            ),
+        let theme = parse_theme_yaml(
+            &full_theme_with_text_and_style_overrides("\"#25A39AFF\"", "", &[]),
             TerminalColorMode::Ansi256,
         )
         .expect("theme");
@@ -1620,46 +1687,17 @@ text = "#25A39AFF"
     #[test]
     fn detects_unknown_style_token_and_alias_cycle() {
         let invalid = r#"
-name = "bad"
-[palette]
-a = "b"
-b = "a"
-[styles.nope]
-fg = "a"
+name: bad
+palette:
+  a: b
+  b: a
+styles:
+  nope:
+    fg: a
 "#;
-        assert!(parse_theme_toml(invalid, TerminalColorMode::TrueColor)
+        assert!(parse_theme_yaml(invalid, TerminalColorMode::TrueColor)
             .expect_err("invalid")
             .contains("unsupported style token"));
-    }
-
-    #[test]
-    fn parse_string_rejects_unterminated_escape() {
-        assert!(parse_string(r#""bad\""#)
-            .expect_err("invalid")
-            .contains("unterminated escape"));
-    }
-
-    #[test]
-    fn parse_string_rejects_unknown_escape() {
-        assert!(parse_string(r#""bad\q""#)
-            .expect_err("invalid")
-            .contains("unsupported escape"));
-    }
-
-    #[test]
-    fn parse_string_array_keeps_commas_inside_strings() {
-        assert_eq!(
-            parse_string_array(r#"["a,b", "c"]"#).expect("array"),
-            vec!["a,b".to_owned(), "c".to_owned()]
-        );
-    }
-
-    #[test]
-    fn parse_string_array_accepts_literal_strings() {
-        assert_eq!(
-            parse_string_array(r#"['a,b', 'c\d']"#).expect("array"),
-            vec!["a,b".to_owned(), r"c\d".to_owned()]
-        );
     }
 
     #[test]
@@ -1667,7 +1705,7 @@ fg = "a"
         let dir = tempfile::tempdir().expect("tempdir");
         let theme_dir = dir.path().join(THEME_DIR);
         fs::create_dir_all(&theme_dir).expect("theme dir");
-        fs::write(theme_dir.join("from-file.toml"), full_theme("")).expect("theme file");
+        fs::write(theme_dir.join("from-file.yml"), full_theme("")).expect("theme file");
 
         let discovery = discover_themes_in_root(dir.path(), None, TerminalColorMode::TrueColor);
 
@@ -1766,13 +1804,21 @@ fg = "a"
 
     #[test]
     fn sample_theme_fixture_parses() {
-        let theme = parse_theme_toml(
-            include_str!("../sample/config/themes/cmdzro-sample.toml"),
+        let theme = parse_theme_yaml(
+            include_str!("../sample/config/themes/cmdzro.yml"),
             TerminalColorMode::TrueColor,
         )
         .expect("sample theme");
 
-        assert_eq!(theme.name(), "cmdzro-sample");
-        assert_eq!(theme.style("search.highlight").fg, Some(Color::Yellow));
+        assert_eq!(theme.name(), "cmdzro");
+        assert_eq!(
+            theme.style("search.highlight").fg,
+            Some(Color::Rgb(255, 255, 0))
+        );
+        assert_eq!(theme.style("search.highlight").bg, None);
+        assert!(theme
+            .style("search.highlight")
+            .add_modifier
+            .contains(Modifier::UNDERLINED));
     }
 }

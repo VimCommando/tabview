@@ -36,8 +36,8 @@
       }
     },
     "styles": {
-      "type": "object",
-      "description": "Theme files encode style tokens as TOML tables such as [styles.table.cell], [styles.popup.border], and [styles.search.highlight]."
+      "$ref": "#/$defs/styleTree",
+      "description": "Nested YAML style tokens such as styles.table.cell, styles.popup.border, and styles.search.highlight."
     }
   },
   "$defs": {
@@ -46,9 +46,31 @@
       "minLength": 1,
       "description": "A 16-color name, palette(N), 0-255 palette index, #RRGGBB or #RRGGBBAA hex color, or palette alias."
     },
+    "styleTree": {
+      "type": "object",
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/styleTree"
+          },
+          {
+            "$ref": "#/$defs/style"
+          }
+        ]
+      }
+    },
     "style": {
       "type": "object",
-      "additionalProperties": false,
+      "additionalProperties": {
+        "anyOf": [
+          {
+            "$ref": "#/$defs/styleTree"
+          },
+          {
+            "$ref": "#/$defs/style"
+          }
+        ]
+      },
       "properties": {
         "fg": {
           "$ref": "#/$defs/color"

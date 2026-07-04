@@ -487,6 +487,7 @@ impl TableView {
         self.search_matches_cell(raw, &rendered, Some(&query))
     }
 
+    #[cfg(test)]
     fn visible_cell_matches_search_query(
         &self,
         row: usize,
@@ -506,6 +507,7 @@ impl TableView {
             .search_match
     }
 
+    #[cfg(test)]
     fn visible_cell_style_context(
         &self,
         row: usize,
@@ -562,6 +564,7 @@ impl TableView {
         }
     }
 
+    #[cfg(test)]
     fn conditional_color_for_visible_cell(
         &self,
         row: usize,
@@ -604,37 +607,6 @@ impl TableView {
                 rule.color_ref_for(raw, rendered, numeric, min_max)
             }
         })
-    }
-
-    pub fn default_cell_style_token_for_visible_column(
-        &self,
-        visible_column: usize,
-    ) -> &'static str {
-        let Some(source_column) = self.source_column_for_visible(visible_column) else {
-            return "table.cell";
-        };
-        self.default_cell_style_token_for_source_column(source_column)
-    }
-
-    pub(crate) fn default_cell_style_token_for_source_column(
-        &self,
-        source_column: usize,
-    ) -> &'static str {
-        match self
-            .column_display
-            .get(source_column)
-            .map(|metadata| metadata.column_type)
-            .unwrap_or_default()
-        {
-            ColumnTypeMetadata::BooleanWord
-            | ColumnTypeMetadata::BooleanChar
-            | ColumnTypeMetadata::BooleanBit => "table.cell.boolean",
-            ColumnTypeMetadata::Float | ColumnTypeMetadata::Int | ColumnTypeMetadata::SemVer => {
-                "table.cell.number"
-            }
-            _ if self.columns.is_numeric(ColumnIndex::new(source_column)) => "table.cell.number",
-            _ => "table.cell.string",
-        }
     }
 
     pub fn visible_row(&self, row: usize) -> Option<&Vec<String>> {

@@ -2,12 +2,12 @@
 
 `tabview` renders the Ratatui interface from a small set of hard-coded `Style::default()` values in `src/ui/mod.rs`. Saved views already provide sparse column metadata under `~/.config/tabview/views`, and the current schema covers column type, formatting, width, alignment, visibility, sort, and filter state.
 
-Color themes add a second configuration surface under the same tabview config root. The default visual language should be derived from `cmdzro.vim`: dark background, neutral gray text, cyan/magenta/green accents, blue only for UI surfaces, yellow only for search or UI emphasis, and red only for errors or unhealthy states.
+Color themes add a second configuration surface under the same tabview config root. The default visual language should be derived from `cmdzro.vim`: dark background, neutral gray cell text, cyan UI accents, blue only for UI surfaces, yellow only for search or UI emphasis, and red only for errors or unhealthy states.
 
 ## Goals / Non-Goals
 
 **Goals:**
-- Load named TOML themes from `$XDG_CONFIG_HOME/tabview/themes` or `~/.config/tabview/themes`.
+- Load named YAML themes from `$XDG_CONFIG_HOME/tabview/themes` or `~/.config/tabview/themes`.
 - Provide a built-in `cmdzro` default theme so the TUI is themed even when no config exists.
 - Parse color values from 16-color names, 256-color indexes, and `#RRGGBBAA` hex values.
 - Resolve colors to terminal-capable Ratatui colors with predictable fallback.
@@ -24,46 +24,45 @@ Color themes add a second configuration surface under the same tabview config ro
 
 ### Theme file shape
 
-Use TOML for themes because it is concise for named tokens and palette aliases, and it keeps theme configuration separate from saved view YAML.
+Use YAML for themes because style tokens are naturally hierarchical and read better as nested maps than as many repeated table sections. Theme files are YAML-only; there is no legacy TOML theme compatibility path.
 
 Example:
 
-```toml
-name = "cmdzro"
-mode = "auto" # auto | ansi16 | ansi256 | hex32
+```yaml
+name: cmdzro
+mode: auto # auto | ansi16 | ansi256 | hex32
 
-[palette]
-text = "palette(248)"
-muted = "palette(242)"
-ui_blue = "palette(19)"
-cyan = "dark-cyan"
-green = "dark-green"
-magenta = "palette(198)"
-yellow = "yellow"
-error = "dark-red"
+palette:
+  text: "#AFAFAFFF"
+  muted: palette(242)
+  ui_blue: palette(19)
+  cyan: dark-cyan
+  green: dark-green
+  magenta: magenta
+  yellow: yellow
+  error: dark-red
 
-[identifiers]
-colors = ["bright-green", "magenta", "cyan", "white"]
+identifiers:
+  colors: [bright-green, magenta, cyan, white]
 
-[styles.table.cell]
-fg = "text"
-
-[styles.table.header]
-fg = "text"
-modifiers = ["bold"]
-
-[styles.table.selected]
-fg = "text"
-bg = "ui_blue"
-modifiers = ["reversed"]
-
-[styles.search.highlight]
-fg = "yellow"
-modifiers = ["underline"]
-
-[styles.message.error]
-fg = "bright-white"
-bg = "error"
+styles:
+  table:
+    cell:
+      fg: text
+    header:
+      fg: text
+      modifiers: [bold]
+    selected:
+      fg: text
+      bg: ui_blue
+  search:
+    highlight:
+      fg: yellow
+      modifiers: [underline]
+  message:
+    error:
+      fg: bright-white
+      bg: error
 ```
 
 Theme tokens should be semantic rather than copying Vim highlight group names. The renderer asks for `table.header`, `popup.border`, `search.highlight`, or `message.error`, not `PMenuSel` or `StatusLine`.
@@ -86,21 +85,21 @@ Fallback should be deterministic:
 - `hex32` on truecolor terminals uses `Color::Rgb`.
 - `hex32` on 256-color terminals maps to the nearest xterm-256 color.
 - `hex32` or `ansi256` on 16-color terminals maps to the nearest configured 16-color fallback.
-- 16-color values render directly everywhere.
+- 16-color values use the base palette from `/Users/reno/.alacritty.toml`; in truecolor and 256-color modes they resolve through those RGB values, while explicit `ansi16` mode emits ANSI colors for the terminal palette.
 
 Alternative considered: store only Ratatui `Color` immediately. Rejected because doing so loses the original mode, alpha, and alias information needed for validation messages and terminal fallback.
 
 ### Configuration selection
 
-Add a small top-level TOML config file for tabview runtime settings, likely `$XDG_CONFIG_HOME/tabview/config.toml` or `~/.config/tabview/config.toml`:
+Add a small top-level YAML config file for tabview runtime settings, likely `$XDG_CONFIG_HOME/tabview/config.yml` or `~/.config/tabview/config.yml`:
 
-```toml
-theme = "cmdzro"
+```yaml
+theme: cmdzro
 ```
 
 The first implementation can load only `theme`; future settings can extend the same file. If the config file is missing, use the built-in `cmdzro` theme. If the config file selects a theme that cannot be loaded, fail before entering raw terminal mode with a clear error.
 
-Alternative considered: add a CLI flag only. Rejected as the primary surface because the user requested TOML configurability. A CLI override can be added later without changing the theme model.
+Alternative considered: add a CLI flag only. Rejected as the primary surface because the user requested file-based configurability. A CLI override can be added later without changing the theme model.
 
 ### Renderer integration
 
@@ -160,11 +159,11 @@ Alternative considered: put conditional color rules in theme files. Rejected bec
 
 `mode: auto` calculates buckets from observed parseable numeric values in the column. It accepts two or more colors and optional `steps`, defaulting to `8`. Non-numeric values do not affect min/max and remain uncolored unless another rule matches. Auto gradients can interpolate between RGB values in truecolor mode and otherwise choose nearest configured palette colors per bucket.
 
-`identifiers` is a string-mode rule. It maps each unique rendered value in the source column to a stable identifier index, then resolves that index through color families. `colors: auto` uses the active theme's `[identifiers].colors`; a saved view can override the families with an explicit color array. Each family generates 16 dark-to-light shades, and identifiers cycle across families before advancing shades. The darkest generated shade is clamped to the ANSI dark/dim foreground equivalent for contrast on black backgrounds.
+`identifiers` is a string-mode rule. It maps each unique rendered value in the source column to a stable identifier index, then resolves that index through color families. `colors: auto` uses the active theme's `identifiers.colors`; a saved view can override the families with an explicit color array. Each family generates 16 dark-to-light shades, and identifiers cycle across families before advancing shades. The darkest generated shade is clamped to the ANSI dark/dim foreground equivalent for contrast on black backgrounds.
 
 ### Schema and validation
 
-Add a theme schema under `schemas/theme.schema.json` or equivalent documentation for TOML-aware editors. Extend `schemas/view.schema.json` with `colors` definitions for `gradient`, `match`, and `range`.
+Add a theme schema under `schemas/theme.schema.json` or equivalent documentation for YAML-aware editors. Extend `schemas/view.schema.json` with `colors` definitions for `gradient`, `match`, and `range`.
 
 Validation should stay consistent with saved views:
 
@@ -178,5 +177,5 @@ Validation should stay consistent with saved views:
 - Color fallback may surprise users on limited terminals -> expose the requested mode and resolved mode in diagnostics or info output.
 - Conditional styling can reduce selection readability -> selection background/modifier remains authoritative and tests cover selected conditionally-colored cells.
 - Auto gradients require scanning column values -> compute color buckets after initial column type/format metadata is applied and cache per-column rule state.
-- Adding TOML parsing makes theme support a default dependency -> keep the parser small and avoid feature-gating the core TUI theme path.
+- YAML parsing is now part of the core theme path -> keep the schema narrow and avoid feature-gating the core TUI theme path.
 - Saved view schema grows more complex -> keep conditional rules as an ordered list with one rule kind per item and targeted validation errors.
