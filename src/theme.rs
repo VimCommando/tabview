@@ -942,9 +942,39 @@ fn nearest_ansi16(rgb: (u8, u8, u8)) -> AnsiColor {
 }
 
 fn nearest_xterm_256(r: u8, g: u8, b: u8) -> u8 {
-    (0u16..=255)
-        .min_by_key(|idx| color_distance((r, g, b), xterm_256_rgb(*idx as u8)))
-        .unwrap_or(15) as u8
+    let rgb = (r, g, b);
+    let cube = nearest_xterm_cube_color(r, g, b);
+    let gray = nearest_xterm_gray_color(r, g, b);
+    if color_distance(rgb, xterm_256_rgb(cube)) <= color_distance(rgb, xterm_256_rgb(gray)) {
+        cube
+    } else {
+        gray
+    }
+}
+
+fn nearest_xterm_cube_color(r: u8, g: u8, b: u8) -> u8 {
+    let r = nearest_xterm_cube_level(r);
+    let g = nearest_xterm_cube_level(g);
+    let b = nearest_xterm_cube_level(b);
+    16 + (36 * r) + (6 * g) + b
+}
+
+fn nearest_xterm_cube_level(value: u8) -> u8 {
+    match value {
+        0..=47 => 0,
+        48..=114 => 1,
+        _ => ((value as u16 - 35) / 40).min(5) as u8,
+    }
+}
+
+fn nearest_xterm_gray_color(r: u8, g: u8, b: u8) -> u8 {
+    let average = (u16::from(r) + u16::from(g) + u16::from(b)) / 3;
+    let gray = if average <= 8 {
+        0
+    } else {
+        ((average - 8 + 5) / 10).min(23)
+    };
+    232 + gray as u8
 }
 
 fn xterm_256_rgb(color: u8) -> (u8, u8, u8) {
@@ -1509,6 +1539,13 @@ text = "#25A39AFF"
             theme.style("table.cell").fg,
             Some(Color::Indexed(_))
         ));
+    }
+
+    #[test]
+    fn nearest_xterm_256_uses_cube_or_grayscale_candidates() {
+        assert_eq!(nearest_xterm_256(0, 0, 0), 16);
+        assert_eq!(nearest_xterm_256(255, 255, 255), 231);
+        assert_eq!(nearest_xterm_256(128, 128, 128), 244);
     }
 
     #[test]

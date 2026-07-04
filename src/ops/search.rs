@@ -112,6 +112,9 @@ fn cell_count(rows: &[Vec<String>]) -> usize {
 }
 
 pub(crate) fn contains_case_insensitive(value: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
     if value.is_ascii() && query.is_ascii() {
         return value
             .as_bytes()
@@ -123,6 +126,9 @@ pub(crate) fn contains_case_insensitive(value: &str, query: &str) -> bool {
 }
 
 fn contains_case_insensitive_folded_query(value: &str, query: &str) -> bool {
+    if query.is_empty() {
+        return true;
+    }
     if value.is_ascii() && query.is_ascii() {
         return value
             .as_bytes()
@@ -220,5 +226,10 @@ mod tests {
             ),
             Some(Position { row: 1, column: 1 })
         );
+    }
+
+    #[test]
+    fn contains_case_insensitive_handles_empty_query() {
+        assert!(contains_case_insensitive("alpha", ""));
     }
 }
