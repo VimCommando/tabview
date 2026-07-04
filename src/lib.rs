@@ -82,10 +82,11 @@ pub fn run(args: cli::Args) -> anyhow::Result<()> {
                 &app.theme,
             );
             match app.popup {
-                Some(ui::Popup::Help) => ui::render_help_popup(
+                Some(ui::Popup::Help) => ui::render_help_popup_with_theme(
                     &command::default_key_bindings(),
                     help_popup_area(area),
                     frame.buffer_mut(),
+                    &app.theme,
                 ),
                 Some(ui::Popup::Cell) => {
                     if let Some(cell) = current_cell(&app.view) {

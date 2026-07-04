@@ -505,7 +505,8 @@ impl TableView {
         if rendered == raw {
             contains_case_insensitive(raw, lowercase_query)
         } else {
-            contains_case_insensitive(&format!("{raw}\n{rendered}"), lowercase_query)
+            contains_case_insensitive(raw, lowercase_query)
+                || contains_case_insensitive(&rendered, lowercase_query)
         }
     }
 
