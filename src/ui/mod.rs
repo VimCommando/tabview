@@ -325,7 +325,7 @@ fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
         if let Some(prefix_style) = render.prefix_style {
             let prefix_width = header_prefix_width(&cell).min(width);
             for offset in 0..prefix_width {
-                buffer[(x + offset as u16, render.y)].set_style(prefix_style);
+                buffer[(x + offset as u16, render.y)].set_style(overlay_style(style, prefix_style));
             }
         }
         let gap_start = x.saturating_add(width as u16);
