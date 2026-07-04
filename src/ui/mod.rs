@@ -35,9 +35,7 @@ pub fn render_table_with_theme(
     theme: &ResolvedTheme,
     search_query: Option<&str>,
 ) {
-    let search_query = search_query
-        .filter(|query| !query.is_empty())
-        .map(str::to_lowercase);
+    let search_query = search_query.filter(|query| !query.is_empty());
     let viewport_height = visible_row_capacity(view, area);
     let viewport_width = visible_column_capacity(view, area);
     view.resize_viewport(viewport_height, viewport_width);

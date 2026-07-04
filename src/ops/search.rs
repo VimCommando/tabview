@@ -15,7 +15,6 @@ pub fn find_match(
     if query.is_empty() || rows.is_empty() {
         return None;
     }
-    let query = query.to_lowercase();
     let Some(mut position) = start_or_virtual_wrap_position(rows, start, direction) else {
         return None;
     };
@@ -119,7 +118,7 @@ pub(crate) fn contains_case_insensitive(value: &str, query: &str) -> bool {
             .any(|window| window.eq_ignore_ascii_case(query.as_bytes()));
     }
 
-    value.to_lowercase().contains(query)
+    value.to_lowercase().contains(&query.to_lowercase())
 }
 
 #[cfg(test)]

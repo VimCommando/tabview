@@ -491,7 +491,7 @@ impl TableView {
         &self,
         row: usize,
         visible_column: usize,
-        lowercase_query: &str,
+        query: &str,
     ) -> bool {
         let Some(rendered) = self
             .rendered_visible_row(row)
@@ -499,7 +499,7 @@ impl TableView {
         else {
             return false;
         };
-        self.visible_cell_style_context(row, visible_column, &rendered, Some(lowercase_query))
+        self.visible_cell_style_context(row, visible_column, &rendered, Some(query))
             .search_match
     }
 
@@ -508,7 +508,7 @@ impl TableView {
         row: usize,
         visible_column: usize,
         rendered: &str,
-        lowercase_query: Option<&str>,
+        query: Option<&str>,
     ) -> VisibleCellStyleContext {
         let Some(source_column) = self.source_column_for_visible(visible_column) else {
             return VisibleCellStyleContext {
@@ -529,27 +529,21 @@ impl TableView {
             .unwrap_or_default();
         VisibleCellStyleContext {
             conditional_color: self.conditional_color_for_source_cell(source_column, raw, rendered),
-            search_match: self.search_matches_cell(raw, rendered, lowercase_query),
+            search_match: self.search_matches_cell(raw, rendered, query),
         }
     }
 
-    fn search_matches_cell(
-        &self,
-        raw: &str,
-        rendered: &str,
-        lowercase_query: Option<&str>,
-    ) -> bool {
-        let Some(lowercase_query) = lowercase_query else {
+    fn search_matches_cell(&self, raw: &str, rendered: &str, query: Option<&str>) -> bool {
+        let Some(query) = query else {
             return false;
         };
-        if lowercase_query.is_empty() {
+        if query.is_empty() {
             return false;
         }
         if rendered == raw {
-            contains_case_insensitive(raw, lowercase_query)
+            contains_case_insensitive(raw, query)
         } else {
-            contains_case_insensitive(raw, lowercase_query)
-                || contains_case_insensitive(rendered, lowercase_query)
+            contains_case_insensitive(raw, query) || contains_case_insensitive(rendered, query)
         }
     }
 
