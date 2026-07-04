@@ -109,22 +109,29 @@ pub fn render_table_with_theme(
             break;
         };
         cell_styles.clear();
-        cell_styles.extend(row.iter().enumerate().map(|(column, cell)| {
-            let context = view.visible_cell_style_context(idx, column, cell, search_query.as_ref());
-            let mut style = theme.style_or(
-                view.default_cell_style_token_for_visible_column(column),
-                "table.cell",
-            );
-            if let Some(color_ref) = context.conditional_color {
-                if let Some(conditional_style) = theme.conditional_style(&color_ref) {
-                    style = overlay_style(style, conditional_style);
-                }
-            }
-            if context.search_match {
-                style = overlay_style(style, theme.style("search.highlight"));
-            }
-            style
-        }));
+        cell_styles.extend(
+            row.iter()
+                .enumerate()
+                .skip(viewport.origin.column)
+                .take(viewport.width)
+                .map(|(column, cell)| {
+                    let context =
+                        view.visible_cell_style_context(idx, column, cell, search_query.as_ref());
+                    let mut style = theme.style_or(
+                        view.default_cell_style_token_for_visible_column(column),
+                        "table.cell",
+                    );
+                    if let Some(color_ref) = context.conditional_color {
+                        if let Some(conditional_style) = theme.conditional_style(&color_ref) {
+                            style = overlay_style(style, conditional_style);
+                        }
+                    }
+                    if context.search_match {
+                        style = overlay_style(style, theme.style("search.highlight"));
+                    }
+                    style
+                }),
+        );
         let selected_column = (idx == cursor.row).then_some(cursor.column);
         render_row(
             buffer,
@@ -303,7 +310,7 @@ fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
         let width = render.widths.get(column).copied().unwrap_or(1);
         let base_style = render
             .cell_styles
-            .and_then(|styles| styles.get(column))
+            .and_then(|styles| styles.get(column - render.column_offset))
             .copied()
             .unwrap_or(render.style);
         let style = if render.selected_column == Some(column) {
