@@ -333,7 +333,16 @@ fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
         if x >= render.area.x + render.area.width {
             break;
         }
-        let width = render.widths.get(column).copied().unwrap_or(1);
+        let remaining_width = (render.area.x + render.area.width).saturating_sub(x) as usize;
+        if remaining_width == 0 {
+            break;
+        }
+        let width = render
+            .widths
+            .get(column)
+            .copied()
+            .unwrap_or(1)
+            .min(remaining_width);
         let base_style = render
             .cell_styles
             .and_then(|styles| styles.get(column - render.column_offset))
@@ -1529,6 +1538,24 @@ columns:
                 .contains(ratatui::style::Modifier::UNDERLINED));
         }
         assert_ne!(buffer[(5, 3)].style().fg, Some(Color::Rgb(255, 255, 0)));
+    }
+
+    #[test]
+    fn rendering_clamps_wide_columns_to_remaining_area() {
+        let mut view = TableView::classify(rows(&[&["Name"], &["alphabet"]]), Viewport::new(10, 1));
+        view.set_all_column_widths(20);
+        let area = Rect::new(0, 0, 6, 5);
+        let mut buffer = Buffer::empty(area);
+
+        render_table_with_theme(
+            &mut view,
+            area,
+            &mut buffer,
+            &default_theme(),
+            Some("alphabet"),
+        );
+
+        assert_eq!(buffer_text(&buffer).lines().nth(3), Some("alpha…"));
     }
 
     #[test]
