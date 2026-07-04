@@ -90,6 +90,7 @@ pub fn render_table_with_theme(
                     selected_style: theme.style_or("table.header_selected", "table.header"),
                     selected_column: Some(cursor.column),
                     column_offset: viewport.origin.column,
+                    visible_column_count: viewport.width,
                     column_gap: view.column_gap(),
                     alignments: &left_alignments,
                     hidden_boundaries: Some(&hidden_boundaries(view)),
@@ -166,6 +167,7 @@ pub fn render_table_with_theme(
                 selected_style: theme.style("table.selected"),
                 selected_column,
                 column_offset: viewport.origin.column,
+                visible_column_count: viewport.width,
                 column_gap: view.column_gap(),
                 alignments: &alignments,
                 hidden_boundaries: None,
@@ -315,6 +317,7 @@ struct RowRender<'a> {
     selected_style: Style,
     selected_column: Option<usize>,
     column_offset: usize,
+    visible_column_count: usize,
     column_gap: usize,
     alignments: &'a [Alignment],
     hidden_boundaries: Option<&'a [bool]>,
@@ -329,7 +332,12 @@ struct RowRender<'a> {
 
 fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
     let mut x = render.area.x;
-    for (column, cell) in row.iter().enumerate().skip(render.column_offset) {
+    for (column, cell) in row
+        .iter()
+        .enumerate()
+        .skip(render.column_offset)
+        .take(render.visible_column_count)
+    {
         if x >= render.area.x + render.area.width {
             break;
         }
@@ -1556,6 +1564,20 @@ columns:
         );
 
         assert_eq!(buffer_text(&buffer).lines().nth(3), Some("alpha…"));
+    }
+
+    #[test]
+    fn rendering_does_not_show_partial_extra_columns_outside_viewport() {
+        let mut view =
+            TableView::classify(rows(&[&["A", "B"], &["aaa", "bbb"]]), Viewport::new(10, 2));
+        view.set_all_column_widths(3);
+        let area = Rect::new(0, 0, 6, 5);
+        let mut buffer = Buffer::empty(area);
+
+        render_table_with_theme(&mut view, area, &mut buffer, &default_theme(), Some("bbb"));
+
+        assert_eq!(buffer_text(&buffer).lines().nth(3), Some("aaa   "));
+        assert_eq!(buffer[(5, 3)].symbol(), " ");
     }
 
     #[test]

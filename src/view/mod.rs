@@ -483,6 +483,9 @@ impl TableView {
         let Some(query) = CaseInsensitiveQuery::new(query) else {
             return false;
         };
+        if query.matches(raw) {
+            return true;
+        }
         let rendered = self.render_source_cell(source_column, Some(raw));
         self.search_matches_cell(raw, &rendered, Some(&query))
     }
