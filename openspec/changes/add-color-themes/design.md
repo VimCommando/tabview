@@ -85,7 +85,7 @@ Fallback should be deterministic:
 - `hex32` on truecolor terminals uses `Color::Rgb`.
 - `hex32` on 256-color terminals maps to the nearest xterm-256 color.
 - `hex32` or `ansi256` on 16-color terminals maps to the nearest configured 16-color fallback.
-- 16-color values use the base palette from `/Users/reno/.alacritty.toml`; in truecolor and 256-color modes they resolve through those RGB values, while explicit `ansi16` mode emits ANSI colors for the terminal palette.
+- 16-color values use tabview's built-in cmdzro base palette; in truecolor and 256-color modes they resolve through those RGB values, while explicit `ansi16` mode emits ANSI colors for the terminal palette.
 
 Alternative considered: store only Ratatui `Color` immediately. Rejected because doing so loses the original mode, alpha, and alias information needed for validation messages and terminal fallback.
 

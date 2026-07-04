@@ -65,7 +65,7 @@ The system SHALL support 16-color names, 256-color palette indexes, and 32-bit h
 
 #### Scenario: Sixteen-color name
 - **WHEN** a theme color is `green`, `bright-white`, or another supported 16-color name
-- **THEN** the system maps it to the corresponding `/Users/reno/.alacritty.toml` base-16 color in truecolor/256-color modes, or emits the ANSI color in `ansi16` mode
+- **THEN** the system maps it to the corresponding built-in cmdzro base-16 color in truecolor/256-color modes, or emits the ANSI color in `ansi16` mode
 
 #### Scenario: Two hundred fifty six color index
 - **WHEN** a theme color is `palette(124)` or an equivalent 256-color integer notation

@@ -1,5 +1,7 @@
 use std::ops::Range;
 
+use regex::{Regex, RegexBuilder};
+
 use crate::view::Position;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -8,19 +10,22 @@ pub enum SearchDirection {
     Reverse,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct CaseInsensitiveQuery<'a> {
     raw: &'a str,
-    folded: Option<String>,
+    matcher: Regex,
 }
 
 impl<'a> CaseInsensitiveQuery<'a> {
     pub(crate) fn new(raw: &'a str) -> Option<Self> {
-        let needs_folded = !raw.is_ascii() || raw.bytes().any(|byte| byte.is_ascii_uppercase());
-        (!raw.is_empty()).then(|| Self {
-            raw,
-            folded: needs_folded.then(|| raw.to_lowercase()),
-        })
+        if raw.is_empty() {
+            return None;
+        }
+        RegexBuilder::new(&regex::escape(raw))
+            .case_insensitive(true)
+            .build()
+            .ok()
+            .map(|matcher| Self { raw, matcher })
     }
 
     pub(crate) fn matches(&self, value: &str) -> bool {
@@ -35,17 +40,9 @@ impl<'a> CaseInsensitiveQuery<'a> {
                 .position(|window| window.eq_ignore_ascii_case(self.raw.as_bytes()))
                 .map(|start| start..start + self.raw.len());
         }
-        let query = self.folded.as_deref().unwrap_or(self.raw);
-        let mut boundaries = value.char_indices().map(|(idx, _)| idx).collect::<Vec<_>>();
-        boundaries.push(value.len());
-        for (start_idx, start) in boundaries.iter().copied().enumerate() {
-            for end in boundaries.iter().copied().skip(start_idx + 1) {
-                if value[start..end].to_lowercase() == query {
-                    return Some(start..end);
-                }
-            }
-        }
-        None
+        self.matcher
+            .find(value)
+            .map(|matched| matched.start()..matched.end())
     }
 
     pub(crate) fn find_iter<'b>(&'b self, value: &'b str) -> MatchRanges<'a, 'b> {
@@ -92,6 +89,12 @@ mod query_tests {
             query.find_iter("banana").collect::<Vec<_>>(),
             vec![1..2, 3..4, 5..6]
         );
+    }
+
+    #[test]
+    fn query_finds_unicode_case_insensitive_ranges() {
+        let query = CaseInsensitiveQuery::new("CAFÉ").expect("query");
+        assert_eq!(query.find("xx café yy"), Some(3..8));
     }
 }
 

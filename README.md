@@ -188,9 +188,9 @@ styles:
       modifiers: [underline]
 ```
 
-Named 16-color values use the built-in base palette from
-`/Users/reno/.alacritty.toml`; in truecolor mode they resolve to those RGB
-values, while `mode: ansi16` emits ANSI colors for the terminal palette.
+Named 16-color values use tabview's built-in cmdzro base palette; in truecolor
+mode they resolve to those RGB values, while `mode: ansi16` emits ANSI colors
+for the terminal palette.
 
 See `sample/config/themes/cmdzro.yml` for a complete theme file. The
 theme schema is shipped at `schemas/theme.schema.json`.
