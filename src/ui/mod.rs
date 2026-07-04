@@ -125,9 +125,9 @@ pub fn render_table_with_theme(
         .row
         .saturating_add(viewport.height)
         .min(view.row_count());
-    let mut cell_styles = Vec::new();
-    let mut preserve_selected_fg = Vec::new();
-    let mut search_matches = Vec::new();
+    let mut cell_styles = Vec::with_capacity(viewport.width);
+    let mut preserve_selected_fg = Vec::with_capacity(viewport.width);
+    let mut search_matches = Vec::with_capacity(viewport.width);
     for idx in viewport.origin.row..row_end {
         if row_y >= area.y + area.height {
             break;
