@@ -520,6 +520,16 @@ impl TableView {
                 search_match: false,
             };
         };
+        self.source_cell_style_context(row, source_column, rendered, query)
+    }
+
+    pub(crate) fn source_cell_style_context(
+        &self,
+        row: usize,
+        source_column: usize,
+        rendered: &str,
+        query: Option<&CaseInsensitiveQuery<'_>>,
+    ) -> VisibleCellStyleContext<'_> {
         let Some(source_row) = self.source_row_for_visible_row(row) else {
             return VisibleCellStyleContext {
                 conditional_color: None,
@@ -604,6 +614,13 @@ impl TableView {
         let Some(source_column) = self.source_column_for_visible(visible_column) else {
             return "table.cell";
         };
+        self.default_cell_style_token_for_source_column(source_column)
+    }
+
+    pub(crate) fn default_cell_style_token_for_source_column(
+        &self,
+        source_column: usize,
+    ) -> &'static str {
         match self
             .column_display
             .get(source_column)
@@ -1699,6 +1716,10 @@ impl TableView {
 
     fn visible_source_columns(&self) -> Vec<usize> {
         self.visible_source_columns_iter().collect()
+    }
+
+    pub(crate) fn visible_source_columns_vec(&self) -> Vec<usize> {
+        self.visible_source_columns()
     }
 
     fn visible_source_columns_iter(&self) -> impl Iterator<Item = usize> + '_ {

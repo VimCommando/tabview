@@ -1,5 +1,7 @@
 pub mod terminal;
 
+use std::sync::OnceLock;
+
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 use ratatui::style::Style;
@@ -25,8 +27,9 @@ pub enum Popup {
 }
 
 pub fn render_table(view: &mut TableView, area: Rect, buffer: &mut Buffer) {
-    let theme = default_theme();
-    render_table_with_theme(view, area, buffer, &theme, None);
+    static DEFAULT_THEME: OnceLock<ResolvedTheme> = OnceLock::new();
+    let theme = DEFAULT_THEME.get_or_init(default_theme);
+    render_table_with_theme(view, area, buffer, theme, None);
 }
 
 pub fn render_table_with_theme(
@@ -66,6 +69,7 @@ pub fn render_table_with_theme(
 
     let mut row_y = area.y + 2;
     let widths = view.effective_column_widths_cached();
+    let source_columns = view.visible_source_columns_vec();
     let alignments = column_alignments(view);
     let left_alignments = vec![Alignment::Left; widths.len()];
 
@@ -117,10 +121,14 @@ pub fn render_table_with_theme(
             .skip(viewport.origin.column)
             .take(viewport.width)
         {
-            let context = view.visible_cell_style_context(idx, column, cell, search_query.as_ref());
+            let Some(source_column) = source_columns.get(column).copied() else {
+                continue;
+            };
+            let context =
+                view.source_cell_style_context(idx, source_column, cell, search_query.as_ref());
             let should_preserve_fg = context.conditional_color.is_some() || context.search_match;
             let mut style = theme.style_or(
-                view.default_cell_style_token_for_visible_column(column),
+                view.default_cell_style_token_for_source_column(source_column),
                 "table.cell",
             );
             if let Some(color_ref) = context.conditional_color {
