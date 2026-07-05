@@ -4,6 +4,11 @@ use std::path::{Path, PathBuf};
 
 use regex::Regex;
 use serde::Deserialize;
+use yaml_serde::{Mapping, Value};
+
+use crate::theme::{
+    ConditionalColorRule, ConditionalValue, GradientStop, IdentifierColors, MatchEntry, RangeEntry,
+};
 
 pub const MAX_SORT_KEYS: usize = 3;
 const VIEW_DIR: &str = "tabview/views";
@@ -84,6 +89,7 @@ pub struct ColumnView {
     pub width: Option<ColumnWidth>,
     pub align: Option<ColumnAlign>,
     pub visible: Option<bool>,
+    pub colors: Vec<ConditionalColorRule>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -202,7 +208,7 @@ pub enum SavedViewParseError {
     Yaml(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSavedView {
     name: String,
@@ -216,7 +222,7 @@ struct RawSavedView {
     filters: Vec<RawSavedFilter>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawColumnView {
     #[serde(rename = "type")]
@@ -226,16 +232,50 @@ struct RawColumnView {
     width: Option<RawColumnWidth>,
     align: Option<String>,
     visible: Option<bool>,
+    #[serde(default)]
+    colors: Vec<RawColorRule>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(untagged)]
 enum RawColumnWidth {
     Fixed(u16),
     Mode(String),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawColorRule {
+    gradient: Option<RawGradientRule>,
+    #[serde(rename = "match")]
+    match_rule: Option<Mapping>,
+    range: Option<Mapping>,
+    identifiers: Option<RawIdentifiersRule>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawIdentifiersRule {
+    colors: Option<RawIdentifierColors>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(untagged)]
+enum RawIdentifierColors {
+    Mode(String),
+    Colors(Vec<String>),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawGradientRule {
+    mode: String,
+    stops: Option<Mapping>,
+    colors: Option<Vec<String>>,
+    steps: Option<usize>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSortKey {
     column: String,
@@ -243,7 +283,7 @@ struct RawSortKey {
     kind: String,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawSavedFilter {
     column: String,
@@ -791,6 +831,14 @@ fn validate_column(
             "number formats are ignored for non-number column types",
         ));
     }
+    let colors = raw
+        .colors
+        .into_iter()
+        .enumerate()
+        .filter_map(|(idx, rule)| {
+            validate_color_rule(rule, &field(&format!("colors.{idx}")), warnings)
+        })
+        .collect();
 
     Some((
         key,
@@ -801,8 +849,339 @@ fn validate_column(
             width,
             align,
             visible: raw.visible,
+            colors,
         },
     ))
+}
+
+fn validate_color_rule(
+    raw: RawColorRule,
+    field: &str,
+    warnings: &mut Vec<SavedViewWarning>,
+) -> Option<ConditionalColorRule> {
+    let count = usize::from(raw.gradient.is_some())
+        + usize::from(raw.match_rule.is_some())
+        + usize::from(raw.range.is_some())
+        + usize::from(raw.identifiers.is_some());
+    if count != 1 {
+        warnings.push(warning(
+            field,
+            "color rule must define exactly one of gradient, match, range, or identifiers",
+        ));
+        return None;
+    }
+    if let Some(rule) = raw.match_rule {
+        return validate_match_rule(rule, &format!("{field}.match"), warnings);
+    }
+    if let Some(rule) = raw.range {
+        return validate_range_rule(rule, &format!("{field}.range"), warnings);
+    }
+    if let Some(rule) = raw.identifiers {
+        return validate_identifier_rule(rule, &format!("{field}.identifiers"), warnings);
+    }
+    validate_gradient_rule(raw.gradient.expect("count checked"), field, warnings)
+}
+
+fn validate_match_rule(
+    raw: Mapping,
+    field: &str,
+    warnings: &mut Vec<SavedViewWarning>,
+) -> Option<ConditionalColorRule> {
+    if raw.is_empty() {
+        warnings.push(warning(
+            field,
+            "match requires at least one value/color entry",
+        ));
+        return None;
+    }
+    let mut entries = Vec::new();
+    for (idx, (key, color_value)) in raw.into_iter().enumerate() {
+        let Some(match_value) = match_value_from_yaml_key(key, &format!("{field}.{idx}"), warnings)
+        else {
+            continue;
+        };
+        let Some(color) = yaml_string_value(color_value) else {
+            warnings.push(warning(
+                format!("{field}.{idx}"),
+                "match color must be a string",
+            ));
+            continue;
+        };
+        if color.trim().is_empty() {
+            warnings.push(warning(format!("{field}.{idx}"), "color is required"));
+            continue;
+        }
+        entries.push(MatchEntry {
+            value: match_value,
+            color,
+        });
+    }
+    if entries.is_empty() {
+        warnings.push(warning(field, "match has no valid value/color entries"));
+        return None;
+    }
+    Some(ConditionalColorRule::Match { entries })
+}
+
+fn validate_range_rule(
+    raw: Mapping,
+    field: &str,
+    warnings: &mut Vec<SavedViewWarning>,
+) -> Option<ConditionalColorRule> {
+    if raw.is_empty() {
+        warnings.push(warning(
+            field,
+            "range requires at least one comparison/color entry",
+        ));
+        return None;
+    }
+    let mut entries = Vec::new();
+    for (idx, (key, color_value)) in raw.into_iter().enumerate() {
+        let Some(expression) = yaml_string_value(key) else {
+            warnings.push(warning(
+                format!("{field}.{idx}"),
+                "range comparison must be a string",
+            ));
+            continue;
+        };
+        let Some(color) = yaml_string_value(color_value) else {
+            warnings.push(warning(
+                format!("{field}.{idx}"),
+                "range color must be a string",
+            ));
+            continue;
+        };
+        if color.trim().is_empty() {
+            warnings.push(warning(format!("{field}.{idx}"), "color is required"));
+            continue;
+        }
+        let Some(entry) =
+            range_entry_from_expression(&expression, color, &format!("{field}.{idx}"), warnings)
+        else {
+            continue;
+        };
+        entries.push(entry);
+    }
+    if entries.is_empty() {
+        warnings.push(warning(
+            field,
+            "range has no valid comparison/color entries",
+        ));
+        return None;
+    }
+    Some(ConditionalColorRule::Range { entries })
+}
+
+fn range_entry_from_expression(
+    expression: &str,
+    color: String,
+    field: &str,
+    warnings: &mut Vec<SavedViewWarning>,
+) -> Option<RangeEntry> {
+    let mut entry = RangeEntry {
+        lt: None,
+        lte: None,
+        gt: None,
+        gte: None,
+        color,
+    };
+    let mut comparisons = 0;
+    for token in expression.split_whitespace() {
+        comparisons += 1;
+        let Some((operator, value)) = parse_range_comparison(token) else {
+            warnings.push(warning(
+                field,
+                "range comparison must look like <10, <=10, >90, >=90, or >=50 <75",
+            ));
+            return None;
+        };
+        let target = match operator {
+            "<" => &mut entry.lt,
+            "<=" => &mut entry.lte,
+            ">" => &mut entry.gt,
+            ">=" => &mut entry.gte,
+            _ => unreachable!("operator checked"),
+        };
+        if target.is_some() {
+            warnings.push(warning(field, "range comparison has a duplicate bound"));
+            return None;
+        }
+        *target = Some(value);
+    }
+    if comparisons == 0 {
+        warnings.push(warning(field, "range comparison is required"));
+        return None;
+    }
+    Some(entry)
+}
+
+fn parse_range_comparison(token: &str) -> Option<(&'static str, f64)> {
+    let token = token.trim();
+    let (operator, value) = token
+        .strip_prefix("<=")
+        .map(|value| ("<=", value))
+        .or_else(|| token.strip_prefix(">=").map(|value| (">=", value)))
+        .or_else(|| token.strip_prefix('<').map(|value| ("<", value)))
+        .or_else(|| token.strip_prefix('>').map(|value| (">", value)))?;
+    if value.trim() != value || value.is_empty() {
+        return None;
+    }
+    let value = value.parse::<f64>().ok()?;
+    value.is_finite().then_some((operator, value))
+}
+
+fn match_value_from_yaml_key(
+    key: Value,
+    field: &str,
+    warnings: &mut Vec<SavedViewWarning>,
+) -> Option<ConditionalValue> {
+    match key {
+        Value::Bool(value) => Some(ConditionalValue::Bool(value)),
+        Value::Number(value) => {
+            let value = value.as_f64()?;
+            if !value.is_finite() {
+                warnings.push(warning(field, "number must be finite"));
+                return None;
+            }
+            Some(ConditionalValue::Number(value))
+        }
+        Value::String(value) => {
+            if value.is_empty() {
+                warnings.push(warning(field, "match string value must not be empty"));
+                return None;
+            }
+            Some(ConditionalValue::String(value))
+        }
+        _ => {
+            warnings.push(warning(
+                field,
+                "match value must be a string, number, or boolean",
+            ));
+            None
+        }
+    }
+}
+
+fn yaml_string_value(value: Value) -> Option<String> {
+    match value {
+        Value::String(value) => Some(value),
+        _ => None,
+    }
+}
+
+fn validate_identifier_rule(
+    raw: RawIdentifiersRule,
+    field: &str,
+    warnings: &mut Vec<SavedViewWarning>,
+) -> Option<ConditionalColorRule> {
+    let colors = match raw.colors {
+        None => IdentifierColors::Auto,
+        Some(RawIdentifierColors::Mode(mode)) if mode == "auto" => IdentifierColors::Auto,
+        Some(RawIdentifierColors::Mode(mode)) => {
+            warnings.push(warning(
+                format!("{field}.colors"),
+                format!("unknown identifiers colors mode '{mode}'"),
+            ));
+            return None;
+        }
+        Some(RawIdentifierColors::Colors(colors)) => {
+            if colors.is_empty() || colors.iter().any(|color| color.trim().is_empty()) {
+                warnings.push(warning(
+                    format!("{field}.colors"),
+                    "identifiers colors requires at least one color",
+                ));
+                return None;
+            }
+            IdentifierColors::Colors(colors)
+        }
+    };
+    Some(ConditionalColorRule::Identifiers { colors })
+}
+
+fn validate_gradient_rule(
+    raw: RawGradientRule,
+    field: &str,
+    warnings: &mut Vec<SavedViewWarning>,
+) -> Option<ConditionalColorRule> {
+    match raw.mode.as_str() {
+        "fixed" => {
+            let mut stops = validate_gradient_stops(
+                raw.stops.unwrap_or_default(),
+                &format!("{field}.gradient.stops"),
+                warnings,
+            );
+            if stops.len() < 2 {
+                warnings.push(warning(
+                    format!("{field}.gradient.stops"),
+                    "fixed gradient requires at least two stops",
+                ));
+                return None;
+            }
+            stops.sort_by(|left, right| left.value.total_cmp(&right.value));
+            Some(ConditionalColorRule::FixedGradient { stops })
+        }
+        "auto" => {
+            let colors = raw.colors.unwrap_or_default();
+            if colors.len() < 2 || colors.iter().any(|color| color.trim().is_empty()) {
+                warnings.push(warning(
+                    format!("{field}.gradient.colors"),
+                    "auto gradient requires at least two colors",
+                ));
+                return None;
+            }
+            Some(ConditionalColorRule::AutoGradient {
+                colors,
+                steps: raw.steps.unwrap_or(8).max(1),
+            })
+        }
+        other => {
+            warnings.push(warning(
+                format!("{field}.gradient.mode"),
+                format!("unknown gradient mode '{other}'"),
+            ));
+            None
+        }
+    }
+}
+
+fn validate_gradient_stops(
+    raw: Mapping,
+    field: &str,
+    warnings: &mut Vec<SavedViewWarning>,
+) -> Vec<GradientStop> {
+    raw.into_iter()
+        .enumerate()
+        .filter_map(|(idx, (key, color_value))| {
+            let Some(value) = gradient_stop_value_from_yaml_key(key) else {
+                warnings.push(warning(
+                    format!("{field}.{idx}"),
+                    "fixed gradient stop value must be a finite number",
+                ));
+                return None;
+            };
+            let Some(color) = yaml_string_value(color_value) else {
+                warnings.push(warning(
+                    format!("{field}.{idx}"),
+                    "fixed gradient stop color must be a string",
+                ));
+                return None;
+            };
+            if color.trim().is_empty() {
+                warnings.push(warning(format!("{field}.{idx}"), "color is required"));
+                return None;
+            }
+            Some(GradientStop { value, color })
+        })
+        .collect()
+}
+
+fn gradient_stop_value_from_yaml_key(key: Value) -> Option<f64> {
+    let value = match key {
+        Value::Number(value) => value.as_f64()?,
+        Value::String(value) => value.parse::<f64>().ok()?,
+        _ => return None,
+    };
+    value.is_finite().then_some(value)
 }
 
 fn validate_sort(raw: RawSortKey, warnings: &mut Vec<SavedViewWarning>) -> Option<SortKey> {
@@ -1281,5 +1660,138 @@ columns:
             .warnings
             .iter()
             .any(|warning| warning.field == "columns.missing"));
+    }
+
+    #[test]
+    fn parses_conditional_color_rules_and_warns_for_invalid_rules() {
+        let parsed = parse_saved_view_yaml(
+            r##"
+name: colors
+filenames: [data.csv]
+columns:
+  health:
+    colors:
+      - match:
+          true: green
+          false: muted
+          "": red
+      - range:
+          "<10": red
+          ">=90": red
+          ">=50 <75": yellow
+      - gradient:
+          mode: fixed
+          stops:
+            10: green
+            "90": yellow
+      - gradient:
+          mode: auto
+          steps: 5
+          colors: [green, yellow, red]
+      - identifiers:
+          colors: auto
+      - identifiers:
+          colors: [green, "#ff00ffff"]
+      - range:
+          nope: red
+"##,
+        )
+        .expect("parse");
+
+        let colors = &parsed.view.columns.get("health").expect("health").colors;
+        assert_eq!(colors.len(), 6);
+        assert_eq!(
+            colors[0],
+            ConditionalColorRule::Match {
+                entries: vec![
+                    MatchEntry {
+                        value: ConditionalValue::Bool(true),
+                        color: "green".to_owned(),
+                    },
+                    MatchEntry {
+                        value: ConditionalValue::Bool(false),
+                        color: "muted".to_owned(),
+                    },
+                ]
+            }
+        );
+        assert_eq!(
+            colors[1],
+            ConditionalColorRule::Range {
+                entries: vec![
+                    RangeEntry {
+                        lt: Some(10.0),
+                        lte: None,
+                        gt: None,
+                        gte: None,
+                        color: "red".to_owned(),
+                    },
+                    RangeEntry {
+                        lt: None,
+                        lte: None,
+                        gt: None,
+                        gte: Some(90.0),
+                        color: "red".to_owned(),
+                    },
+                    RangeEntry {
+                        lt: Some(75.0),
+                        lte: None,
+                        gt: None,
+                        gte: Some(50.0),
+                        color: "yellow".to_owned(),
+                    },
+                ]
+            }
+        );
+        assert_eq!(
+            colors[2],
+            ConditionalColorRule::FixedGradient {
+                stops: vec![
+                    GradientStop {
+                        value: 10.0,
+                        color: "green".to_owned(),
+                    },
+                    GradientStop {
+                        value: 90.0,
+                        color: "yellow".to_owned(),
+                    },
+                ]
+            }
+        );
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|warning| warning.field.contains("colors.0.match")));
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|warning| warning.field.contains("colors.6.range")));
+        assert_eq!(
+            colors[5],
+            ConditionalColorRule::Identifiers {
+                colors: IdentifierColors::Colors(vec!["green".to_owned(), "#ff00ffff".to_owned()])
+            }
+        );
+    }
+
+    #[test]
+    fn sample_conditional_colors_fixture_parses() {
+        let parsed = parse_saved_view_yaml(include_str!(
+            "../../sample/config/views/conditional-colors.yml"
+        ))
+        .expect("sample saved view");
+
+        assert_eq!(parsed.view.name, "conditional-colors");
+        assert!(parsed.warnings.is_empty());
+        assert_eq!(
+            parsed
+                .view
+                .columns
+                .get("used_percent")
+                .expect("used_percent")
+                .colors
+                .len(),
+            2
+        );
     }
 }

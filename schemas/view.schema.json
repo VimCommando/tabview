@@ -84,6 +84,12 @@
         "visible": {
           "type": "boolean",
           "default": true
+        },
+        "colors": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/colorRule"
+          }
         }
       },
       "allOf": [
@@ -101,6 +107,150 @@
           }
         }
       ]
+    },
+    "colorRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "gradient": {
+          "$ref": "#/$defs/gradientColorRule"
+        },
+        "match": {
+          "$ref": "#/$defs/matchColorRule"
+        },
+        "range": {
+          "$ref": "#/$defs/rangeColorRule"
+        },
+        "identifiers": {
+          "$ref": "#/$defs/identifiersColorRule"
+        }
+      },
+      "oneOf": [
+        {
+          "required": ["gradient"]
+        },
+        {
+          "required": ["match"]
+        },
+        {
+          "required": ["range"]
+        },
+        {
+          "required": ["identifiers"]
+        }
+      ]
+    },
+    "colorValue": {
+      "type": "string",
+      "minLength": 1,
+      "description": "A theme palette alias, 16-color name, palette(N) 256-color value, integer 256-color value, or #RRGGBB/#RRGGBBAA hex color."
+    },
+    "gradientColorRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["mode"],
+      "properties": {
+        "mode": {
+          "type": "string",
+          "enum": ["auto", "fixed"]
+        },
+        "steps": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 8
+        },
+        "colors": {
+          "type": "array",
+          "minItems": 2,
+          "items": {
+            "$ref": "#/$defs/colorValue"
+          }
+        },
+        "stops": {
+          "type": "object",
+          "minProperties": 2,
+          "propertyNames": {
+            "pattern": "^-?(?:[0-9]+(?:\\.[0-9]+)?|\\.[0-9]+)$"
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/colorValue"
+          },
+          "description": "Map of inclusive numeric stop values to colors, for example 0: green, 100: yellow, 500: red."
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "auto"
+              }
+            },
+            "required": ["mode"]
+          },
+          "then": {
+            "required": ["colors"]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "fixed"
+              }
+            },
+            "required": ["mode"]
+          },
+          "then": {
+            "required": ["stops"]
+          }
+        }
+      ]
+    },
+    "matchColorRule": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/colorValue"
+      },
+      "description": "Map of exact discrete values to colors, for example true: green, 0: yellow, or p: darkgreen."
+    },
+    "rangeColorRule": {
+      "type": "object",
+      "minProperties": 1,
+      "propertyNames": {
+        "minLength": 1
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/colorValue"
+      },
+      "description": "Map of numeric comparison expressions to colors, for example \"<10\": red, \">=90\": red, or \">=50 <75\": yellow."
+    },
+    "identifiersColorRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "colors": {
+          "oneOf": [
+            {
+              "type": "string",
+              "const": "auto"
+            },
+            {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/colorValue"
+              }
+            }
+          ],
+          "default": "auto"
+        }
+      },
+      "description": "String-mode coloring that assigns each unique rendered column value to generated colors from theme-level or view-level color families."
     },
     "columnType": {
       "type": "string",

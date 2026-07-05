@@ -1,0 +1,102 @@
+name: cmdzro
+mode: hex32
+
+palette:
+  text: "#AFAFAFFF"
+  muted: palette(242)
+  dim: palette(240)
+  bg: black
+  ui_blue: palette(19)
+  blue: blue
+  dark_blue: palette(19)
+  gray: gray
+  green: dark-green
+  cyan: cyan
+  dark_cyan: dark-cyan
+  magenta: magenta
+  yellow: yellow
+  red: dark-red
+  white: bright-white
+  hex_teal: "#25A39AFF"
+
+identifiers:
+  colors: [green, magenta, cyan, white]
+
+styles:
+  table:
+    location:
+      fg: gray
+      bg: bg
+    current_cell:
+      fg: cyan
+      bg: dark_blue
+    divider:
+      fg: gray
+    header:
+      fg: dark_cyan
+      modifiers: [bold]
+    header_selected:
+      fg: cyan
+      modifiers: [bold]
+    header_glyph:
+      fg: muted
+    cell:
+      fg: text
+    selected:
+      fg: text
+      bg: dark_blue
+    hidden_marker:
+      fg: muted
+
+  popup:
+    background:
+      fg: text
+      bg: dark_blue
+    border:
+      fg: cyan
+      bg: dark_blue
+    title:
+      fg: gray
+      bg: dark_blue
+      modifiers: [bold]
+    body:
+      fg: text
+      bg: dark_blue
+    disabled:
+      fg: dim
+      bg: dark_blue
+    section_title:
+      fg: gray
+      bg: dark_blue
+      modifiers: [bold]
+    active:
+      fg: gray
+      bg: dark_blue
+      modifiers: [bold]
+    action:
+      fg: cyan
+      bg: dark_blue
+      modifiers: [bold]
+    option_selected:
+      fg: cyan
+      bg: dark_blue
+      modifiers: [bold]
+
+  search:
+    highlight:
+      fg: yellow
+      modifiers: [underline]
+
+  message:
+    footer:
+      fg: yellow
+      bg: ui_blue
+    info:
+      fg: yellow
+      bg: ui_blue
+    warning:
+      fg: yellow
+      bg: ui_blue
+    error:
+      fg: white
+      bg: red

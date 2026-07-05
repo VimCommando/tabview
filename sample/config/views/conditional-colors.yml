@@ -1,0 +1,36 @@
+name: conditional-colors
+filenames:
+  - data.csv
+columns:
+  active:
+    type: boolean
+    colors:
+      - match:
+          true: green
+          false: muted
+  used_percent:
+    type: number
+    colors:
+      - range:
+          "<10": red
+          ">=90": red
+      - gradient:
+          mode: auto
+          steps: 8
+          colors:
+            - green
+            - yellow
+  latency_ms:
+    type: number
+    colors:
+      - gradient:
+          mode: fixed
+          stops:
+            0: green
+            100: yellow
+            500: red
+  ip_address:
+    type: ip
+    colors:
+      - identifiers:
+          colors: auto

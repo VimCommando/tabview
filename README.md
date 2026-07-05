@@ -35,7 +35,7 @@ contents of that cell are shown next to it.
 - Persistent header row toggling.
 - Lexical, natural, and numeric sorting by the current column.
 - Dynamic column width and gap adjustment.
-- Full-text incremental search with `n` and `p` result navigation.
+- Full-text incremental search with `n` and `N` result navigation.
 - Current-column filter-in and filter-out with text, regex, and numeric modes.
 - Full-cell popup with `Enter`.
 - Optional clipboard support for yanking the current cell.
@@ -47,7 +47,8 @@ contents of that cell are shown next to it.
 
 - Rust toolchain for installation with Cargo.
 - Optional clipboard support can be enabled with the `clipboard` Cargo feature.
-- Optional saved views can be enabled with the `saved-views` Cargo feature.
+- Saved views are enabled by default. Build with `--no-default-features` to omit
+  saved view support.
 
 ## Installation
 
@@ -67,12 +68,6 @@ Build with clipboard support:
 
 ```sh
 cargo install tabview --features clipboard
-```
-
-Build with saved view support:
-
-```sh
-cargo install tabview --features saved-views
 ```
 
 ## Usage
@@ -108,9 +103,116 @@ silent
 The Rust rewrite supports the `tabview` CLI only. The former Python import API
 (`import tabview` and `tabview.view(...)`) is not part of the supported surface.
 
+## Color Themes
+
+Tabview loads theme settings from `$XDG_CONFIG_HOME/tabview/config.yml`, or
+`~/.config/tabview/config.yml` when `XDG_CONFIG_HOME` is unset:
+
+```yaml
+theme: cmdzro
+```
+
+Theme files live in `tabview/themes/*.yml` or `tabview/themes/*.yaml` under the
+same config directory. If both `name.yml` and `name.yaml` exist, `.yml` wins.
+If no theme is configured, tabview uses the built-in `cmdzro` theme based on
+`~/.config/nvim/colors/cmdzro.vim`: neutral gray text, blue reserved for UI
+surfaces, yellow reserved for search and UI emphasis, and red reserved for
+errors or unhealthy states.
+
+Theme colors accept 16-color names, 256-color palette values, and 32-bit hex:
+
+```yaml
+name: ops-dark
+mode: auto # auto, ansi16, ansi256, hex32, or truecolor
+
+palette:
+  text: "#AFAFAFFF"
+  gray: gray
+  muted: palette(240)
+  ui_blue: palette(19)
+  blue: blue
+  dark_blue: palette(19)
+  cyan: cyan
+  dark_cyan: dark-cyan
+  green: dark-green
+  magenta: magenta
+  yellow: yellow
+  error: dark-red
+  teal: "#25A39AFF"
+
+identifiers:
+  colors: [bright-green, magenta, cyan, white]
+
+styles:
+  table:
+    location:
+      fg: gray
+      bg: black
+    current_cell:
+      fg: cyan
+      bg: dark_blue
+    divider:
+      fg: gray
+    header:
+      fg: dark_cyan
+      modifiers: [bold]
+    header_selected:
+      fg: cyan
+      modifiers: [bold]
+    header_glyph:
+      fg: muted
+    cell:
+      fg: text
+    selected:
+      fg: text
+      bg: dark_blue
+    hidden_marker:
+      fg: muted
+  popup:
+    background:
+      fg: text
+      bg: dark_blue
+    border:
+      fg: cyan
+      bg: dark_blue
+    title:
+      fg: gray
+      bg: dark_blue
+    body:
+      fg: text
+      bg: dark_blue
+    disabled:
+      fg: muted
+      bg: dark_blue
+    active:
+      fg: gray
+      bg: dark_blue
+    action:
+      fg: cyan
+      bg: dark_blue
+    option_selected:
+      fg: cyan
+      bg: dark_blue
+  search:
+    highlight:
+      fg: yellow
+      modifiers: [underline]
+  message:
+    footer:
+      fg: yellow
+      bg: ui_blue
+```
+
+Named 16-color values use tabview's built-in cmdzro base palette; in truecolor
+mode they resolve to those RGB values, while `mode: ansi16` emits ANSI colors
+for the terminal palette.
+
+See `sample/config/themes/cmdzro.yml` for a complete theme file. The
+theme schema is shipped at `schemas/theme.schema.json`.
+
 ## Saved Views
 
-When built with `--features saved-views`, tabview loads user-defined YAML views
+By default, tabview loads user-defined YAML views
 from `$XDG_CONFIG_HOME/tabview/views`, or `~/.config/tabview/views` when
 `XDG_CONFIG_HOME` is unset. This POSIX-style path is used on every platform,
 including macOS. Files ending in `.yml` and `.yaml` are accepted. If both
@@ -162,6 +264,64 @@ Headers are prefixed first with sort state, then filter state: `▲` for
 ascending sort, `▼` for descending sort, `+` for filter-in, `-` for filter-out,
 and `±` for multiple filters. Truncation applies after those prefix markers.
 
+Columns can also define ordered conditional color rules. The first matching
+rule wins, and colors affect only cell styling; raw values, formatted values,
+sorting, filtering, search, copy, and popups are unchanged.
+
+```yaml
+columns:
+  active:
+    type: boolean
+    colors:
+      - match:
+          true: green
+          false: muted
+  prirep:
+    type: string
+    colors:
+      - match:
+          p: darkgreen
+          r: blue
+  used_percent:
+    type: number
+    colors:
+      - range:
+          "<10": red
+          ">=90": red
+      - gradient:
+          mode: auto
+          steps: 8
+          colors: [green, yellow]
+  latency_ms:
+    type: number
+    colors:
+      - gradient:
+          mode: fixed
+          stops:
+            0: green
+            100: yellow
+            500: red
+  ip_address:
+    type: ip
+    colors:
+      - identifiers:
+          colors: auto
+  host:
+    type: string
+    colors:
+      - identifiers:
+          colors: [cyan, "palette(198)", "#25A39AFF"]
+```
+
+The `identifiers` rule is for string-like discrete values. It assigns each
+unique rendered value in the column, such as an IP address or host name, to a
+stable generated color. `colors: auto` uses the active theme's
+`[identifiers].colors` families; a view can override those families with a
+color array. Each family generates 16 dark-to-light shades, and identifiers
+cycle across families before advancing shades. The darkest generated shade is
+kept at the ANSI dark/dim foreground equivalent for that family rather than
+near-black.
+
 Press `v` to inspect the current generated YAML. Press `s` to save it to the
 loaded view file, or to a placeholder file named from the current input with
 only the last extension replaced by `.yml`. Existing files ask for `y`/`n`
@@ -199,7 +359,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 | `i` | Edit the current column view configuration, sort state, and filter action. |
 | `f`, `F` | Filter in or filter out rows by the current column. `Tab` cycles text, regex, and numeric modes; submitting an empty condition clears filters for the current column. |
 | `n` | Go to the next search result. |
-| `p` | Go to the previous search result. |
+| `N` | Go to the previous search result. |
 | `t` | Toggle fixed header row. |
 | `<`, `>` | Decrease or increase all column widths. |
 | `,`, `.` | Decrease or increase the current column width. |

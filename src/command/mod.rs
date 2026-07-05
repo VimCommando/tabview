@@ -156,7 +156,7 @@ pub fn lookup_char(ch: char) -> Option<Command> {
         'f' => Command::FilterIn,
         'F' => Command::FilterOut,
         'n' => Command::NextSearchResult,
-        'p' => Command::PreviousSearchResult,
+        'N' => Command::PreviousSearchResult,
         't' => Command::ToggleHeader,
         '-' => Command::GapDown,
         '+' => Command::GapUp,
@@ -316,7 +316,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             description: "Filter in/out current column",
         },
         KeyBinding {
-            keys: "n/p",
+            keys: "n/N",
             command: Command::NextSearchResult,
             description: "Next/previous search result",
         },
@@ -428,6 +428,9 @@ mod tests {
         assert_eq!(lookup_char('i'), Some(Command::ColumnInfo));
         assert_eq!(lookup_char('f'), Some(Command::FilterIn));
         assert_eq!(lookup_char('F'), Some(Command::FilterOut));
+        assert_eq!(lookup_char('n'), Some(Command::NextSearchResult));
+        assert_eq!(lookup_char('N'), Some(Command::PreviousSearchResult));
+        assert_eq!(lookup_char('p'), None);
         assert_eq!(lookup_char('#'), Some(Command::SortNumericAsc));
         assert_eq!(lookup_char('y'), Some(Command::YankCell));
         assert_eq!(lookup_char('z'), Some(Command::ToggleColumnWidthMode));
@@ -469,6 +472,7 @@ mod tests {
             .iter()
             .any(|binding| binding.command == Command::Search));
         assert!(bindings.iter().any(|binding| binding.keys == "q/Q"));
+        assert!(bindings.iter().any(|binding| binding.keys == "n/N"));
     }
 
     #[test]

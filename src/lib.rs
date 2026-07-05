@@ -5,6 +5,7 @@ pub mod ops;
 #[cfg(feature = "saved-views")]
 pub mod saved_views;
 pub mod table;
+pub mod theme;
 pub mod ui;
 pub mod view;
 
@@ -15,6 +16,7 @@ use std::path::{Path, PathBuf};
 
 pub fn run(args: cli::Args) -> anyhow::Result<()> {
     let config = cli::Config::from_args(args)?;
+    let theme_load = theme::load_active_theme(None)?;
     let source = ingest::source::InputSource::from_cli_value(&config.filename.to_string_lossy());
     let parse_options = ingest::ParseOptions {
         encoding: config.encoding.clone(),
@@ -33,6 +35,12 @@ pub fn run(args: cli::Args) -> anyhow::Result<()> {
     let saved_view_message = saved_view
         .as_ref()
         .and_then(|saved_view| saved_view.messages.first().cloned());
+    let message = saved_view_message.or_else(|| {
+        theme_load
+            .warnings
+            .first()
+            .map(|warning| format!("theme warning: {}: {}", warning.field, warning.message))
+    });
     view.goto_user_row(config.start_position.row.max(1));
     if let Some(column) = config.start_position.column {
         view.goto_user_column(column.max(1));
@@ -47,7 +55,8 @@ pub fn run(args: cli::Args) -> anyhow::Result<()> {
         column_info: None,
         search_query: String::new(),
         keys: command::KeyInterpreter::default(),
-        message: saved_view_message,
+        message,
+        theme: theme_load.theme,
         #[cfg(feature = "saved-views")]
         saved_view,
         #[cfg(feature = "saved-views")]
@@ -59,57 +68,84 @@ pub fn run(args: cli::Args) -> anyhow::Result<()> {
         terminal.terminal_mut().draw(|frame| {
             let area = frame.area();
             let table_area = table_area(area);
-            ui::render_table(&mut app.view, table_area, frame.buffer_mut());
-            ui::render_footer(app.message.as_deref(), area, frame.buffer_mut());
+            ui::render_table_with_theme(
+                &mut app.view,
+                table_area,
+                frame.buffer_mut(),
+                &app.theme,
+                Some(&app.search_query),
+            );
+            ui::render_footer_with_theme(
+                app.message.as_deref(),
+                area,
+                frame.buffer_mut(),
+                &app.theme,
+            );
             match app.popup {
-                Some(ui::Popup::Help) => ui::render_help_popup(
+                Some(ui::Popup::Help) => ui::render_help_popup_with_theme(
                     &command::default_key_bindings(),
                     help_popup_area(area),
                     frame.buffer_mut(),
+                    &app.theme,
                 ),
                 Some(ui::Popup::Cell) => {
                     if let Some(cell) = current_cell(&app.view) {
-                        ui::render_cell_popup(&cell, "Cell", popup_area(area), frame.buffer_mut());
+                        ui::render_cell_popup_with_theme(
+                            &cell,
+                            "Cell",
+                            popup_area(area),
+                            frame.buffer_mut(),
+                            &app.theme,
+                        );
                     }
                 }
                 Some(ui::Popup::Info) => {
-                    ui::render_info_popup(&app.info_text(), popup_area(area), frame.buffer_mut());
+                    ui::render_info_popup_with_theme(
+                        &app.info_text(),
+                        popup_area(area),
+                        frame.buffer_mut(),
+                        &app.theme,
+                    );
                 }
                 Some(ui::Popup::Search) => {
-                    ui::render_search_prompt(
+                    ui::render_search_prompt_with_theme(
                         &app.search_query,
                         popup_area(area),
                         frame.buffer_mut(),
+                        &app.theme,
                     );
                 }
                 Some(ui::Popup::Filter) => {
                     if let Some(prompt) = &app.filter_prompt {
-                        ui::render_filter_prompt(
+                        ui::render_filter_prompt_with_theme(
                             &FilterPromptView::from(prompt),
                             popup_area(area),
                             frame.buffer_mut(),
+                            &app.theme,
                         );
                     }
                 }
                 Some(ui::Popup::ColumnInfo) => {
                     if let Some(modal) = &app.column_info {
-                        ui::render_column_info_popup(
+                        ui::render_column_info_popup_with_theme(
                             &modal.popup(),
                             popup_area(area),
                             frame.buffer_mut(),
+                            &app.theme,
                         );
                     }
                 }
                 #[cfg(feature = "saved-views")]
                 Some(ui::Popup::SavedView) => {
                     if let Some(modal) = &app.view_modal {
-                        ui::render_saved_view_popup(
+                        ui::render_saved_view_popup_with_theme(
                             &modal.filename,
                             &modal.yaml,
                             modal.scroll,
                             modal.confirming_overwrite,
                             popup_area(area),
                             frame.buffer_mut(),
+                            &app.theme,
                         );
                     }
                 }
@@ -136,6 +172,7 @@ struct App {
     search_query: String,
     keys: command::KeyInterpreter,
     message: Option<String>,
+    theme: theme::ResolvedTheme,
     #[cfg(feature = "saved-views")]
     saved_view: Option<SavedViewRuntime>,
     #[cfg(feature = "saved-views")]
@@ -1488,6 +1525,7 @@ mod tests {
             search_query: String::new(),
             keys: command::KeyInterpreter::default(),
             message: None,
+            theme: theme::default_theme(),
             #[cfg(feature = "saved-views")]
             saved_view: None,
             #[cfg(feature = "saved-views")]
@@ -1511,6 +1549,7 @@ mod tests {
             search_query: String::new(),
             keys: command::KeyInterpreter::default(),
             message: None,
+            theme: theme::default_theme(),
             saved_view: Some(SavedViewRuntime {
                 source_path: None,
                 target_path: Some(target_path),
@@ -1652,6 +1691,7 @@ mod tests {
             search_query: String::new(),
             keys: command::KeyInterpreter::default(),
             message: None,
+            theme: theme::default_theme(),
             #[cfg(feature = "saved-views")]
             saved_view: None,
             #[cfg(feature = "saved-views")]

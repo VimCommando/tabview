@@ -1,3 +1,8 @@
+use std::ops::Range;
+use std::sync::OnceLock;
+
+use regex::{Regex, RegexBuilder};
+
 use crate::view::Position;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -6,23 +11,121 @@ pub enum SearchDirection {
     Reverse,
 }
 
+#[derive(Debug)]
+pub(crate) struct CaseInsensitiveQuery<'a> {
+    raw: &'a str,
+    matcher: OnceLock<Option<Regex>>,
+}
+
+impl<'a> CaseInsensitiveQuery<'a> {
+    pub(crate) fn new(raw: &'a str) -> Option<Self> {
+        if raw.is_empty() {
+            return None;
+        }
+        Some(Self {
+            raw,
+            matcher: OnceLock::new(),
+        })
+    }
+
+    pub(crate) fn matches(&self, value: &str) -> bool {
+        self.find(value).is_some()
+    }
+
+    pub(crate) fn find(&self, value: &str) -> Option<Range<usize>> {
+        if value.is_ascii() && self.raw.is_ascii() {
+            return value
+                .as_bytes()
+                .windows(self.raw.len())
+                .position(|window| window.eq_ignore_ascii_case(self.raw.as_bytes()))
+                .map(|start| start..start + self.raw.len());
+        }
+        self.unicode_matcher()?
+            .find(value)
+            .map(|matched| matched.start()..matched.end())
+    }
+
+    pub(crate) fn find_iter<'b>(&'b self, value: &'b str) -> MatchRanges<'a, 'b> {
+        MatchRanges {
+            query: self,
+            value,
+            offset: 0,
+        }
+    }
+
+    fn unicode_matcher(&self) -> Option<&Regex> {
+        self.matcher
+            .get_or_init(|| {
+                RegexBuilder::new(&regex::escape(self.raw))
+                    .case_insensitive(true)
+                    .build()
+                    .ok()
+            })
+            .as_ref()
+    }
+}
+
+pub(crate) struct MatchRanges<'a, 'b> {
+    query: &'b CaseInsensitiveQuery<'a>,
+    value: &'b str,
+    offset: usize,
+}
+
+impl Iterator for MatchRanges<'_, '_> {
+    type Item = Range<usize>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let range = self.query.find(self.value.get(self.offset..)?)?;
+        let start = self.offset + range.start;
+        let end = self.offset + range.end;
+        self.offset = end.max(start + 1);
+        Some(start..end)
+    }
+}
+
+#[cfg(test)]
+mod query_tests {
+    use super::*;
+
+    #[test]
+    fn query_finds_ascii_case_insensitive_ranges() {
+        let query = CaseInsensitiveQuery::new("AL").expect("query");
+        assert_eq!(query.find("alpha"), Some(0..2));
+    }
+
+    #[test]
+    fn query_iterates_non_overlapping_ranges() {
+        let query = CaseInsensitiveQuery::new("a").expect("query");
+        assert_eq!(
+            query.find_iter("banana").collect::<Vec<_>>(),
+            vec![1..2, 3..4, 5..6]
+        );
+    }
+
+    #[test]
+    fn query_finds_unicode_case_insensitive_ranges() {
+        let query = CaseInsensitiveQuery::new("CAFÉ").expect("query");
+        assert_eq!(query.find("xx café yy"), Some(3..8));
+    }
+}
+
 pub fn find_match(
     rows: &[Vec<String>],
     start: Position,
     query: &str,
     direction: SearchDirection,
 ) -> Option<Position> {
-    if query.is_empty() || rows.is_empty() {
+    if rows.is_empty() {
         return None;
     }
-    let query = query.to_lowercase();
+    let query = CaseInsensitiveQuery::new(query)?;
     let Some(mut position) = start_or_virtual_wrap_position(rows, start, direction) else {
         return None;
     };
 
     for _ in 0..cell_count(rows) {
         position = next_position(rows, position, direction)?;
-        if contains_case_insensitive(&rows[position.row][position.column], &query) {
+        if query.matches(&rows[position.row][position.column]) {
             return Some(position);
         }
     }
@@ -111,15 +214,9 @@ fn cell_count(rows: &[Vec<String>]) -> usize {
     rows.iter().map(Vec::len).sum()
 }
 
+#[cfg(test)]
 fn contains_case_insensitive(value: &str, query: &str) -> bool {
-    if value.is_ascii() && query.is_ascii() {
-        return value
-            .as_bytes()
-            .windows(query.len())
-            .any(|window| window.eq_ignore_ascii_case(query.as_bytes()));
-    }
-
-    value.to_lowercase().contains(query)
+    query.is_empty() || CaseInsensitiveQuery::new(query).is_some_and(|query| query.matches(value))
 }
 
 #[cfg(test)]
@@ -209,5 +306,17 @@ mod tests {
             ),
             Some(Position { row: 1, column: 1 })
         );
+    }
+
+    #[test]
+    fn contains_case_insensitive_handles_empty_query() {
+        assert!(contains_case_insensitive("alpha", ""));
+    }
+
+    #[test]
+    fn ascii_uppercase_query_matches_non_ascii_value() {
+        let query = CaseInsensitiveQuery::new("CAF").expect("query");
+
+        assert!(query.matches("café"));
     }
 }

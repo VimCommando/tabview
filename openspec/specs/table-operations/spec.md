@@ -109,11 +109,11 @@ The system SHALL preserve current forward and reverse search traversal results, 
 - **THEN** the cursor moves to the next matching cell after the current cell, wrapping when needed
 
 #### Scenario: Previous search result
-- **WHEN** a search string is active and the user presses `p`
+- **WHEN** a search string is active and the user presses `N`
 - **THEN** the cursor moves to the previous matching cell, wrapping when needed
 
 #### Scenario: Reverse search preserves table order
-- **WHEN** a user presses `p` to search backward
+- **WHEN** a user presses `N` to search backward
 - **THEN** the table row order and cell order remain unchanged after the search completes
 
 ### Requirement: Search match values

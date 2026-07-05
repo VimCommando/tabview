@@ -34,7 +34,7 @@ The system SHALL provide modal popups for full cell contents, file/data informat
 - **THEN** no blank popup is opened and the viewer continues running
 
 ### Requirement: Search prompt interaction
-The system SHALL provide an incremental search prompt compatible with `/`, `n`, and `p` behavior.
+The system SHALL provide an incremental search prompt compatible with `/`, `n`, and `N` behavior.
 
 #### Scenario: Incremental search
 - **WHEN** a user opens search with `/` and types printable characters
