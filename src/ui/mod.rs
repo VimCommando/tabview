@@ -345,16 +345,17 @@ struct RowRender<'a> {
 
 fn render_row(buffer: &mut Buffer, row: &[String], render: RowRender<'_>) {
     let mut x = render.area.x;
+    let area_end = render.area.x.saturating_add(render.area.width);
     for (column, cell) in row
         .iter()
         .enumerate()
         .skip(render.column_offset)
         .take(render.visible_column_count)
     {
-        if x >= render.area.x + render.area.width {
+        if x >= area_end {
             break;
         }
-        let remaining_width = (render.area.x + render.area.width).saturating_sub(x) as usize;
+        let remaining_width = area_end.saturating_sub(x) as usize;
         if remaining_width == 0 {
             break;
         }

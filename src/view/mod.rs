@@ -13,7 +13,7 @@ use crate::ops::sort::{
 };
 #[cfg(feature = "saved-views")]
 use crate::theme::ConditionalValue;
-use crate::theme::{identifier_color_ref, ConditionalColorRule};
+use crate::theme::{gradient_color_ref, identifier_color_ref, ConditionalColorRule};
 use column::{ColumnIndex, Columns};
 
 const MAX_ACTIVE_SORT_KEYS: usize = 3;
@@ -224,6 +224,7 @@ struct ColumnDisplayMetadata {
 struct ColumnColorMetadata {
     numeric_min_max: Option<(f64, f64)>,
     identifier_color_refs: BTreeMap<usize, BTreeMap<String, String>>,
+    gradient_color_refs: BTreeMap<usize, Vec<String>>,
 }
 
 impl Viewport {
@@ -607,6 +608,24 @@ impl TableView {
                     .and_then(|metadata| metadata.identifier_color_refs.get(&rule_idx))
                     .and_then(|color_refs| color_refs.get(rendered))
                     .map(|color_ref| Cow::Borrowed(color_ref.as_str())),
+                ConditionalColorRule::AutoGradient { colors, steps } => {
+                    let numeric = *numeric.get_or_insert_with(|| {
+                        parse_numeric_scalar(raw, self.source_numeric_column_profile(source_column))
+                    });
+                    let value = numeric?;
+                    let (min, max) = min_max?;
+                    if colors.is_empty() || max <= min {
+                        return colors.first().map(|color| Cow::Borrowed(color.as_str()));
+                    }
+                    let steps = (*steps).max(1);
+                    let ratio = ((value - min) / (max - min)).clamp(0.0, 1.0);
+                    let bucket = (ratio * steps as f64).floor().min((steps - 1) as f64) as usize;
+                    metadata
+                        .and_then(|metadata| metadata.gradient_color_refs.get(&rule_idx))
+                        .and_then(|color_refs| color_refs.get(bucket))
+                        .map(|color_ref| Cow::Borrowed(color_ref.as_str()))
+                        .or_else(|| Some(Cow::Owned(gradient_color_ref(colors, bucket, steps))))
+                }
                 _ => {
                     let numeric = *numeric.get_or_insert_with(|| {
                         parse_numeric_scalar(raw, self.source_numeric_column_profile(source_column))
@@ -1834,9 +1853,24 @@ impl TableView {
                 Some((rule_idx, color_refs))
             })
             .collect();
+        let gradient_color_refs = rules
+            .iter()
+            .enumerate()
+            .filter_map(|(rule_idx, rule)| {
+                let ConditionalColorRule::AutoGradient { colors, steps } = rule else {
+                    return None;
+                };
+                let steps = (*steps).max(1);
+                let color_refs = (0..steps)
+                    .map(|bucket| gradient_color_ref(colors, bucket, steps))
+                    .collect::<Vec<_>>();
+                Some((rule_idx, color_refs))
+            })
+            .collect();
         ColumnColorMetadata {
             numeric_min_max,
             identifier_color_refs,
+            gradient_color_refs,
         }
     }
 
@@ -2878,6 +2912,10 @@ columns:
             view.conditional_color_for_visible_cell(1, 1),
             Some("gradient(4;8;5:green6:yellow)".to_owned())
         );
+        assert!(matches!(
+            view.conditional_color_for_source_cell(1, "50%", "50%"),
+            Some(Cow::Borrowed(_))
+        ));
         assert_eq!(
             view.visible_rows_vec(),
             rows(&[&["active", "5%"], &["idle", "50%"], &["down", "95%"]])

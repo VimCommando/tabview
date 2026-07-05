@@ -1354,7 +1354,7 @@ pub fn identifier_color_ref(index: usize, colors: &IdentifierColors) -> String {
     }
 }
 
-fn gradient_color_ref(colors: &[String], bucket: usize, steps: usize) -> String {
+pub(crate) fn gradient_color_ref(colors: &[String], bucket: usize, steps: usize) -> String {
     format!("gradient({bucket};{steps};{})", encode_color_list(colors))
 }
 
