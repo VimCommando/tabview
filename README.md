@@ -1,9 +1,5 @@
 # Tabview
 
-[![Crates.io](https://img.shields.io/crates/v/tabview.svg)](https://crates.io/crates/tabview)
-[![License](https://img.shields.io/crates/l/tabview.svg)](LICENSE.txt)
-[![Sourcegraph](https://sourcegraph.com/github.com/TabViewer/tabview/-/badge.svg)](https://sourcegraph.com/github.com/Tabviewer/tabview)
-
 View CSV and delimited text files in a spreadsheet-like terminal interface.
 
 **This project is functional but future development will be sporadic and
