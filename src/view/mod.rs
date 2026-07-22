@@ -1663,10 +1663,21 @@ impl TableView {
                         }
                     }
                 };
-                let result = match crate::table::execute_local_query(
+                let numeric_profiles = definition
+                    .columns
+                    .iter()
+                    .map(|column| self.source_numeric_column_profile(column.id.ordinal as usize))
+                    .collect::<Vec<_>>();
+                let result = match crate::table::execute_local_query_with_profiles(
                     &base,
                     &definition,
                     &query,
+                    &|column| {
+                        numeric_profiles
+                            .get(column.ordinal as usize)
+                            .copied()
+                            .unwrap_or_default()
+                    },
                     &|_, value| value.display().into_owned(),
                 ) {
                     Ok(result) => result,

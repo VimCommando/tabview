@@ -71,6 +71,22 @@ pub fn execute_query(
     query: &TableQuery,
     render: &dyn Fn(ColumnId, &CellValue) -> String,
 ) -> anyhow::Result<Box<dyn TableStore>> {
+    execute_query_with_profiles(
+        store,
+        definition,
+        query,
+        &|_| crate::ops::sort::NumericColumnProfile::default(),
+        render,
+    )
+}
+
+pub(crate) fn execute_query_with_profiles(
+    store: &mut dyn TableStore,
+    definition: &TableDefinition,
+    query: &TableQuery,
+    numeric_profile: &dyn Fn(ColumnId) -> crate::ops::sort::NumericColumnProfile,
+    render: &dyn Fn(ColumnId, &CellValue) -> String,
+) -> anyhow::Result<Box<dyn TableStore>> {
     let prepared_regexes = prepare_query(definition, query)?;
     match store.try_execute_query(query)? {
         QueryExecution::Executed(result) => {
@@ -86,6 +102,7 @@ pub fn execute_query(
                 definition,
                 query,
                 &prepared_regexes,
+                numeric_profile,
                 render,
             )?))
         }
@@ -98,8 +115,31 @@ pub fn execute_local_query(
     query: &TableQuery,
     render: &dyn Fn(ColumnId, &CellValue) -> String,
 ) -> anyhow::Result<InMemoryTable> {
+    execute_local_query_with_profiles(
+        base,
+        definition,
+        query,
+        &|_| crate::ops::sort::NumericColumnProfile::default(),
+        render,
+    )
+}
+
+pub(crate) fn execute_local_query_with_profiles(
+    base: &InMemoryTable,
+    definition: &TableDefinition,
+    query: &TableQuery,
+    numeric_profile: &dyn Fn(ColumnId) -> crate::ops::sort::NumericColumnProfile,
+    render: &dyn Fn(ColumnId, &CellValue) -> String,
+) -> anyhow::Result<InMemoryTable> {
     let prepared_regexes = prepare_query(definition, query)?;
-    execute_prepared_local_query(base, definition, query, &prepared_regexes, render)
+    execute_prepared_local_query(
+        base,
+        definition,
+        query,
+        &prepared_regexes,
+        numeric_profile,
+        render,
+    )
 }
 
 fn execute_prepared_local_query(
@@ -107,6 +147,7 @@ fn execute_prepared_local_query(
     definition: &TableDefinition,
     query: &TableQuery,
     prepared_regexes: &[Option<Regex>],
+    numeric_profile: &dyn Fn(ColumnId) -> crate::ops::sort::NumericColumnProfile,
     render: &dyn Fn(ColumnId, &CellValue) -> String,
 ) -> anyhow::Result<InMemoryTable> {
     let mut rows = base
@@ -122,6 +163,7 @@ fn execute_prepared_local_query(
                     let matched = predicate_matches(
                         &filter.predicate,
                         prepared_regex.as_ref(),
+                        numeric_profile(filter.column),
                         filter.column,
                         value,
                         render,
@@ -144,6 +186,7 @@ fn execute_prepared_local_query(
                     spec.mode,
                     spec.direction,
                     spec.nulls,
+                    numeric_profile(spec.column),
                 );
                 if ordering != Ordering::Equal {
                     return ordering;
@@ -164,6 +207,7 @@ fn cell(row: &Row, column: ColumnId) -> &CellValue {
 fn predicate_matches(
     predicate: &FilterPredicate,
     prepared_regex: Option<&Regex>,
+    numeric_profile: crate::ops::sort::NumericColumnProfile,
     column: ColumnId,
     value: &CellValue,
     render: &dyn Fn(ColumnId, &CellValue) -> String,
@@ -180,8 +224,8 @@ fn predicate_matches(
                 .iter()
                 .any(|candidate| regex.is_match(candidate))
         }),
-        FilterPredicate::Numeric { operator, operand } => {
-            numeric_value(value).is_some_and(|value| {
+        FilterPredicate::Numeric { operator, operand } => numeric_value(value, numeric_profile)
+            .is_some_and(|value| {
                 use super::NumericOperator;
                 match operator {
                     NumericOperator::LessThan => value < *operand,
@@ -190,8 +234,7 @@ fn predicate_matches(
                     NumericOperator::GreaterThanOrEqual => value >= *operand,
                     NumericOperator::Equal => value.total_cmp(operand) == Ordering::Equal,
                 }
-            })
-        }
+            }),
     }
 }
 
@@ -216,14 +259,14 @@ fn domain_values(
     }
 }
 
-fn numeric_value(value: &CellValue) -> Option<f64> {
+fn numeric_value(
+    value: &CellValue,
+    profile: crate::ops::sort::NumericColumnProfile,
+) -> Option<f64> {
     match value {
         CellValue::Integer(value) => Some(*value as f64),
         CellValue::Float(value) => Some(*value),
-        CellValue::Text(value) => crate::ops::sort::parse_numeric_scalar(
-            value,
-            crate::ops::sort::NumericColumnProfile::default(),
-        ),
+        CellValue::Text(value) => crate::ops::sort::parse_numeric_scalar(value, profile),
         _ => None,
     }
 }
@@ -234,6 +277,7 @@ fn compare_typed_cells(
     mode: SortMode,
     direction: SortDirection,
     nulls: NullPlacement,
+    numeric_profile: crate::ops::sort::NumericColumnProfile,
 ) -> Ordering {
     let null_order = match (
         matches!(left, CellValue::Null),
@@ -255,7 +299,10 @@ fn compare_typed_cells(
     }
 
     let ordering = if mode == SortMode::Numeric {
-        match (numeric_value(left), numeric_value(right)) {
+        match (
+            numeric_value(left, numeric_profile),
+            numeric_value(right, numeric_profile),
+        ) {
             (Some(left), Some(right)) => left.total_cmp(&right),
             (Some(_), None) => Ordering::Less,
             (None, Some(_)) => Ordering::Greater,
@@ -266,7 +313,7 @@ fn compare_typed_cells(
             &left.display(),
             &right.display(),
             operation_sort_mode(mode),
-            crate::ops::sort::NumericColumnProfile::default(),
+            numeric_profile,
         )
     };
     match direction {
@@ -421,6 +468,79 @@ mod tests {
                 .map(|row| row.id.ordinal)
                 .collect::<Vec<_>>(),
             [1, 3]
+        );
+    }
+
+    #[test]
+    fn local_numeric_queries_use_the_supplied_column_profile() {
+        let (definition, _) = fixture();
+        let base = InMemoryTable::from_rows(
+            definition.generation,
+            vec![
+                Row::new(
+                    RowId {
+                        generation: definition.generation,
+                        ordinal: 0,
+                    },
+                    vec![CellValue::Text("2m".to_owned())],
+                ),
+                Row::new(
+                    RowId {
+                        generation: definition.generation,
+                        ordinal: 1,
+                    },
+                    vec![CellValue::Text("30".to_owned())],
+                ),
+            ],
+        )
+        .unwrap();
+        let profile = |_: ColumnId| crate::ops::sort::NumericColumnProfile::time();
+        let render = |_: ColumnId, value: &CellValue| value.display().into_owned();
+        let sort_query = TableQuery {
+            generation: definition.generation,
+            filters: Vec::new(),
+            order_by: vec![SortSpec {
+                column: definition.columns[0].id,
+                mode: SortMode::Numeric,
+                direction: SortDirection::Ascending,
+                nulls: NullPlacement::Last,
+            }],
+        };
+
+        let sorted =
+            execute_local_query_with_profiles(&base, &definition, &sort_query, &profile, &render)
+                .unwrap();
+        assert_eq!(
+            sorted
+                .rows()
+                .iter()
+                .map(|row| row.id.ordinal)
+                .collect::<Vec<_>>(),
+            [1, 0]
+        );
+
+        let filter_query = TableQuery {
+            generation: definition.generation,
+            filters: vec![FilterSpec {
+                column: definition.columns[0].id,
+                mode: FilterMode::In,
+                predicate: FilterPredicate::Numeric {
+                    operator: NumericOperator::LessThan,
+                    operand: 60.0,
+                },
+            }],
+            order_by: Vec::new(),
+        };
+        let filtered =
+            execute_local_query_with_profiles(&base, &definition, &filter_query, &profile, &render)
+                .unwrap();
+        assert_eq!(
+            filtered
+                .rows()
+                .iter()
+                .map(|row| row.id.ordinal)
+                .collect::<Vec<_>>(),
+            [1]
         );
     }
 
