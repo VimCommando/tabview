@@ -519,6 +519,7 @@ pub fn resolve_structured_columns(
     let mut resolved = vec![None; definition.columns.len()];
     let mut matched_keys = BTreeSet::new();
     let mut warnings = Vec::new();
+    let mut warned_ambiguous_labels = BTreeSet::new();
     let mut label_counts: HashMap<&str, usize> = HashMap::with_capacity(definition.columns.len());
     for column in &definition.columns {
         *label_counts
@@ -556,7 +557,9 @@ pub fn resolve_structured_columns(
                     view: column_view.clone(),
                 });
             }
-        } else if view.columns.contains_key(&column.display_name) {
+        } else if view.columns.contains_key(&column.display_name)
+            && warned_ambiguous_labels.insert(column.display_name.clone())
+        {
             warnings.push(warning(
                 format!("columns.{}", column.display_name),
                 "display label is ambiguous; use a canonical JSON Pointer",
@@ -1994,6 +1997,14 @@ columns:
             .warnings
             .iter()
             .any(|warning| warning.message.contains("ambiguous")));
+        assert_eq!(
+            resolved
+                .warnings
+                .iter()
+                .filter(|warning| warning.message.contains("ambiguous"))
+                .count(),
+            1
+        );
     }
 
     #[test]

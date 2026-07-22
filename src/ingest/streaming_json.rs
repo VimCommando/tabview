@@ -77,11 +77,13 @@ impl<'de> Visitor<'de> for PathVisitor<'_> {
             .map_err(|_| A::Error::custom("JSON Pointer array segment is not an index"))?;
         for index in 0..=target {
             if index == target {
-                return sequence
+                let selected = sequence
                     .next_element_seed(SelectSeed {
                         segments: self.remaining,
                     })?
-                    .ok_or_else(|| A::Error::custom("JSON starting path was not found"));
+                    .ok_or_else(|| A::Error::custom("JSON starting path was not found"))?;
+                while sequence.next_element::<IgnoredAny>()?.is_some() {}
+                return Ok(selected);
             }
             if sequence.next_element::<IgnoredAny>()?.is_none() {
                 return Err(A::Error::custom("JSON starting path was not found"));
@@ -214,5 +216,17 @@ mod tests {
         )
         .expect("rows");
         assert_eq!(rows[0].get(), "[1,2]");
+    }
+
+    #[test]
+    fn array_pointer_drains_elements_after_the_selected_index() {
+        let rows = select_json_rows(
+            br#"[[{"a":1}],[{"a":2}],[{"a":3}]]"#,
+            Some(&"/0".parse().unwrap()),
+        )
+        .expect("rows");
+
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].get(), "{\"a\":1}");
     }
 }
