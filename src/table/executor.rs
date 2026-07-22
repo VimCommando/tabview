@@ -247,11 +247,11 @@ fn domain_values(
     value: &CellValue,
     render: &dyn Fn(ColumnId, &CellValue) -> String,
 ) -> Vec<String> {
-    let raw = value.display().into_owned();
     match domain {
-        ValueDomain::Raw => vec![raw],
+        ValueDomain::Raw => vec![value.display().into_owned()],
         ValueDomain::Rendered => vec![render(column, value)],
         ValueDomain::RawOrRendered => {
+            let raw = value.display().into_owned();
             let rendered = render(column, value);
             if rendered == raw {
                 vec![raw]
