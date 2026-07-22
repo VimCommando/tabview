@@ -299,14 +299,17 @@ fn compare_typed_cells(
     }
 
     let ordering = if mode == SortMode::Numeric {
-        match (
-            numeric_value(left, numeric_profile),
-            numeric_value(right, numeric_profile),
-        ) {
-            (Some(left), Some(right)) => left.total_cmp(&right),
-            (Some(_), None) => Ordering::Less,
-            (None, Some(_)) => Ordering::Greater,
-            (None, None) => Ordering::Equal,
+        match (left, right) {
+            (CellValue::Integer(left), CellValue::Integer(right)) => left.cmp(right),
+            _ => match (
+                numeric_value(left, numeric_profile),
+                numeric_value(right, numeric_profile),
+            ) {
+                (Some(left), Some(right)) => left.total_cmp(&right),
+                (Some(_), None) => Ordering::Less,
+                (None, Some(_)) => Ordering::Greater,
+                (None, None) => Ordering::Equal,
+            },
         }
     } else {
         crate::ops::sort::compare_cells(
@@ -440,6 +443,55 @@ mod tests {
                 .collect::<Vec<_>>();
             assert_eq!(tied, [0, 3]);
         }
+    }
+
+    #[test]
+    fn typed_numeric_sort_preserves_large_integer_precision() {
+        let (definition, _) = fixture();
+        let base = InMemoryTable::from_rows(
+            definition.generation,
+            vec![
+                Row::new(
+                    RowId {
+                        generation: definition.generation,
+                        ordinal: 0,
+                    },
+                    vec![CellValue::Integer(9_007_199_254_740_993)],
+                ),
+                Row::new(
+                    RowId {
+                        generation: definition.generation,
+                        ordinal: 1,
+                    },
+                    vec![CellValue::Integer(9_007_199_254_740_992)],
+                ),
+            ],
+        )
+        .unwrap();
+        let query = TableQuery {
+            generation: definition.generation,
+            filters: Vec::new(),
+            order_by: vec![SortSpec {
+                column: definition.columns[0].id,
+                mode: SortMode::Numeric,
+                direction: SortDirection::Ascending,
+                nulls: NullPlacement::Last,
+            }],
+        };
+
+        let result = execute_local_query(&base, &definition, &query, &|_, value| {
+            value.display().into_owned()
+        })
+        .unwrap();
+
+        assert_eq!(
+            result
+                .rows()
+                .iter()
+                .map(|row| row.id.ordinal)
+                .collect::<Vec<_>>(),
+            [1, 0]
+        );
     }
 
     #[test]
