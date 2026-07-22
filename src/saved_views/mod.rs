@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -519,6 +519,12 @@ pub fn resolve_structured_columns(
     let mut resolved = vec![None; definition.columns.len()];
     let mut matched_keys = BTreeSet::new();
     let mut warnings = Vec::new();
+    let mut label_counts = HashMap::with_capacity(definition.columns.len());
+    for column in &definition.columns {
+        *label_counts
+            .entry(column.display_name.as_str())
+            .or_insert(0) += 1;
+    }
 
     for (index, column) in definition.columns.iter().enumerate() {
         let canonical = match &column.source_identity {
@@ -537,11 +543,10 @@ pub fn resolve_structured_columns(
             continue;
         }
 
-        let label_matches = definition
-            .columns
-            .iter()
-            .filter(|candidate| candidate.display_name == column.display_name)
-            .count();
+        let label_matches = label_counts
+            .get(column.display_name.as_str())
+            .copied()
+            .unwrap_or_default();
         if label_matches == 1 {
             if let Some((key, column_view)) = view.columns.get_key_value(&column.display_name) {
                 matched_keys.insert(key.clone());

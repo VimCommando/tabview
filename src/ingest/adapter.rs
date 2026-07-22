@@ -72,7 +72,7 @@ impl FormatResolver {
 }
 
 pub fn open_source(source: InputSource, options: &OpenOptions) -> anyhow::Result<OpenedSource> {
-    let resolved = match &source {
+    let detected = match &source {
         InputSource::Path(path) => {
             let mut sample = Vec::new();
             std::fs::File::open(path)?
@@ -91,11 +91,27 @@ pub fn open_source(source: InputSource, options: &OpenOptions) -> anyhow::Result
             }
         }
     };
+    // A JSON Pointer is itself an explicit request for structured parsing. If
+    // auto-detection cannot identify JSON/NDJSON, prefer JSON so the option is
+    // either honored or produces a parse error instead of being silently
+    // ignored by the delimited adapter.
+    let resolved = resolve_structured_options(detected, options);
     match resolved {
         InputFormat::Delimited => DelimitedAdapter.open(source, options),
         InputFormat::Json => JsonAdapter::json().open(source, options),
         InputFormat::Ndjson => JsonAdapter::ndjson().open(source, options),
         InputFormat::Auto => unreachable!("auto format must be resolved"),
+    }
+}
+
+fn resolve_structured_options(detected: InputFormat, options: &OpenOptions) -> InputFormat {
+    if options.format == InputFormat::Auto
+        && options.json_path.is_some()
+        && detected == InputFormat::Delimited
+    {
+        InputFormat::Json
+    } else {
+        detected
     }
 }
 
@@ -192,5 +208,22 @@ mod tests {
             FormatResolver::resolve(InputFormat::Delimited, &source, sample),
             InputFormat::Delimited
         );
+    }
+
+    #[test]
+    fn json_path_prevents_auto_format_from_falling_back_to_delimited() {
+        let options = OpenOptions {
+            json_path: Some("/rows".parse().unwrap()),
+            ..OpenOptions::default()
+        };
+        let detected = FormatResolver::resolve(
+            options.format,
+            &InputSource::Stdin,
+            b"not a structured sample",
+        );
+        assert_eq!(detected, InputFormat::Delimited);
+
+        let resolved = resolve_structured_options(detected, &options);
+        assert_eq!(resolved, InputFormat::Json);
     }
 }

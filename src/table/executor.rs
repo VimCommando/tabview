@@ -25,6 +25,13 @@ pub fn validate_query(
     definition: &TableDefinition,
     query: &TableQuery,
 ) -> Result<(), QueryValidationError> {
+    prepare_query(definition, query).map(|_| ())
+}
+
+fn prepare_query(
+    definition: &TableDefinition,
+    query: &TableQuery,
+) -> Result<Vec<Option<Regex>>, QueryValidationError> {
     if query.generation != definition.generation {
         return Err(QueryValidationError::StaleGeneration);
     }
@@ -43,19 +50,19 @@ pub fn validate_query(
             return Err(QueryValidationError::UnknownColumn);
         }
     }
-    for filter in &query.filters {
-        match &filter.predicate {
-            FilterPredicate::Regex { pattern, .. } => {
-                Regex::new(pattern)
-                    .map_err(|error| QueryValidationError::InvalidRegex(error.to_string()))?;
-            }
+    query
+        .filters
+        .iter()
+        .map(|filter| match &filter.predicate {
+            FilterPredicate::Regex { pattern, .. } => Regex::new(pattern)
+                .map(Some)
+                .map_err(|error| QueryValidationError::InvalidRegex(error.to_string())),
             FilterPredicate::Numeric { operand, .. } if !operand.is_finite() => {
-                return Err(QueryValidationError::InvalidNumericOperand);
+                Err(QueryValidationError::InvalidNumericOperand)
             }
-            _ => {}
-        }
-    }
-    Ok(())
+            _ => Ok(None),
+        })
+        .collect()
 }
 
 pub fn execute_query(
@@ -64,7 +71,7 @@ pub fn execute_query(
     query: &TableQuery,
     render: &dyn Fn(ColumnId, &CellValue) -> String,
 ) -> anyhow::Result<Box<dyn TableStore>> {
-    validate_query(definition, query)?;
+    let prepared_regexes = prepare_query(definition, query)?;
     match store.try_execute_query(query)? {
         QueryExecution::Executed(result) => {
             if result.generation() != definition.generation {
@@ -74,8 +81,12 @@ pub fn execute_query(
         }
         QueryExecution::Unsupported => {
             let base = store.materialize()?;
-            Ok(Box::new(execute_local_query(
-                &base, definition, query, render,
+            Ok(Box::new(execute_prepared_local_query(
+                &base,
+                definition,
+                query,
+                &prepared_regexes,
+                render,
             )?))
         }
     }
@@ -87,19 +98,39 @@ pub fn execute_local_query(
     query: &TableQuery,
     render: &dyn Fn(ColumnId, &CellValue) -> String,
 ) -> anyhow::Result<InMemoryTable> {
-    validate_query(definition, query)?;
+    let prepared_regexes = prepare_query(definition, query)?;
+    execute_prepared_local_query(base, definition, query, &prepared_regexes, render)
+}
+
+fn execute_prepared_local_query(
+    base: &InMemoryTable,
+    definition: &TableDefinition,
+    query: &TableQuery,
+    prepared_regexes: &[Option<Regex>],
+    render: &dyn Fn(ColumnId, &CellValue) -> String,
+) -> anyhow::Result<InMemoryTable> {
     let mut rows = base
         .rows()
         .iter()
         .filter(|row| {
-            query.filters.iter().all(|filter| {
-                let value = cell(row, filter.column);
-                let matched = predicate_matches(&filter.predicate, filter.column, value, render);
-                match filter.mode {
-                    FilterMode::In => matched,
-                    FilterMode::Out => !matched,
-                }
-            })
+            query
+                .filters
+                .iter()
+                .zip(prepared_regexes)
+                .all(|(filter, prepared_regex)| {
+                    let value = cell(row, filter.column);
+                    let matched = predicate_matches(
+                        &filter.predicate,
+                        prepared_regex.as_ref(),
+                        filter.column,
+                        value,
+                        render,
+                    );
+                    match filter.mode {
+                        FilterMode::In => matched,
+                        FilterMode::Out => !matched,
+                    }
+                })
         })
         .cloned()
         .collect::<Vec<_>>();
@@ -132,6 +163,7 @@ fn cell(row: &Row, column: ColumnId) -> &CellValue {
 
 fn predicate_matches(
     predicate: &FilterPredicate,
+    prepared_regex: Option<&Regex>,
     column: ColumnId,
     value: &CellValue,
     render: &dyn Fn(ColumnId, &CellValue) -> String,
@@ -143,13 +175,11 @@ fn predicate_matches(
         } => domain_values(*domain, column, value, render)
             .iter()
             .any(|candidate| candidate.contains(needle)),
-        FilterPredicate::Regex { pattern, domain } => {
-            Regex::new(pattern).ok().is_some_and(|regex| {
-                domain_values(*domain, column, value, render)
-                    .iter()
-                    .any(|candidate| regex.is_match(candidate))
-            })
-        }
+        FilterPredicate::Regex { domain, .. } => prepared_regex.is_some_and(|regex| {
+            domain_values(*domain, column, value, render)
+                .iter()
+                .any(|candidate| regex.is_match(candidate))
+        }),
         FilterPredicate::Numeric { operator, operand } => {
             numeric_value(value).is_some_and(|value| {
                 use super::NumericOperator;
