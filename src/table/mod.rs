@@ -622,7 +622,13 @@ impl LazyFileTable {
             new_column_count = new_column_count.max(record.len());
 
             let index = RowIndex(self.offsets.len() + new_offsets.len() - 1);
-            let row = row_from_byte_record(&record, &self.options, self.generation, index)?;
+            let row = row_from_byte_record(
+                &record,
+                &self.options,
+                self.generation,
+                index,
+                new_column_count,
+            )?;
             visited += 1;
             if visitor.visit(index, &row).is_break() {
                 visitor_broke = true;
@@ -667,6 +673,7 @@ impl LazyFileTable {
             &self.options,
             self.generation,
             index,
+            self.column_count,
         )?))
     }
 }
@@ -796,6 +803,7 @@ impl TableStore for LazyFileTable {
                     &self.options,
                     self.generation,
                     RowIndex(current),
+                    self.column_count,
                 )?;
                 visited += 1;
                 current += 1;
@@ -902,11 +910,13 @@ fn row_from_byte_record(
     options: &ParseOptions,
     generation: SourceGeneration,
     index: RowIndex,
+    column_count: usize,
 ) -> anyhow::Result<Row> {
-    let cells = record
+    let mut cells = record
         .iter()
         .map(|field| decode_input(field, options.encoding.as_deref()).map(|decoded| decoded.text))
         .collect::<Result<Vec<_>, _>>()?;
+    cells.resize(column_count, String::new());
     Ok(Row::from_text(generation, index.0, cells))
 }
 
@@ -1121,6 +1131,53 @@ mod tests {
 
         assert_eq!(delivered, [vec!["wide", "x", "y"]]);
         assert_eq!(progress.index.schema_delta.added_columns.len(), 2);
+    }
+
+    #[test]
+    fn lazy_file_table_pads_ragged_rows_across_read_paths() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ragged.csv");
+        std::fs::write(&path, "a,b,c\n1\n2,3,4\n").expect("write");
+
+        let mut unindexed =
+            LazyFileTable::open(&path, ParseOptions::default()).expect("lazy table");
+        assert_eq!(text_row(&mut unindexed, 0), ["a", "b", "c"]);
+        let mut forward_rows = Vec::new();
+        let mut collect = |_: RowIndex, row: &Row| {
+            forward_rows.push(row.display_cells());
+            ControlFlow::Continue(())
+        };
+        unindexed
+            .scan_rows(
+                ScanRequest {
+                    start: RowIndex(1),
+                    direction: ScanDirection::Forward,
+                    max_rows: 1,
+                },
+                &mut collect,
+            )
+            .expect("scan unindexed ragged row");
+        assert_eq!(forward_rows, [vec!["1", "", ""]]);
+
+        let mut indexed = LazyFileTable::open(&path, ParseOptions::default()).expect("lazy table");
+        finish_index(&mut indexed);
+        assert_eq!(text_row(&mut indexed, 1), ["1", "", ""]);
+        let mut indexed_rows = Vec::new();
+        let mut collect = |_: RowIndex, row: &Row| {
+            indexed_rows.push(row.display_cells());
+            ControlFlow::Continue(())
+        };
+        indexed
+            .scan_rows(
+                ScanRequest {
+                    start: RowIndex(1),
+                    direction: ScanDirection::Forward,
+                    max_rows: 1,
+                },
+                &mut collect,
+            )
+            .expect("scan indexed ragged row");
+        assert_eq!(indexed_rows, [vec!["1", "", ""]]);
     }
 
     #[test]
