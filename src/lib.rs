@@ -195,7 +195,27 @@ fn full_schema_scan_status(
     source: &ingest::source::InputSource,
     options: &ingest::OpenOptions,
 ) -> Option<String> {
-    (options.schema_scan == ingest::SchemaScan::Full)
+    let structured_hint = match options.format {
+        ingest::InputFormat::Json | ingest::InputFormat::Ndjson => true,
+        ingest::InputFormat::Delimited => false,
+        ingest::InputFormat::Auto => {
+            options.json_path.is_some()
+                || matches!(
+                    source,
+                    ingest::source::InputSource::Path(path)
+                        if path
+                            .extension()
+                            .and_then(|extension| extension.to_str())
+                            .is_some_and(|extension| {
+                                matches!(
+                                    extension.to_ascii_lowercase().as_str(),
+                                    "json" | "ndjson" | "jsonl"
+                                )
+                            })
+                )
+        }
+    };
+    (options.schema_scan == ingest::SchemaScan::Full && structured_hint)
         .then(|| format!("Scanning full schema for {}", source.display_name()))
 }
 
@@ -1633,6 +1653,25 @@ mod tests {
             Some("Scanning full schema for response.json")
         );
         assert!(full_schema_scan_status(&source, &ingest::OpenOptions::default()).is_none());
+
+        let delimited = ingest::source::InputSource::Path("data.csv".into());
+        assert!(full_schema_scan_status(&delimited, &options).is_none());
+
+        let explicitly_delimited = ingest::OpenOptions {
+            format: ingest::InputFormat::Delimited,
+            ..options.clone()
+        };
+        assert!(full_schema_scan_status(&source, &explicitly_delimited).is_none());
+
+        let selected_json = ingest::OpenOptions {
+            json_path: Some("/rows".parse().unwrap()),
+            ..options
+        };
+        let unknown = ingest::source::InputSource::Path("response.data".into());
+        assert_eq!(
+            full_schema_scan_status(&unknown, &selected_json).as_deref(),
+            Some("Scanning full schema for response.data")
+        );
     }
 
     fn app_with_rows(rows: Vec<Vec<String>>) -> App {
