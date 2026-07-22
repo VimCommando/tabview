@@ -179,7 +179,7 @@ pub enum CliError {
     InvalidQuoting { value: String },
     #[error("invalid {what} '{value}'")]
     InvalidChar { what: &'static str, value: String },
-    #[error("{option} cannot be used with explicitly selected {format} input")]
+    #[error("{option} cannot be used with {format} input")]
     IncompatibleOptions {
         format: InputFormat,
         option: &'static str,
@@ -525,6 +525,10 @@ mod tests {
                 option: "--json-path"
             }
         ));
+        assert_eq!(
+            error.to_string(),
+            "--json-path cannot be used with delimited input"
+        );
     }
 
     #[test]
