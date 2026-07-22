@@ -8,6 +8,7 @@ pub use query::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
@@ -497,7 +498,13 @@ pub struct LazyFileTable {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SourceFingerprint {
     len: u64,
-    modified: SystemTime,
+    change_marker: SourceChangeMarker,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SourceChangeMarker {
+    Modified(SystemTime),
+    SampleHash(u64),
 }
 
 impl LazyFileTable {
@@ -905,10 +912,26 @@ impl TableStore for LazyFileTable {
 
 fn source_fingerprint(path: &Path) -> anyhow::Result<SourceFingerprint> {
     let metadata = std::fs::metadata(path)?;
-    Ok(SourceFingerprint {
-        len: metadata.len(),
-        modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
-    })
+    let len = metadata.len();
+    let change_marker = match metadata.modified() {
+        Ok(modified) => SourceChangeMarker::Modified(modified),
+        Err(_) => SourceChangeMarker::SampleHash(source_sample_hash(path, len)?),
+    };
+    Ok(SourceFingerprint { len, change_marker })
+}
+
+fn source_sample_hash(path: &Path, len: u64) -> anyhow::Result<u64> {
+    let mut file = File::open(path)?;
+    let mut hasher = DefaultHasher::new();
+    let mut sample = vec![0_u8; LAZY_FILE_SAMPLE_BYTES as usize];
+    let first_len = file.read(&mut sample)?;
+    sample[..first_len].hash(&mut hasher);
+    if len > LAZY_FILE_SAMPLE_BYTES {
+        file.seek(SeekFrom::Start(len.saturating_sub(LAZY_FILE_SAMPLE_BYTES)))?;
+        let last_len = file.read(&mut sample)?;
+        sample[..last_len].hash(&mut hasher);
+    }
+    Ok(hasher.finish())
 }
 
 fn byte_record_offset(record: &csv::ByteRecord) -> anyhow::Result<u64> {
@@ -1453,6 +1476,19 @@ mod tests {
         let record = csv::ByteRecord::new();
         let error = byte_record_offset(&record).expect_err("missing record position");
         assert!(error.to_string().contains("byte offset"));
+    }
+
+    #[test]
+    fn fallback_sample_hash_detects_same_length_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("data.csv");
+        std::fs::write(&path, "alpha").expect("write initial");
+        let initial = source_sample_hash(&path, 5).expect("initial hash");
+
+        std::fs::write(&path, "omega").expect("write replacement");
+        let replacement = source_sample_hash(&path, 5).expect("replacement hash");
+
+        assert_ne!(initial, replacement);
     }
 
     #[test]
