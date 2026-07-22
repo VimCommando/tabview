@@ -1,0 +1,6 @@
+[
+  {
+    "user": {"id": 1, "profile": {"email": "a@example.test"}},
+    "tags": ["one", "two"]
+  }
+]

@@ -1,15 +1,22 @@
 mod column;
 
 use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::cell::RefCell;
+use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
+use std::rc::Rc;
 
 use unicode_width::UnicodeWidthStr;
 
+use crate::ingest::OpenedTable;
 use crate::ops::filter::{ActiveFilter, FilterCondition, FilterKind, FilterMode, FilterParseError};
 use crate::ops::search::CaseInsensitiveQuery;
 use crate::ops::sort::{
     parse_bool_key, parse_numeric_scalar, sort_rows_by_specs, NumericColumnProfile, SortDirection,
     SortMode, SortSpec,
+};
+use crate::table::{
+    InMemoryTable, NullPlacement, RowCount, RowIndex, SourceGeneration, TableDefinition, TableStore,
 };
 #[cfg(feature = "saved-views")]
 use crate::theme::ConditionalValue;
@@ -17,6 +24,24 @@ use crate::theme::{gradient_color_ref, identifier_color_ref, ConditionalColorRul
 use column::{ColumnIndex, Columns};
 
 const MAX_ACTIVE_SORT_KEYS: usize = 3;
+
+#[derive(Clone)]
+struct SharedTableStore(Rc<RefCell<Box<dyn TableStore>>>);
+
+impl fmt::Debug for SharedTableStore {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SharedTableStore")
+            .finish_non_exhaustive()
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum QueryRefresh {
+    Applied,
+    NotStoreBacked,
+    Failed,
+}
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ColumnWidthMode {
@@ -56,6 +81,7 @@ pub struct ActiveSortKey {
     pub column: usize,
     pub mode: SortMode,
     pub direction: SortDirection,
+    pub nulls: NullPlacement,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +113,13 @@ pub enum ColumnSortChoice {
     Descending,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColumnNullPlacementChoice {
+    Inherited,
+    First,
+    Last,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnFilterSummary {
     pub mode: &'static str,
@@ -104,6 +137,9 @@ pub struct ColumnInfo {
     pub column_type: ColumnTypeChoice,
     pub format: ColumnFormatChoice,
     pub sort: ColumnSortChoice,
+    pub nulls: ColumnNullPlacementChoice,
+    pub canonical_source: Option<String>,
+    pub source_type: Option<String>,
     pub filters: Vec<ColumnFilterSummary>,
 }
 
@@ -114,6 +150,7 @@ pub struct ColumnInfoUpdate {
     pub column_type: ColumnTypeChoice,
     pub format: ColumnFormatChoice,
     pub sort: ColumnSortChoice,
+    pub nulls: ColumnNullPlacementChoice,
     pub clear_filters: bool,
 }
 
@@ -239,6 +276,17 @@ impl Viewport {
 
 #[derive(Debug, Clone)]
 pub struct TableView {
+    table_definition: Option<TableDefinition>,
+    source_store: Option<InMemoryTable>,
+    incremental_store: Option<SharedTableStore>,
+    query_store: Option<SharedTableStore>,
+    base_cached_rows: Option<Vec<Vec<String>>>,
+    base_cached_row_ids: Option<Vec<crate::table::RowId>>,
+    active_query: Option<crate::table::TableQuery>,
+    committed_filters: Vec<ActiveFilter>,
+    committed_sort_keys: Vec<ActiveSortKey>,
+    row_ids: Vec<crate::table::RowId>,
+    source_status: Option<String>,
     header: Option<Vec<String>>,
     header_visible: bool,
     rows: Vec<Vec<String>>,
@@ -247,19 +295,33 @@ pub struct TableView {
     cursor: Position,
     viewport: Viewport,
     mark: Option<Position>,
+    mark_identity: Option<(crate::table::RowId, crate::table::ColumnId)>,
     column_width_mode: ColumnWidthMode,
     column_gap: usize,
     column_widths: Vec<usize>,
+    sampled_column_widths: Vec<usize>,
     computed_column_widths_cache: Vec<usize>,
+    terminal_width: usize,
     column_width_modified: BTreeSet<usize>,
     hidden_columns: BTreeSet<usize>,
     column_alignment_overrides: Vec<Option<ColumnAlignment>>,
+    column_label_overrides: Vec<Option<String>>,
+    view_nulls: Option<NullPlacement>,
+    column_nulls: Vec<Option<NullPlacement>>,
     column_display: Vec<ColumnDisplayMetadata>,
     column_color_rules: Vec<Vec<ConditionalColorRule>>,
     column_color_metadata: Vec<ColumnColorMetadata>,
     column_metadata_modified: BTreeSet<usize>,
     sort_keys: Vec<ActiveSortKey>,
     columns: Columns,
+    #[cfg(feature = "saved-views")]
+    pending_saved_columns: BTreeMap<String, crate::saved_views::ColumnView>,
+    #[cfg(feature = "saved-views")]
+    saved_column_locale: Option<String>,
+    #[cfg(feature = "saved-views")]
+    pending_saved_sorts: Vec<crate::saved_views::SortKey>,
+    #[cfg(feature = "saved-views")]
+    pending_saved_filters: Vec<crate::saved_views::SavedFilter>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -314,6 +376,17 @@ impl TableView {
         let visible_rows = (0..rows.len()).collect();
 
         Self {
+            table_definition: None,
+            source_store: None,
+            incremental_store: None,
+            query_store: None,
+            base_cached_rows: None,
+            base_cached_row_ids: None,
+            active_query: None,
+            committed_filters: Vec::new(),
+            committed_sort_keys: Vec::new(),
+            row_ids: Vec::new(),
+            source_status: None,
             header_visible: header.is_some(),
             header,
             rows,
@@ -322,20 +395,490 @@ impl TableView {
             cursor: Position::default(),
             viewport,
             mark: None,
+            mark_identity: None,
             column_width_mode: ColumnWidthMode::Mode,
             column_gap: 2,
             column_widths: Vec::new(),
+            sampled_column_widths: Vec::new(),
             computed_column_widths_cache: Vec::new(),
+            terminal_width: 0,
             column_width_modified: BTreeSet::new(),
             hidden_columns: BTreeSet::new(),
             column_alignment_overrides: vec![None; columns.len()],
+            column_label_overrides: vec![None; columns.len()],
+            view_nulls: None,
+            column_nulls: vec![None; columns.len()],
             column_display: vec![ColumnDisplayMetadata::default(); columns.len()],
             column_color_rules: vec![Vec::new(); columns.len()],
             column_color_metadata: vec![ColumnColorMetadata::default(); columns.len()],
             column_metadata_modified: BTreeSet::new(),
             sort_keys: Vec::new(),
             columns,
+            #[cfg(feature = "saved-views")]
+            pending_saved_columns: BTreeMap::new(),
+            #[cfg(feature = "saved-views")]
+            saved_column_locale: None,
+            #[cfg(feature = "saved-views")]
+            pending_saved_sorts: Vec::new(),
+            #[cfg(feature = "saved-views")]
+            pending_saved_filters: Vec::new(),
         }
+    }
+
+    pub fn from_opened_table(mut opened: OpenedTable, viewport: Viewport) -> anyhow::Result<Self> {
+        let header_visible = opened.definition.relation.header_visible;
+        let generation = opened.definition.generation;
+        let initial_target = viewport.height.saturating_sub(1);
+        let progress = opened
+            .store
+            .ensure_indexed_through(RowIndex(initial_target))?;
+        opened.definition.apply_delta(progress.schema_delta)?;
+        let mut rows = Vec::new();
+        let mut row_ids = Vec::new();
+        for index in 0..=initial_target {
+            let Some(row) = opened.store.row(RowIndex(index))? else {
+                break;
+            };
+            row_ids.push(row.id);
+            rows.push(row.display_cells());
+        }
+        let header = Some(
+            opened
+                .definition
+                .columns
+                .iter()
+                .map(|column| column.display_name.clone())
+                .collect::<Vec<_>>(),
+        );
+        let columns = Columns::infer(header.as_deref(), &rows);
+        let visible_rows = (0..rows.len()).collect();
+        Ok(Self {
+            table_definition: Some(opened.definition),
+            source_store: None,
+            incremental_store: Some(SharedTableStore(Rc::new(RefCell::new(opened.store)))),
+            query_store: None,
+            base_cached_rows: None,
+            base_cached_row_ids: None,
+            active_query: Some(crate::table::TableQuery {
+                generation,
+                filters: Vec::new(),
+                order_by: Vec::new(),
+            }),
+            committed_filters: Vec::new(),
+            committed_sort_keys: Vec::new(),
+            row_ids,
+            source_status: None,
+            header_visible,
+            header,
+            rows,
+            visible_rows,
+            filters: Vec::new(),
+            cursor: Position::default(),
+            viewport,
+            mark: None,
+            mark_identity: None,
+            column_width_mode: ColumnWidthMode::Mode,
+            column_gap: 2,
+            column_widths: Vec::new(),
+            sampled_column_widths: Vec::new(),
+            computed_column_widths_cache: Vec::new(),
+            terminal_width: 0,
+            column_width_modified: BTreeSet::new(),
+            hidden_columns: BTreeSet::new(),
+            column_alignment_overrides: vec![None; columns.len()],
+            column_label_overrides: vec![None; columns.len()],
+            view_nulls: None,
+            column_nulls: vec![None; columns.len()],
+            column_display: vec![ColumnDisplayMetadata::default(); columns.len()],
+            column_color_rules: vec![Vec::new(); columns.len()],
+            column_color_metadata: vec![ColumnColorMetadata::default(); columns.len()],
+            column_metadata_modified: BTreeSet::new(),
+            sort_keys: Vec::new(),
+            columns,
+            #[cfg(feature = "saved-views")]
+            pending_saved_columns: BTreeMap::new(),
+            #[cfg(feature = "saved-views")]
+            saved_column_locale: None,
+            #[cfg(feature = "saved-views")]
+            pending_saved_sorts: Vec::new(),
+            #[cfg(feature = "saved-views")]
+            pending_saved_filters: Vec::new(),
+        })
+    }
+
+    pub fn source_generation(&self) -> Option<SourceGeneration> {
+        self.table_definition
+            .as_ref()
+            .map(|definition| definition.generation)
+    }
+
+    pub fn table_definition(&self) -> Option<&TableDefinition> {
+        self.table_definition.as_ref()
+    }
+
+    pub fn set_view_null_placement(&mut self, nulls: Option<NullPlacement>) {
+        let previous = self.view_nulls;
+        self.view_nulls = nulls;
+        for key in &mut self.sort_keys {
+            key.nulls = self
+                .column_nulls
+                .get(key.column)
+                .copied()
+                .flatten()
+                .or(self.view_nulls)
+                .unwrap_or(NullPlacement::Last);
+        }
+        if !self.apply_query_configuration() {
+            self.view_nulls = previous;
+        }
+    }
+
+    pub fn resolved_null_placement(&self, source_column: usize) -> NullPlacement {
+        self.column_nulls
+            .get(source_column)
+            .copied()
+            .flatten()
+            .or(self.view_nulls)
+            .unwrap_or(NullPlacement::Last)
+    }
+
+    pub fn row_count_state(&self) -> RowCount {
+        if self.query_is_active() {
+            return self
+                .query_store
+                .as_ref()
+                .map(|store| store.0.borrow().row_count())
+                .unwrap_or(RowCount::Exact(self.rows.len()));
+        }
+        self.incremental_store
+            .as_ref()
+            .map(|store| store.0.borrow().row_count())
+            .or_else(|| self.source_store.as_ref().map(TableStore::row_count))
+            .unwrap_or(RowCount::Exact(self.rows.len()))
+    }
+
+    pub fn ensure_source_indexed_through(&mut self, row: usize) -> anyhow::Result<RowCount> {
+        let loading_query_result = self.query_is_active() && self.query_store.is_some();
+        let shared = if loading_query_result {
+            self.query_store.clone()
+        } else {
+            self.incremental_store.clone()
+        };
+        let Some(shared) = shared else {
+            return Ok(RowCount::Exact(self.rows.len()));
+        };
+        let previous_len = self.rows.len();
+        let mut store = shared.0.borrow_mut();
+        let mut appended = Vec::new();
+        let progress_result = if row >= previous_len {
+            let max_rows = row.saturating_sub(previous_len).saturating_add(1);
+            let mut collect_row = |_: RowIndex, source_row: &crate::table::Row| {
+                appended.push(source_row.clone());
+                std::ops::ControlFlow::Continue(())
+            };
+            store
+                .index_and_scan_rows(
+                    RowIndex(row),
+                    crate::table::ScanRequest {
+                        start: RowIndex(previous_len),
+                        direction: crate::table::ScanDirection::Forward,
+                        max_rows,
+                    },
+                    &mut collect_row,
+                )
+                .map(|progress| progress.index)
+        } else {
+            store.ensure_indexed_through(RowIndex(row))
+        };
+        let progress = match progress_result {
+            Ok(progress) => progress,
+            Err(error) => {
+                drop(store);
+                self.source_status = Some(format!("Indexing failed: {error}"));
+                return Err(error);
+            }
+        };
+        drop(store);
+        self.apply_source_schema_delta(progress.schema_delta)?;
+        if self.query_is_active() && !loading_query_result {
+            return Ok(self.row_count_state());
+        }
+        for source_row in appended {
+            self.row_ids.push(source_row.id);
+            let mut cells = source_row.display_cells();
+            cells.resize(self.source_column_count(), String::new());
+            self.rows.push(cells);
+        }
+        self.visible_rows.extend(previous_len..self.rows.len());
+        if self.rows.len().saturating_sub(previous_len) >= 256 {
+            self.source_status = Some(format!("Indexed {} rows", self.rows.len()));
+        }
+        Ok(progress.row_count)
+    }
+
+    fn query_is_active(&self) -> bool {
+        self.active_query
+            .as_ref()
+            .is_some_and(|query| !query.filters.is_empty() || !query.order_by.is_empty())
+    }
+
+    pub fn take_source_status(&mut self) -> Option<String> {
+        self.source_status.take()
+    }
+
+    pub fn progressive_search(
+        &mut self,
+        query: &str,
+        direction: crate::ops::search::SearchDirection,
+    ) -> Option<Position> {
+        let matcher = CaseInsensitiveQuery::new(query)?;
+        let start = self.cursor;
+        match direction {
+            crate::ops::search::SearchDirection::Forward => {
+                let mut position = self.next_search_position(start)?;
+                loop {
+                    if let Some(value) = self.search_value_at(position) {
+                        if matcher.matches(&value) {
+                            return Some(position);
+                        }
+                        position = self.next_search_position(position)?;
+                        continue;
+                    }
+                    let previous = self.rows.len();
+                    let _ = self.ensure_source_indexed_through(previous.saturating_add(255));
+                    if self.rows.len() == previous {
+                        break;
+                    }
+                }
+                let mut position = Position::default();
+                while position != start {
+                    if self
+                        .search_value_at(position)
+                        .is_some_and(|value| matcher.matches(&value))
+                    {
+                        return Some(position);
+                    }
+                    position = self.next_search_position(position)?;
+                }
+                None
+            }
+            crate::ops::search::SearchDirection::Reverse => {
+                let mut position = self.previous_search_position(start);
+                while let Some(candidate) = position {
+                    if self
+                        .search_value_at(candidate)
+                        .is_some_and(|value| matcher.matches(&value))
+                    {
+                        return Some(candidate);
+                    }
+                    position = self.previous_search_position(candidate);
+                }
+                while !matches!(self.row_count_state(), RowCount::Exact(_)) {
+                    let previous = self.rows.len();
+                    let _ = self.ensure_source_indexed_through(previous.saturating_add(255));
+                    if self.rows.len() == previous {
+                        break;
+                    }
+                }
+                let mut position = self.last_search_position();
+                while let Some(candidate) = position {
+                    if candidate == start {
+                        break;
+                    }
+                    if self
+                        .search_value_at(candidate)
+                        .is_some_and(|value| matcher.matches(&value))
+                    {
+                        return Some(candidate);
+                    }
+                    position = self.previous_search_position(candidate);
+                }
+                None
+            }
+        }
+    }
+
+    pub fn progressive_skip_to_change(
+        &mut self,
+        axis: crate::ops::skip::Axis,
+        direction: crate::ops::skip::Direction,
+        count: usize,
+    ) -> Position {
+        let mut position = self.cursor;
+        for _ in 0..count.max(1) {
+            let Some(start_value) = self.search_value_at(position) else {
+                break;
+            };
+            let mut candidate = position;
+            loop {
+                candidate = match (axis, direction) {
+                    (crate::ops::skip::Axis::Row, crate::ops::skip::Direction::Forward) => {
+                        let next = candidate.row.saturating_add(1);
+                        let _ = self.ensure_source_indexed_through(next);
+                        Position {
+                            row: next,
+                            column: candidate.column,
+                        }
+                    }
+                    (crate::ops::skip::Axis::Row, crate::ops::skip::Direction::Backward) => {
+                        let Some(row) = candidate.row.checked_sub(1) else {
+                            break;
+                        };
+                        Position {
+                            row,
+                            column: candidate.column,
+                        }
+                    }
+                    (crate::ops::skip::Axis::Column, crate::ops::skip::Direction::Forward) => {
+                        Position {
+                            row: candidate.row,
+                            column: candidate.column.saturating_add(1),
+                        }
+                    }
+                    (crate::ops::skip::Axis::Column, crate::ops::skip::Direction::Backward) => {
+                        let Some(column) = candidate.column.checked_sub(1) else {
+                            break;
+                        };
+                        Position {
+                            row: candidate.row,
+                            column,
+                        }
+                    }
+                };
+                let Some(value) = self.search_value_at(candidate) else {
+                    break;
+                };
+                if value != start_value {
+                    position = candidate;
+                    break;
+                }
+            }
+        }
+        position
+    }
+
+    fn search_value_at(&self, position: Position) -> Option<String> {
+        let row_index = *self.visible_rows.get(position.row)?;
+        let row = self.rows.get(row_index)?;
+        let source_column = self.source_column_for_visible(position.column)?;
+        Some(self.render_source_cell(source_column, row.get(source_column).map(String::as_str)))
+    }
+
+    fn next_search_position(&self, position: Position) -> Option<Position> {
+        if position.column + 1 < self.column_count() {
+            Some(Position {
+                row: position.row,
+                column: position.column + 1,
+            })
+        } else {
+            Some(Position {
+                row: position.row.checked_add(1)?,
+                column: 0,
+            })
+        }
+    }
+
+    fn previous_search_position(&self, position: Position) -> Option<Position> {
+        if position.column > 0 {
+            Some(Position {
+                row: position.row,
+                column: position.column - 1,
+            })
+        } else {
+            let row = position.row.checked_sub(1)?;
+            Some(Position {
+                row,
+                column: self.column_count().saturating_sub(1),
+            })
+        }
+    }
+
+    fn last_search_position(&self) -> Option<Position> {
+        (!self.rows.is_empty() && self.column_count() > 0).then_some(Position {
+            row: self.rows.len() - 1,
+            column: self.column_count() - 1,
+        })
+    }
+
+    fn apply_source_schema_delta(
+        &mut self,
+        delta: crate::table::SchemaDelta,
+    ) -> anyhow::Result<()> {
+        if delta.is_empty() {
+            return Ok(());
+        }
+        let completed = delta.completed;
+        let old_count = self.source_column_count();
+        let Some(definition) = self.table_definition.as_mut() else {
+            return Ok(());
+        };
+        definition.apply_delta(delta)?;
+        let new_count = definition.columns.len();
+        self.header = Some(
+            definition
+                .columns
+                .iter()
+                .map(|column| column.display_name.clone())
+                .collect(),
+        );
+        for row in &mut self.rows {
+            row.resize(new_count, String::new());
+        }
+        self.column_alignment_overrides.resize(new_count, None);
+        self.column_label_overrides.resize(new_count, None);
+        self.column_nulls.resize(new_count, None);
+        self.column_display
+            .resize(new_count, ColumnDisplayMetadata::default());
+        self.column_color_rules.resize(new_count, Vec::new());
+        self.column_color_metadata
+            .resize(new_count, ColumnColorMetadata::default());
+        self.columns = Columns::infer(self.header.as_deref(), &self.rows);
+        self.computed_column_widths_cache.clear();
+        #[cfg(feature = "saved-views")]
+        {
+            let mut resolved = crate::saved_views::ResolvedColumns {
+                columns: vec![None; new_count],
+                pending: BTreeMap::new(),
+                warnings: Vec::new(),
+            };
+            for index in old_count..new_count {
+                let key = self
+                    .table_definition
+                    .as_ref()
+                    .and_then(|definition| definition.columns.get(index))
+                    .and_then(|column| match &column.source_identity {
+                        crate::table::ColumnSourceIdentity::JsonPointer(pointer) => {
+                            Some(pointer.as_str().to_owned())
+                        }
+                        _ => None,
+                    });
+                let Some(key) = key else { continue };
+                if let Some(column_view) = self.pending_saved_columns.remove(&key) {
+                    resolved.columns[index] = Some(crate::saved_views::ResolvedColumnView {
+                        column_index: index,
+                        source_key: key,
+                        view: column_view,
+                    });
+                }
+            }
+            if resolved.columns.iter().any(Option::is_some) {
+                let locale = self.saved_column_locale.clone();
+                self.apply_saved_columns(&resolved, locale.as_deref());
+            }
+            if completed && !self.pending_saved_columns.is_empty() {
+                self.source_status = Some(format!(
+                    "Saved view columns not found: {}",
+                    self.pending_saved_columns
+                        .keys()
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+                self.pending_saved_columns.clear();
+            }
+            self.apply_pending_saved_operations(completed);
+        }
+        Ok(())
     }
 
     pub fn with_column_width_mode(mut self, mode: ColumnWidthMode) -> Self {
@@ -738,6 +1281,20 @@ impl TableView {
         self.viewport.height = height.max(1);
         self.viewport.width = width.max(1);
         self.keep_cursor_visible();
+        let last_visible_row = self
+            .viewport
+            .origin
+            .row
+            .saturating_add(self.viewport.height.saturating_sub(1));
+        let _ = self.ensure_source_indexed_through(last_visible_row);
+    }
+
+    pub fn set_terminal_width(&mut self, width: usize) {
+        let width = width.max(1);
+        if self.terminal_width != width {
+            self.terminal_width = width;
+            self.computed_column_widths_cache.clear();
+        }
     }
 
     pub fn toggle_header(&mut self) {
@@ -747,6 +1304,7 @@ impl TableView {
     }
 
     pub fn goto(&mut self, row: usize, column: usize) {
+        let _ = self.ensure_source_indexed_through(row);
         self.cursor.row = row.min(self.visible_rows.len().saturating_sub(1));
         self.cursor.column = column.min(self.column_count().saturating_sub(1));
         self.keep_cursor_visible();
@@ -770,6 +1328,7 @@ impl TableView {
     }
 
     pub fn goto_bottom(&mut self) {
+        let _ = self.ensure_source_indexed_through(usize::MAX);
         self.goto(
             self.visible_rows.len().saturating_sub(1),
             self.cursor.column,
@@ -786,9 +1345,44 @@ impl TableView {
 
     pub fn set_mark(&mut self) {
         self.mark = Some(self.cursor);
+        self.mark_identity = self
+            .visible_rows
+            .get(self.cursor.row)
+            .and_then(|row| self.row_ids.get(*row))
+            .copied()
+            .zip(
+                self.source_column_for_visible(self.cursor.column)
+                    .and_then(|column| {
+                        self.table_definition
+                            .as_ref()
+                            .and_then(|definition| definition.columns.get(column))
+                            .map(|column| column.id)
+                    }),
+            );
     }
 
     pub fn goto_mark(&mut self) {
+        if let Some((row_id, column_id)) = self.mark_identity {
+            let row = self
+                .row_ids
+                .iter()
+                .position(|candidate| *candidate == row_id);
+            let column = self
+                .table_definition
+                .as_ref()
+                .and_then(|definition| {
+                    definition
+                        .columns
+                        .iter()
+                        .position(|column| column.id == column_id)
+                })
+                .and_then(|source| self.visible_column_for_source(source));
+            if let (Some(row), Some(column)) = (row, column) {
+                self.goto(row, column);
+                self.mark = Some(self.cursor);
+            }
+            return;
+        }
         if let Some(mark) = self.mark {
             self.goto(mark.row, mark.column);
         }
@@ -823,8 +1417,7 @@ impl TableView {
         let mode = self.sort_mode_for_source(column, mode);
         self.activate_sort_key(column, mode, direction);
         self.computed_column_widths_cache.clear();
-        self.apply_active_sorts();
-        self.recompute_visible_rows();
+        self.apply_query_configuration();
         self.keep_cursor_visible();
     }
 
@@ -834,8 +1427,7 @@ impl TableView {
         };
         self.sort_keys.retain(|key| key.column != column);
         self.computed_column_widths_cache.clear();
-        self.apply_active_sorts();
-        self.recompute_visible_rows();
+        self.apply_query_configuration();
         self.keep_cursor_visible();
     }
 
@@ -845,7 +1437,10 @@ impl TableView {
 
     fn activate_sort_key(&mut self, column: usize, mode: SortMode, direction: SortDirection) {
         if self.sort_keys.first().is_some_and(|key| {
-            key.column == column && key.mode == mode && key.direction == direction
+            key.column == column
+                && key.mode == mode
+                && key.direction == direction
+                && key.nulls == self.resolved_null_placement(column)
         }) {
             self.sort_keys.remove(0);
             return;
@@ -858,12 +1453,23 @@ impl TableView {
                 column,
                 mode,
                 direction,
+                nulls: self.resolved_null_placement(column),
             },
         );
         self.sort_keys.truncate(MAX_ACTIVE_SORT_KEYS);
     }
 
-    fn apply_active_sorts(&mut self) {
+    fn apply_query_configuration(&mut self) -> bool {
+        match self.refresh_query_result() {
+            QueryRefresh::Applied => return true,
+            QueryRefresh::Failed => {
+                self.filters = self.committed_filters.clone();
+                self.sort_keys = self.committed_sort_keys.clone();
+                return false;
+            }
+            QueryRefresh::NotStoreBacked => {}
+        }
+
         let specs = self
             .sort_keys
             .iter()
@@ -875,6 +1481,245 @@ impl TableView {
             })
             .collect::<Vec<_>>();
         sort_rows_by_specs(&mut self.rows, &specs);
+        self.visible_rows = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter_map(|(row_idx, row)| self.row_passes_filters(row).then_some(row_idx))
+            .collect();
+        self.committed_filters = self.filters.clone();
+        self.committed_sort_keys = self.sort_keys.clone();
+        self.keep_cursor_visible();
+        true
+    }
+
+    fn refresh_query_result(&mut self) -> QueryRefresh {
+        let Some(definition) = self.table_definition.clone() else {
+            return QueryRefresh::NotStoreBacked;
+        };
+        let selected_id = self
+            .visible_rows
+            .get(self.cursor.row)
+            .and_then(|index| self.row_ids.get(*index))
+            .copied();
+        let query = crate::table::TableQuery {
+            generation: definition.generation,
+            filters: self
+                .filters
+                .iter()
+                .filter_map(|filter| {
+                    let column = definition.columns.get(filter.column)?.id;
+                    let mode = match filter.mode {
+                        FilterMode::In => crate::table::FilterMode::In,
+                        FilterMode::Out => crate::table::FilterMode::Out,
+                    };
+                    let predicate = match &filter.condition {
+                        FilterCondition::Text(value) => crate::table::FilterPredicate::Text {
+                            value: value.clone(),
+                            domain: crate::table::ValueDomain::RawOrRendered,
+                        },
+                        FilterCondition::Regex(regex) => crate::table::FilterPredicate::Regex {
+                            pattern: regex.as_str().to_owned(),
+                            domain: crate::table::ValueDomain::RawOrRendered,
+                        },
+                        FilterCondition::Numeric { operator, operand } => {
+                            crate::table::FilterPredicate::Numeric {
+                                operator: match operator {
+                                    crate::ops::filter::NumericOperator::LessThan => {
+                                        crate::table::NumericOperator::LessThan
+                                    }
+                                    crate::ops::filter::NumericOperator::LessThanOrEqual => {
+                                        crate::table::NumericOperator::LessThanOrEqual
+                                    }
+                                    crate::ops::filter::NumericOperator::GreaterThan => {
+                                        crate::table::NumericOperator::GreaterThan
+                                    }
+                                    crate::ops::filter::NumericOperator::GreaterThanOrEqual => {
+                                        crate::table::NumericOperator::GreaterThanOrEqual
+                                    }
+                                    crate::ops::filter::NumericOperator::Equal => {
+                                        crate::table::NumericOperator::Equal
+                                    }
+                                },
+                                operand: *operand,
+                            }
+                        }
+                    };
+                    Some(crate::table::FilterSpec {
+                        column,
+                        mode,
+                        predicate,
+                    })
+                })
+                .collect(),
+            order_by: self
+                .sort_keys
+                .iter()
+                .filter_map(|key| {
+                    Some(crate::table::SortSpec {
+                        column: definition.columns.get(key.column)?.id,
+                        mode: table_sort_mode(key.mode),
+                        direction: match key.direction {
+                            SortDirection::Ascending => crate::table::SortDirection::Ascending,
+                            SortDirection::Descending => crate::table::SortDirection::Descending,
+                        },
+                        nulls: key.nulls,
+                    })
+                })
+                .collect(),
+        };
+
+        if let Err(error) = crate::table::validate_query(&definition, &query) {
+            self.source_status = Some(format!("Query validation failed: {error}"));
+            return QueryRefresh::Failed;
+        }
+
+        if query.filters.is_empty() && query.order_by.is_empty() {
+            let base_rows = self.source_store.as_ref().map(|base| {
+                (
+                    base.rows()
+                        .iter()
+                        .map(crate::table::Row::display_cells)
+                        .collect::<Vec<_>>(),
+                    base.rows().iter().map(|row| row.id).collect::<Vec<_>>(),
+                )
+            });
+            let cached_rows = self
+                .base_cached_rows
+                .clone()
+                .zip(self.base_cached_row_ids.clone());
+            if let Some((rows, row_ids)) = base_rows.or(cached_rows) {
+                self.rows = rows;
+                self.row_ids = row_ids;
+            }
+            self.query_store = None;
+            self.base_cached_rows = None;
+            self.base_cached_row_ids = None;
+            self.visible_rows = (0..self.rows.len()).collect();
+            self.active_query = Some(query);
+            self.committed_filters = self.filters.clone();
+            self.committed_sort_keys = self.sort_keys.clone();
+            self.restore_selected_row(selected_id);
+            return QueryRefresh::Applied;
+        }
+
+        let Some(shared) = self.incremental_store.clone() else {
+            return QueryRefresh::NotStoreBacked;
+        };
+        let execution = {
+            let mut store = shared.0.borrow_mut();
+            store.try_execute_query(&query)
+        };
+
+        match execution {
+            Ok(crate::table::QueryExecution::Executed(mut result)) => {
+                if result.generation() != definition.generation {
+                    self.source_status = Some(
+                        "Query execution failed: result belongs to another source generation"
+                            .to_owned(),
+                    );
+                    return QueryRefresh::Failed;
+                }
+                let max_rows = self.viewport.height.max(1);
+                let mut delivered = Vec::new();
+                let mut collect = |_: RowIndex, row: &crate::table::Row| {
+                    delivered.push(row.clone());
+                    std::ops::ControlFlow::Continue(())
+                };
+                let load = result.index_and_scan_rows(
+                    RowIndex(max_rows.saturating_sub(1)),
+                    crate::table::ScanRequest {
+                        start: RowIndex(0),
+                        direction: crate::table::ScanDirection::Forward,
+                        max_rows,
+                    },
+                    &mut collect,
+                );
+                if let Err(error) = load {
+                    self.source_status = Some(format!("Query result loading failed: {error}"));
+                    return QueryRefresh::Failed;
+                }
+                self.cache_base_rows_before_first_query();
+                self.rows = delivered
+                    .iter()
+                    .map(crate::table::Row::display_cells)
+                    .collect();
+                self.row_ids = delivered.iter().map(|row| row.id).collect();
+                self.visible_rows = (0..self.rows.len()).collect();
+                self.query_store = Some(SharedTableStore(Rc::new(RefCell::new(result))));
+            }
+            Ok(crate::table::QueryExecution::Unsupported) => {
+                let base = if let Some(base) = self.source_store.clone() {
+                    base
+                } else {
+                    self.source_status = Some("Materializing source for complete query".to_owned());
+                    match shared.0.borrow_mut().materialize() {
+                        Ok(base) => base,
+                        Err(error) => {
+                            self.source_status = Some(format!(
+                                "Materialization failed; prior view retained: {error}"
+                            ));
+                            return QueryRefresh::Failed;
+                        }
+                    }
+                };
+                let result = match crate::table::execute_local_query(
+                    &base,
+                    &definition,
+                    &query,
+                    &|_, value| value.display().into_owned(),
+                ) {
+                    Ok(result) => result,
+                    Err(error) => {
+                        self.source_status = Some(format!(
+                            "Query execution failed; prior view retained: {error}"
+                        ));
+                        return QueryRefresh::Failed;
+                    }
+                };
+                self.source_store = Some(base);
+                self.rows = result
+                    .rows()
+                    .iter()
+                    .map(crate::table::Row::display_cells)
+                    .collect();
+                self.row_ids = result.rows().iter().map(|row| row.id).collect();
+                self.visible_rows = (0..self.rows.len()).collect();
+                self.query_store = None;
+            }
+            Err(error) => {
+                self.source_status = Some(format!(
+                    "Query execution failed; prior view retained: {error}"
+                ));
+                return QueryRefresh::Failed;
+            }
+        }
+
+        self.active_query = Some(query);
+        self.committed_filters = self.filters.clone();
+        self.committed_sort_keys = self.sort_keys.clone();
+        self.restore_selected_row(selected_id);
+        QueryRefresh::Applied
+    }
+
+    fn cache_base_rows_before_first_query(&mut self) {
+        if !self.query_is_active() && self.base_cached_rows.is_none() {
+            self.base_cached_rows = Some(self.rows.clone());
+            self.base_cached_row_ids = Some(self.row_ids.clone());
+        }
+    }
+
+    fn restore_selected_row(&mut self, selected_id: Option<crate::table::RowId>) {
+        if let Some(selected_id) = selected_id {
+            if let Some(position) = self.row_ids.iter().position(|id| *id == selected_id) {
+                self.cursor.row = position;
+            }
+        }
+        self.cursor.row = self.cursor.row.min(self.rows.len().saturating_sub(1));
+    }
+
+    pub fn active_table_query(&self) -> Option<&crate::table::TableQuery> {
+        self.active_query.as_ref()
     }
 
     fn sort_mode_for_source(&self, source_column: usize, requested: SortMode) -> SortMode {
@@ -927,7 +1772,7 @@ impl TableView {
             condition,
         ));
         self.computed_column_widths_cache.clear();
-        self.recompute_visible_rows();
+        self.apply_query_configuration();
         Ok(())
     }
 
@@ -936,7 +1781,7 @@ impl TableView {
             self.filters.retain(|filter| filter.column != source_column);
         }
         self.computed_column_widths_cache.clear();
-        self.recompute_visible_rows();
+        self.apply_query_configuration();
     }
 
     pub fn set_column_gap(&mut self, gap: usize) {
@@ -952,8 +1797,21 @@ impl TableView {
     pub fn set_column_width_mode(&mut self, mode: ColumnWidthMode) {
         self.column_width_mode = mode;
         self.column_widths.clear();
+        self.sampled_column_widths.clear();
         self.computed_column_widths_cache.clear();
         self.column_width_modified.clear();
+        if mode == ColumnWidthMode::Max {
+            match self.exact_reduction_profiles() {
+                Ok(Some(profiles)) => {
+                    self.sampled_column_widths = profiles
+                        .into_iter()
+                        .map(|profile| profile.max_width.clamp(1, 250))
+                        .collect();
+                }
+                Ok(None) => {}
+                Err(error) => self.source_status = Some(format!("Profiling failed: {error}")),
+            }
+        }
     }
 
     pub fn toggle_variable_column_width_mode(&mut self) {
@@ -962,6 +1820,7 @@ impl TableView {
             ColumnWidthMode::Max | ColumnWidthMode::Fixed(_) => ColumnWidthMode::Mode,
         };
         self.column_widths.clear();
+        self.sampled_column_widths.clear();
         self.computed_column_widths_cache.clear();
         self.column_width_modified.clear();
     }
@@ -1002,23 +1861,45 @@ impl TableView {
         self.column_width_modified = (0..self.source_column_count()).collect();
     }
 
-    pub fn adjust_current_column_width(&mut self, delta: isize) {
-        self.ensure_custom_column_widths();
+    pub fn adjust_current_column_width(&mut self, steps: isize) {
+        if steps == 0 {
+            return;
+        }
         let Some(source_column) = self.source_column_for_visible(self.cursor.column) else {
             return;
         };
+        let max_width = self.cached_rendered_value_width(source_column);
+        self.ensure_custom_column_widths();
         if let Some(width) = self.column_widths.get_mut(source_column) {
-            *width = width.saturating_add_signed(delta).max(1);
+            for _ in 0..steps.unsigned_abs() {
+                let adjustment = (*width / 5).max(1);
+                *width = if steps.is_positive() {
+                    if *width < max_width {
+                        width.saturating_add(adjustment).min(max_width)
+                    } else {
+                        *width
+                    }
+                } else {
+                    width.saturating_sub(adjustment).max(1)
+                };
+            }
             self.column_width_modified.insert(source_column);
         }
     }
 
     pub fn effective_column_widths(&self) -> Vec<usize> {
-        let source_widths = if self.column_widths.len() == self.source_column_count() {
+        let mut source_widths = if self.column_widths.len() == self.source_column_count() {
             self.column_widths.clone()
+        } else if self.sampled_column_widths.len() == self.source_column_count() {
+            self.sampled_column_widths.clone()
         } else {
             self.computed_column_widths(self.column_width_mode)
         };
+        if self.column_widths.len() != self.source_column_count()
+            && !matches!(self.column_width_mode, ColumnWidthMode::Fixed(_))
+        {
+            self.cap_automatic_widths(&mut source_widths);
+        }
         self.visible_source_columns()
             .into_iter()
             .map(|source_column| source_widths.get(source_column).copied().unwrap_or(1))
@@ -1033,8 +1914,27 @@ impl TableView {
                 .map(|source_column| source_widths.get(source_column).copied().unwrap_or(1))
                 .collect();
         }
+        if matches!(self.column_width_mode, ColumnWidthMode::Fixed(_)) {
+            return self.effective_column_widths();
+        }
+        if self.sampled_column_widths.len() != self.source_column_count() {
+            let observed = self.computed_column_widths(self.column_width_mode);
+            if self.sampled_column_widths.is_empty() {
+                self.sampled_column_widths = observed;
+            } else {
+                self.sampled_column_widths
+                    .truncate(self.source_column_count());
+                let sampled_len = self.sampled_column_widths.len();
+                self.sampled_column_widths
+                    .extend(observed.into_iter().skip(sampled_len));
+            }
+        }
         if self.computed_column_widths_cache.len() != self.source_column_count() {
-            self.computed_column_widths_cache = self.computed_column_widths(self.column_width_mode);
+            self.computed_column_widths_cache = self.sampled_column_widths.clone();
+            let cap = self.automatic_column_width_cap();
+            for width in &mut self.computed_column_widths_cache {
+                *width = (*width).min(cap);
+            }
         }
         let source_widths = &self.computed_column_widths_cache;
         self.visible_source_columns_iter()
@@ -1111,7 +2011,12 @@ impl TableView {
         Some(ColumnInfo {
             visible_column,
             source_column,
-            name: self.source_column_name(source_column),
+            name: self
+                .header
+                .as_ref()
+                .and_then(|header| header.get(source_column))
+                .cloned()
+                .unwrap_or_else(|| format!("Column {}", source_column + 1)),
             visible: self.source_column_visible(source_column),
             alignment: self
                 .column_alignment_overrides
@@ -1121,6 +2026,26 @@ impl TableView {
             column_type: column_type_choice(display.column_type),
             format: column_format_choice(display.format),
             sort,
+            nulls: match self.column_nulls.get(source_column).copied().flatten() {
+                None => ColumnNullPlacementChoice::Inherited,
+                Some(NullPlacement::First) => ColumnNullPlacementChoice::First,
+                Some(NullPlacement::Last) => ColumnNullPlacementChoice::Last,
+            },
+            canonical_source: self
+                .table_definition
+                .as_ref()
+                .and_then(|definition| definition.columns.get(source_column))
+                .and_then(|column| match &column.source_identity {
+                    crate::table::ColumnSourceIdentity::JsonPointer(pointer) => {
+                        Some(pointer.as_str().to_owned())
+                    }
+                    _ => None,
+                }),
+            source_type: self
+                .table_definition
+                .as_ref()
+                .and_then(|definition| definition.columns.get(source_column))
+                .map(|column| format!("{:?}", column.source_type)),
             filters,
         })
     }
@@ -1143,6 +2068,13 @@ impl TableView {
             display.column_type = column_type_metadata_from_choice(update.column_type);
             display.format = display_format_metadata_from_choice(update.format);
             display.mask = None;
+        }
+        if let Some(slot) = self.column_nulls.get_mut(source_column) {
+            *slot = match update.nulls {
+                ColumnNullPlacementChoice::Inherited => None,
+                ColumnNullPlacementChoice::First => Some(NullPlacement::First),
+                ColumnNullPlacementChoice::Last => Some(NullPlacement::Last),
+            };
         }
         self.column_metadata_modified.insert(source_column);
         self.rebuild_column_color_metadata_for(source_column);
@@ -1167,48 +2099,141 @@ impl TableView {
             }
         }
 
+        self.sampled_column_widths.clear();
         self.computed_column_widths_cache.clear();
-        self.apply_active_sorts();
-        self.recompute_visible_rows();
+        self.apply_query_configuration();
         self.keep_cursor_visible();
     }
 
     pub fn restore_view_settings_from(&mut self, previous: &TableView) {
+        let source_column_count = self.source_column_count();
+        let previous_column_count = previous.source_column_count();
+        let remap = (0..previous_column_count)
+            .map(|old_index| {
+                let old_identity = previous
+                    .table_definition
+                    .as_ref()
+                    .and_then(|definition| definition.columns.get(old_index))
+                    .map(|column| &column.source_identity);
+                old_identity
+                    .and_then(|identity| {
+                        self.table_definition.as_ref().and_then(|definition| {
+                            definition
+                                .columns
+                                .iter()
+                                .position(|column| &column.source_identity == identity)
+                        })
+                    })
+                    .or_else(|| (old_index < source_column_count).then_some(old_index))
+            })
+            .collect::<Vec<_>>();
+        let previous_cursor_source = previous.source_column_for_visible(previous.cursor.column);
+
         self.column_width_mode = previous.column_width_mode;
         self.column_gap = previous.column_gap;
-        self.column_widths = previous.column_widths.clone();
+        self.column_widths = vec![1; source_column_count];
+        for (old_index, width) in previous.column_widths.iter().copied().enumerate() {
+            if let Some(new_index) = remap.get(old_index).copied().flatten() {
+                self.column_widths[new_index] = width;
+            }
+        }
+        if previous.column_widths.is_empty() {
+            self.column_widths.clear();
+        }
+        self.sampled_column_widths.clear();
         self.computed_column_widths_cache.clear();
-        self.column_width_modified = previous.column_width_modified.clone();
-        self.hidden_columns = previous.hidden_columns.clone();
-        let source_column_count = self.source_column_count();
-        self.hidden_columns
-            .retain(|source_column| *source_column < source_column_count);
+        self.column_width_modified = previous
+            .column_width_modified
+            .iter()
+            .filter_map(|index| remap.get(*index).copied().flatten())
+            .collect();
+        self.hidden_columns = previous
+            .hidden_columns
+            .iter()
+            .filter_map(|index| remap.get(*index).copied().flatten())
+            .collect();
         if self.hidden_columns.len() >= source_column_count {
             self.hidden_columns.clear();
         }
-        self.column_alignment_overrides = previous.column_alignment_overrides.clone();
-        self.column_alignment_overrides
-            .resize(source_column_count, None);
-        self.column_display = previous.column_display.clone();
-        self.column_display
-            .resize(source_column_count, ColumnDisplayMetadata::default());
-        self.column_color_rules = previous.column_color_rules.clone();
-        self.column_color_rules
-            .resize(source_column_count, Vec::new());
+        self.column_alignment_overrides = vec![None; source_column_count];
+        self.column_label_overrides = vec![None; source_column_count];
+        self.view_nulls = previous.view_nulls;
+        self.column_nulls = vec![None; source_column_count];
+        self.column_display = vec![ColumnDisplayMetadata::default(); source_column_count];
+        self.column_color_rules = vec![Vec::new(); source_column_count];
+        for (old_index, new_index) in remap
+            .iter()
+            .enumerate()
+            .filter_map(|(old, new)| new.map(|new| (old, new)))
+        {
+            self.column_alignment_overrides[new_index] = previous
+                .column_alignment_overrides
+                .get(old_index)
+                .copied()
+                .flatten();
+            self.column_label_overrides[new_index] = previous
+                .column_label_overrides
+                .get(old_index)
+                .cloned()
+                .flatten();
+            self.column_nulls[new_index] = previous.column_nulls.get(old_index).copied().flatten();
+            self.column_display[new_index] = previous
+                .column_display
+                .get(old_index)
+                .copied()
+                .unwrap_or_default();
+            self.column_color_rules[new_index] = previous
+                .column_color_rules
+                .get(old_index)
+                .cloned()
+                .unwrap_or_default();
+        }
         self.rebuild_column_color_metadata();
-        self.column_metadata_modified = previous.column_metadata_modified.clone();
-        self.column_metadata_modified
-            .retain(|source_column| *source_column < source_column_count);
+        self.column_metadata_modified = previous
+            .column_metadata_modified
+            .iter()
+            .filter_map(|index| remap.get(*index).copied().flatten())
+            .collect();
         self.sort_keys = previous
             .sort_keys
             .iter()
-            .copied()
-            .filter(|key| key.column < source_column_count)
+            .filter_map(|key| {
+                Some(ActiveSortKey {
+                    column: remap.get(key.column).copied().flatten()?,
+                    ..*key
+                })
+            })
             .collect();
-        self.mark = previous.mark;
-        self.filters = previous.filters.clone();
-        self.apply_active_sorts();
-        self.recompute_visible_rows();
+        if self.source_generation() == previous.source_generation() {
+            self.mark = previous.mark;
+            self.mark_identity = previous.mark_identity;
+        } else {
+            self.mark = None;
+            self.mark_identity = None;
+        }
+        self.filters = previous
+            .filters
+            .iter()
+            .filter_map(|filter| {
+                let mut filter = filter.clone();
+                filter.column = remap.get(filter.column).copied().flatten()?;
+                Some(filter)
+            })
+            .collect();
+        #[cfg(feature = "saved-views")]
+        {
+            self.pending_saved_columns = previous.pending_saved_columns.clone();
+            self.saved_column_locale = previous.saved_column_locale.clone();
+            self.pending_saved_sorts = previous.pending_saved_sorts.clone();
+            self.pending_saved_filters = previous.pending_saved_filters.clone();
+        }
+        self.apply_query_configuration();
+        if let Some(new_source_column) = previous_cursor_source
+            .and_then(|old| remap.get(old).copied().flatten())
+            .and_then(|source| self.visible_column_for_source(source))
+        {
+            self.cursor.column = new_source_column;
+        }
     }
 
     pub fn hide_current_column(&mut self) {
@@ -1304,6 +2329,30 @@ impl TableView {
         resolved: &crate::saved_views::ResolvedColumns,
         locale: Option<&str>,
     ) {
+        self.pending_saved_columns.extend(resolved.pending.clone());
+        self.saved_column_locale = locale.map(ToOwned::to_owned);
+        for (source_column, resolved_column) in resolved.columns.iter().enumerate() {
+            let Some(label) = resolved_column
+                .as_ref()
+                .and_then(|resolved| resolved.view.label.as_ref())
+            else {
+                continue;
+            };
+            if let Some(header) = self.header.as_mut() {
+                if let Some(name) = header.get_mut(source_column) {
+                    *name = label.clone();
+                }
+            }
+            if let Some(definition) = self.table_definition.as_mut() {
+                if let Some(column) = definition.columns.get_mut(source_column) {
+                    column.display_name = label.clone();
+                }
+            }
+            if let Some(slot) = self.column_label_overrides.get_mut(source_column) {
+                *slot = Some(label.clone());
+            }
+            self.column_metadata_modified.insert(source_column);
+        }
         self.ensure_custom_column_widths();
         let header_widths = self.computed_header_widths();
         let content_widths = self.computed_content_widths();
@@ -1316,6 +2365,9 @@ impl TableView {
                 continue;
             };
             let column_view = &resolved_column.view;
+            if let Some(slot) = self.column_nulls.get_mut(source_column) {
+                *slot = column_view.nulls;
+            }
             let inferred_column_type = if self.columns.is_numeric(ColumnIndex::new(source_column)) {
                 ColumnTypeMetadata::Float
             } else {
@@ -1349,7 +2401,7 @@ impl TableView {
                 }
             }
             let colors = column_view.colors.clone();
-            let color_metadata = self.build_column_color_metadata(source_column, &colors);
+            let color_metadata = self.build_column_color_metadata(source_column, &colors, None);
             if let Some(slot) = self.column_color_rules.get_mut(source_column) {
                 *slot = colors;
                 if !slot.is_empty() {
@@ -1423,8 +2475,120 @@ impl TableView {
             .take(MAX_ACTIVE_SORT_KEYS)
             .collect();
         self.computed_column_widths_cache.clear();
-        self.apply_active_sorts();
-        self.recompute_visible_rows();
+        self.apply_query_configuration();
+    }
+
+    #[cfg(feature = "saved-views")]
+    pub fn retain_pending_saved_operations(
+        &mut self,
+        all_sorts: Vec<crate::saved_views::SortKey>,
+        unresolved_filters: Vec<crate::saved_views::SavedFilter>,
+    ) {
+        self.pending_saved_sorts = all_sorts;
+        self.pending_saved_filters = unresolved_filters;
+    }
+
+    #[cfg(feature = "saved-views")]
+    fn apply_pending_saved_operations(&mut self, completed: bool) {
+        use crate::saved_views::{FilterAction, FilterKind as SavedFilterKind, SortKind};
+
+        let Some(definition) = self.table_definition.as_ref() else {
+            return;
+        };
+        let mut unresolved_sort = false;
+        let sort_keys = self
+            .pending_saved_sorts
+            .iter()
+            .filter_map(|sort| {
+                let Some(column) = crate::saved_views::resolve_structured_column_reference(
+                    definition,
+                    &sort.column,
+                ) else {
+                    unresolved_sort = true;
+                    return None;
+                };
+                Some(ActiveSortKey {
+                    column,
+                    mode: match sort.kind {
+                        SortKind::Lexical => SortMode::Lexical,
+                        SortKind::Natural => SortMode::Natural,
+                        SortKind::Numeric => SortMode::Numeric,
+                        SortKind::Type => self.type_sort_mode_for_source(column),
+                    },
+                    direction: match sort.direction {
+                        crate::saved_views::SortDirection::Asc => SortDirection::Ascending,
+                        crate::saved_views::SortDirection::Desc => SortDirection::Descending,
+                    },
+                    nulls: self.resolved_null_placement(column),
+                })
+            })
+            .collect::<Vec<_>>();
+        if !self.pending_saved_sorts.is_empty() {
+            self.apply_saved_sort_keys(sort_keys);
+        }
+
+        let pending_filters = std::mem::take(&mut self.pending_saved_filters);
+        let mut still_pending = Vec::new();
+        for filter in pending_filters {
+            let Some(column) = self.table_definition.as_ref().and_then(|definition| {
+                crate::saved_views::resolve_structured_column_reference(definition, &filter.column)
+            }) else {
+                still_pending.push(filter);
+                continue;
+            };
+            let mode = match filter.action {
+                FilterAction::In => FilterMode::In,
+                FilterAction::Out => FilterMode::Out,
+            };
+            let kind = match filter.kind {
+                SavedFilterKind::Text => FilterKind::Text,
+                SavedFilterKind::Regex => FilterKind::Regex,
+                SavedFilterKind::Numeric => FilterKind::Numeric,
+            };
+            if self
+                .apply_source_filter(column, mode, kind, filter.condition.clone())
+                .is_err()
+            {
+                still_pending.push(filter);
+            }
+        }
+        self.pending_saved_filters = still_pending;
+
+        if completed {
+            let mut missing = self
+                .pending_saved_filters
+                .iter()
+                .map(|filter| filter.column.clone())
+                .collect::<Vec<_>>();
+            if unresolved_sort {
+                missing.extend(
+                    self.pending_saved_sorts
+                        .iter()
+                        .filter(|sort| {
+                            self.table_definition.as_ref().is_none_or(|definition| {
+                                crate::saved_views::resolve_structured_column_reference(
+                                    definition,
+                                    &sort.column,
+                                )
+                                .is_none()
+                            })
+                        })
+                        .map(|sort| sort.column.clone()),
+                );
+            }
+            if !missing.is_empty() {
+                missing.sort();
+                missing.dedup();
+                self.source_status = Some(format!(
+                    "Saved view operations reference missing columns: {}",
+                    missing.join(", ")
+                ));
+            }
+            self.pending_saved_sorts.clear();
+            self.pending_saved_filters.clear();
+        } else if !unresolved_sort {
+            self.pending_saved_sorts.clear();
+        }
     }
 
     #[cfg(feature = "saved-views")]
@@ -1438,7 +2602,19 @@ impl TableView {
         if source_column >= self.source_column_count() {
             return Ok(());
         }
-        if kind == FilterKind::Numeric && !self.columns.is_numeric(ColumnIndex::new(source_column))
+        let typed_numeric = self
+            .table_definition
+            .as_ref()
+            .and_then(|definition| definition.columns.get(source_column))
+            .is_some_and(|column| {
+                matches!(
+                    column.source_type,
+                    crate::table::LogicalType::Integer | crate::table::LogicalType::Float
+                )
+            });
+        if kind == FilterKind::Numeric
+            && !typed_numeric
+            && !self.columns.is_numeric(ColumnIndex::new(source_column))
         {
             return Err(FilterParseError::NumericUnavailable);
         }
@@ -1455,7 +2631,7 @@ impl TableView {
             condition,
         ));
         self.computed_column_widths_cache.clear();
-        self.recompute_visible_rows();
+        self.apply_query_configuration();
         Ok(())
     }
 
@@ -1471,6 +2647,15 @@ impl TableView {
         if let Some(locale) = locale {
             yaml.push_str(&format!("locale: {}\n", yaml_scalar(locale)));
         }
+        if let Some(nulls) = self.view_nulls {
+            yaml.push_str(&format!(
+                "nulls: {}\n",
+                match nulls {
+                    NullPlacement::First => "first",
+                    NullPlacement::Last => "last",
+                }
+            ));
+        }
         yaml.push_str("filenames:\n");
         yaml.push_str(&format!("  - {}\n", yaml_scalar(input_filename)));
 
@@ -1484,6 +2669,10 @@ impl TableView {
                     .is_some_and(Option::is_some)
                 || self.column_metadata_modified.contains(&source_column)
                 || self
+                    .column_nulls
+                    .get(source_column)
+                    .is_some_and(Option::is_some)
+                || self
                     .column_color_rules
                     .get(source_column)
                     .is_some_and(|rules| !rules.is_empty());
@@ -1492,6 +2681,22 @@ impl TableView {
             }
             let key = self.source_column_name(source_column);
             let mut block = format!("  {}:\n", yaml_key(&key));
+            if let Some(label) = self
+                .column_label_overrides
+                .get(source_column)
+                .and_then(Option::as_ref)
+            {
+                block.push_str(&format!("    label: {}\n", yaml_scalar(label)));
+            }
+            if let Some(nulls) = self.column_nulls.get(source_column).copied().flatten() {
+                block.push_str(&format!(
+                    "    nulls: {}\n",
+                    match nulls {
+                        NullPlacement::First => "first",
+                        NullPlacement::Last => "last",
+                    }
+                ));
+            }
             if self.column_metadata_modified.contains(&source_column) {
                 let metadata = self
                     .column_display
@@ -1595,6 +2800,14 @@ impl TableView {
     }
 
     fn source_column_name(&self, source_column: usize) -> String {
+        if let Some(crate::table::ColumnSourceIdentity::JsonPointer(pointer)) = self
+            .table_definition
+            .as_ref()
+            .and_then(|definition| definition.columns.get(source_column))
+            .map(|column| &column.source_identity)
+        {
+            return pointer.as_str().to_owned();
+        }
         self.header
             .as_ref()
             .and_then(|header| header.get(source_column))
@@ -1626,9 +2839,24 @@ impl TableView {
 
     fn ensure_custom_column_widths(&mut self) {
         if self.column_widths.len() != self.source_column_count() {
-            self.column_widths = self.computed_column_widths(self.column_width_mode);
+            self.column_widths = self.effective_column_widths();
         }
         self.computed_column_widths_cache.clear();
+    }
+
+    fn automatic_column_width_cap(&self) -> usize {
+        if self.terminal_width == 0 {
+            usize::MAX
+        } else {
+            (self.terminal_width.saturating_mul(4) / 5).max(1)
+        }
+    }
+
+    fn cap_automatic_widths(&self, widths: &mut [usize]) {
+        let cap = self.automatic_column_width_cap();
+        for width in widths {
+            *width = (*width).min(cap);
+        }
     }
 
     fn computed_column_widths(&self, mode: ColumnWidthMode) -> Vec<usize> {
@@ -1682,14 +2910,16 @@ impl TableView {
             .collect()
     }
 
-    fn recompute_visible_rows(&mut self) {
-        self.visible_rows = self
-            .rows
+    fn cached_rendered_value_width(&self, source_column: usize) -> usize {
+        self.rows
             .iter()
-            .enumerate()
-            .filter_map(|(row_idx, row)| self.row_passes_filters(row).then_some(row_idx))
-            .collect();
-        self.keep_cursor_visible();
+            .map(|row| {
+                self.render_source_cell(source_column, row.get(source_column).map(String::as_str))
+            })
+            .map(|value| UnicodeWidthStr::width(value.as_str()))
+            .max()
+            .unwrap_or(1)
+            .max(1)
     }
 
     fn row_passes_filters(&self, row: &[String]) -> bool {
@@ -1798,6 +3028,7 @@ impl TableView {
     }
 
     fn rebuild_column_color_metadata(&mut self) {
+        let exact_profiles = self.exact_reduction_profiles().ok().flatten();
         self.column_color_metadata = (0..self.source_column_count())
             .map(|source_column| {
                 let rules = self
@@ -1805,19 +3036,30 @@ impl TableView {
                     .get(source_column)
                     .map(Vec::as_slice)
                     .unwrap_or_default();
-                self.build_column_color_metadata(source_column, rules)
+                self.build_column_color_metadata(
+                    source_column,
+                    rules,
+                    exact_profiles
+                        .as_ref()
+                        .and_then(|profiles| profiles.get(source_column)),
+                )
             })
             .collect();
     }
 
     fn rebuild_column_color_metadata_for(&mut self, source_column: usize) {
+        let exact_profile = self
+            .exact_reduction_profiles()
+            .ok()
+            .flatten()
+            .and_then(|profiles| profiles.get(source_column).cloned());
         let metadata = {
             let rules = self
                 .column_color_rules
                 .get(source_column)
                 .map(Vec::as_slice)
                 .unwrap_or_default();
-            self.build_column_color_metadata(source_column, rules)
+            self.build_column_color_metadata(source_column, rules, exact_profile.as_ref())
         };
         if let Some(slot) = self.column_color_metadata.get_mut(source_column) {
             *slot = metadata;
@@ -1828,17 +3070,35 @@ impl TableView {
         &self,
         source_column: usize,
         rules: &[ConditionalColorRule],
+        exact_profile: Option<&crate::table::ColumnReductionProfile>,
     ) -> ColumnColorMetadata {
         let numeric_min_max = rules
             .iter()
             .any(|rule| matches!(rule, ConditionalColorRule::AutoGradient { .. }))
-            .then(|| self.numeric_min_max(source_column))
+            .then(|| {
+                exact_profile
+                    .and_then(|profile| profile.numeric_min_max)
+                    .or_else(|| self.numeric_min_max(source_column))
+            })
             .flatten();
-        let identifier_indexes = rules
+        let identifier_indexes = if rules
             .iter()
             .any(|rule| matches!(rule, ConditionalColorRule::Identifiers { .. }))
-            .then(|| self.identifier_indexes(source_column))
-            .unwrap_or_default();
+        {
+            exact_profile
+                .map(|profile| {
+                    profile
+                        .identifiers
+                        .iter()
+                        .cloned()
+                        .enumerate()
+                        .map(|(index, value)| (value, index))
+                        .collect()
+                })
+                .unwrap_or_else(|| self.identifier_indexes(source_column))
+        } else {
+            BTreeMap::new()
+        };
         let identifier_color_refs = rules
             .iter()
             .enumerate()
@@ -1872,6 +3132,37 @@ impl TableView {
             identifier_color_refs,
             gradient_color_refs,
         }
+    }
+
+    fn exact_reduction_profiles(
+        &mut self,
+    ) -> anyhow::Result<Option<Vec<crate::table::ColumnReductionProfile>>> {
+        let shared = if self.query_is_active() {
+            self.query_store.clone()
+        } else {
+            self.incremental_store.clone()
+        };
+        let Some(shared) = shared else {
+            return Ok(None);
+        };
+
+        let progress = shared
+            .0
+            .borrow_mut()
+            .ensure_indexed_through(RowIndex(usize::MAX))?;
+        self.apply_source_schema_delta(progress.schema_delta)?;
+        let header = self.rendered_source_header();
+        let result = crate::table::reduce_column_profiles(
+            &mut **shared.0.borrow_mut(),
+            crate::table::ReductionScope::Exact,
+            header.as_deref(),
+        )?;
+        self.source_status = Some(format!(
+            "Profiled {} rows{}",
+            result.rows_scanned,
+            if result.complete { "" } else { " (partial)" }
+        ));
+        Ok(Some(result.value))
     }
 
     fn numeric_min_max(&self, source_column: usize) -> Option<(f64, f64)> {
@@ -2068,6 +3359,22 @@ fn display_format_metadata_name(format: DisplayFormatMetadata) -> &'static str {
     }
 }
 
+fn table_sort_mode(mode: SortMode) -> crate::table::SortMode {
+    match mode {
+        SortMode::Lexical => crate::table::SortMode::Lexical,
+        SortMode::Natural => crate::table::SortMode::Natural,
+        SortMode::Numeric => crate::table::SortMode::Numeric,
+        #[cfg(feature = "saved-views")]
+        SortMode::Date => crate::table::SortMode::Date,
+        #[cfg(feature = "saved-views")]
+        SortMode::SemVer => crate::table::SortMode::SemanticVersion,
+        #[cfg(feature = "saved-views")]
+        SortMode::Ip => crate::table::SortMode::Ip,
+        #[cfg(feature = "saved-views")]
+        SortMode::Boolean => crate::table::SortMode::Boolean,
+    }
+}
+
 #[cfg(feature = "saved-views")]
 fn sort_mode_name(mode: SortMode) -> &'static str {
     match mode {
@@ -2232,46 +3539,221 @@ pub fn column_widths(rows: &[Vec<String>], mode: ColumnWidthMode, gap: usize) ->
     }
 }
 
-fn mode_width(rows: &[Vec<String>], column: usize, gap: usize) -> usize {
-    let widths: Vec<usize> = rows
-        .iter()
+fn mode_width(rows: &[Vec<String>], column: usize, _gap: usize) -> usize {
+    rows.iter()
         .filter_map(|row| row.get(column))
         .map(|cell| UnicodeWidthStr::width(cell.as_str()))
-        .collect();
-    if widths.is_empty() {
-        return 1;
-    }
-
-    let mut counts = HashMap::<usize, usize>::new();
-    for width in &widths {
-        *counts.entry(*width).or_default() += 1;
-    }
-
-    let mode = counts
-        .into_iter()
-        .filter(|(width, _)| *width != 0)
-        .max_by_key(|(_, count)| *count)
-        .map(|(width, _)| width)
-        .unwrap_or(0);
-    let max_width = widths.into_iter().max().unwrap_or(1).max(1);
-    let diff = mode.abs_diff(max_width);
-    if diff > gap * 2 && diff * 10 > max_width {
-        mode.max(gap).max(1)
-    } else {
-        max_width.max(gap).max(1)
-    }
+        .max()
+        .unwrap_or(1)
+        .clamp(1, 250)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ingest::SourceAdapter;
     use crate::ops::filter::{FilterKind, FilterMode};
+    use crate::table::{
+        CellValue, ColumnDefinition, ColumnId, ColumnSourceIdentity, IndexProgress, LogicalType,
+        QueryExecution, RelationMetadata, Row, RowId, ScanDirection, ScanProgress, ScanRequest,
+        SchemaDelta, SchemaState, TypeOrigin,
+    };
 
     fn rows(values: &[&[&str]]) -> Vec<Vec<String>> {
         values
             .iter()
             .map(|row| row.iter().map(|cell| (*cell).to_owned()).collect())
             .collect()
+    }
+
+    #[derive(Clone)]
+    struct QueryTestStore {
+        generation: SourceGeneration,
+        rows: Vec<Row>,
+        indexed: usize,
+        query_rows: Option<Vec<Row>>,
+        fail_query: bool,
+        fail_materialize: bool,
+    }
+
+    impl QueryTestStore {
+        fn derived(generation: SourceGeneration, rows: Vec<Row>) -> Self {
+            Self {
+                generation,
+                rows,
+                indexed: 0,
+                query_rows: None,
+                fail_query: false,
+                fail_materialize: false,
+            }
+        }
+    }
+
+    impl TableStore for QueryTestStore {
+        fn generation(&self) -> SourceGeneration {
+            self.generation
+        }
+
+        fn row_count(&self) -> RowCount {
+            if self.indexed >= self.rows.len() {
+                RowCount::Exact(self.rows.len())
+            } else if self.indexed == 0 {
+                RowCount::Unknown
+            } else {
+                RowCount::AtLeast(self.indexed)
+            }
+        }
+
+        fn column_count(&self) -> usize {
+            1
+        }
+
+        fn row(&mut self, index: RowIndex) -> anyhow::Result<Option<Row>> {
+            self.ensure_indexed_through(index)?;
+            Ok(self.rows.get(index.0).cloned())
+        }
+
+        fn ensure_indexed_through(&mut self, index: RowIndex) -> anyhow::Result<IndexProgress> {
+            self.indexed = self
+                .indexed
+                .max(index.0.saturating_add(1).min(self.rows.len()));
+            Ok(IndexProgress {
+                row_count: self.row_count(),
+                schema_delta: SchemaDelta::default(),
+                bytes_scanned: self.indexed as u64,
+            })
+        }
+
+        fn scan_rows(
+            &mut self,
+            request: ScanRequest,
+            visitor: &mut dyn crate::table::RowVisitor,
+        ) -> anyhow::Result<ScanProgress> {
+            if request.max_rows == 0 {
+                return Ok(ScanProgress {
+                    visited: 0,
+                    next: Some(request.start),
+                    reached_end: false,
+                });
+            }
+            if request.direction == ScanDirection::Forward {
+                self.ensure_indexed_through(RowIndex(
+                    request
+                        .start
+                        .0
+                        .saturating_add(request.max_rows.saturating_sub(1)),
+                ))?;
+            }
+            let mut current = request.start.0;
+            let mut visited = 0;
+            while visited < request.max_rows {
+                let Some(row) = self.rows.get(current) else {
+                    break;
+                };
+                visited += 1;
+                if visitor.visit(RowIndex(current), row).is_break() {
+                    return Ok(ScanProgress {
+                        visited,
+                        next: None,
+                        reached_end: false,
+                    });
+                }
+                match request.direction {
+                    ScanDirection::Forward => current += 1,
+                    ScanDirection::Reverse if current > 0 => current -= 1,
+                    ScanDirection::Reverse => {
+                        return Ok(ScanProgress {
+                            visited,
+                            next: None,
+                            reached_end: true,
+                        });
+                    }
+                }
+            }
+            let reached_end = current >= self.rows.len();
+            Ok(ScanProgress {
+                visited,
+                next: (!reached_end).then_some(RowIndex(current)),
+                reached_end,
+            })
+        }
+
+        fn materialize(&mut self) -> anyhow::Result<InMemoryTable> {
+            if self.fail_materialize {
+                anyhow::bail!("injected materialization failure");
+            }
+            InMemoryTable::from_rows(self.generation, self.rows.clone())
+        }
+
+        fn try_execute_query(
+            &mut self,
+            _query: &crate::table::TableQuery,
+        ) -> anyhow::Result<QueryExecution> {
+            if self.fail_query {
+                anyhow::bail!("injected query failure");
+            }
+            Ok(match &self.query_rows {
+                Some(rows) => {
+                    QueryExecution::Executed(Box::new(Self::derived(self.generation, rows.clone())))
+                }
+                None => QueryExecution::Unsupported,
+            })
+        }
+    }
+
+    fn query_test_table(
+        values: &[&str],
+        query_values: Option<&[&str]>,
+        fail_query: bool,
+        fail_materialize: bool,
+    ) -> OpenedTable {
+        let generation = SourceGeneration::new();
+        let make_rows = |values: &[&str]| {
+            values
+                .iter()
+                .enumerate()
+                .map(|(ordinal, value)| {
+                    Row::new(
+                        RowId {
+                            generation,
+                            ordinal: ordinal as u64,
+                        },
+                        vec![CellValue::Text((*value).to_owned())],
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let source_rows = make_rows(values);
+        let query_rows = query_values.map(make_rows);
+        OpenedTable {
+            generation,
+            definition: TableDefinition {
+                generation,
+                columns: vec![ColumnDefinition {
+                    id: ColumnId {
+                        generation,
+                        ordinal: 0,
+                    },
+                    source_identity: ColumnSourceIdentity::Delimited {
+                        ordinal: 0,
+                        name: Some("value".to_owned()),
+                    },
+                    display_name: "value".to_owned(),
+                    source_type: LogicalType::Text,
+                    type_origin: TypeOrigin::Declared,
+                }],
+                schema_state: SchemaState::Complete,
+                relation: RelationMetadata::implicit("query-test", true),
+            },
+            store: Box::new(QueryTestStore {
+                generation,
+                rows: source_rows,
+                indexed: 0,
+                query_rows,
+                fail_query,
+                fail_materialize,
+            }),
+        }
     }
 
     #[test]
@@ -2290,6 +3772,66 @@ mod tests {
         let view = TableView::classify(rows(&[&["1", "2"], &["3", "4"]]), Viewport::new(10, 4));
         assert!(view.header().is_none());
         assert_eq!(view.rows(), rows(&[&["1", "2"], &["3", "4"]]));
+    }
+
+    #[test]
+    fn source_executed_query_result_remains_incremental_and_restores_cached_base() {
+        let opened = query_test_table(
+            &["keep-0", "keep-1", "drop"],
+            Some(&["keep-0", "keep-1"]),
+            false,
+            false,
+        );
+        let mut view = TableView::from_opened_table(opened, Viewport::new(1, 1)).expect("view");
+
+        view.apply_filter(0, FilterMode::In, FilterKind::Text, "keep".to_owned())
+            .expect("filter");
+
+        assert_eq!(view.rows(), rows(&[&["keep-0"]]));
+        assert_eq!(view.row_count_state(), RowCount::AtLeast(1));
+        view.goto_bottom();
+        assert_eq!(view.rows(), rows(&[&["keep-0"], &["keep-1"]]));
+        assert_eq!(view.row_count_state(), RowCount::Exact(2));
+
+        view.clear_filters_for_column(0);
+        assert_eq!(view.rows(), rows(&[&["keep-0"]]));
+        assert_eq!(view.row_count_state(), RowCount::AtLeast(1));
+        assert!(!view.query_is_active());
+    }
+
+    #[test]
+    fn query_and_materialization_failures_preserve_prior_view_and_configuration() {
+        for (fail_query, fail_materialize, expected) in [
+            (true, false, "injected query failure"),
+            (false, true, "injected materialization failure"),
+        ] {
+            let opened = query_test_table(&["b", "a"], None, fail_query, fail_materialize);
+            let mut view = TableView::from_opened_table(opened, Viewport::new(1, 1)).expect("view");
+            let prior_rows = view.rows.clone();
+            let prior_cursor = view.cursor;
+            let prior_viewport = view.viewport;
+            let prior_query = view.active_query.clone();
+
+            view.sort_current_column(SortMode::Lexical, SortDirection::Ascending);
+
+            assert_eq!(view.rows, prior_rows);
+            assert_eq!(view.cursor, prior_cursor);
+            assert_eq!(view.viewport, prior_viewport);
+            assert_eq!(view.active_query, prior_query);
+            assert!(view.sort_keys.is_empty());
+            assert!(view.filters.is_empty());
+            assert!(view.take_source_status().unwrap().contains(expected));
+
+            view.apply_filter(0, FilterMode::In, FilterKind::Text, "a".to_owned())
+                .expect("filter input");
+            assert_eq!(view.rows, prior_rows);
+            assert_eq!(view.cursor, prior_cursor);
+            assert_eq!(view.viewport, prior_viewport);
+            assert_eq!(view.active_query, prior_query);
+            assert!(view.sort_keys.is_empty());
+            assert!(view.filters.is_empty());
+            assert!(view.take_source_status().unwrap().contains(expected));
+        }
     }
 
     #[test]
@@ -2334,6 +3876,92 @@ mod tests {
     }
 
     #[test]
+    fn sampled_mode_width_fits_widest_observed_value() {
+        let rows = rows(&[&["store"], &["0"], &["0"], &["0"], &["4279369981"]]);
+
+        assert_eq!(column_widths(&rows, ColumnWidthMode::Mode, 2), [10]);
+    }
+
+    #[test]
+    fn opened_json_and_delimited_sources_fit_widest_sampled_value() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let json_path = dir.path().join("rows.json");
+        let csv_path = dir.path().join("rows.csv");
+        let values = ["0", "0", "0", "0", "0", "0", "0", "4279369981"];
+        let json = values
+            .iter()
+            .map(|value| format!(r#"{{"store":"{value}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        std::fs::write(&json_path, format!("[{json}]")).expect("json");
+        std::fs::write(&csv_path, format!("store\n{}\n", values.join("\n"))).expect("csv");
+
+        let json = crate::ingest::JsonAdapter::json()
+            .open(
+                crate::ingest::source::InputSource::Path(json_path),
+                &crate::ingest::OpenOptions {
+                    format: crate::ingest::InputFormat::Json,
+                    ..crate::ingest::OpenOptions::default()
+                },
+            )
+            .expect("open json")
+            .into_implicit_table()
+            .expect("json table");
+        let mut json_view =
+            TableView::from_opened_table(json, Viewport::new(20, 2)).expect("json view");
+
+        let csv = crate::ingest::DelimitedAdapter
+            .open(
+                crate::ingest::source::InputSource::Path(csv_path),
+                &crate::ingest::OpenOptions::default(),
+            )
+            .expect("open csv")
+            .into_implicit_table()
+            .expect("csv table");
+        let mut csv_view =
+            TableView::from_opened_table(csv, Viewport::new(20, 2)).expect("csv view");
+
+        assert_eq!(json_view.effective_column_widths_cached(), [10]);
+        assert_eq!(csv_view.effective_column_widths_cached(), [10]);
+    }
+
+    #[test]
+    fn incremental_indexing_keeps_cached_sampled_width_stable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rows.json");
+        std::fs::write(&path, r#"[{"store":"0"},{"store":"4279369981"}]"#).expect("json");
+        let opened = crate::ingest::JsonAdapter::json()
+            .open(
+                crate::ingest::source::InputSource::Path(path),
+                &crate::ingest::OpenOptions {
+                    format: crate::ingest::InputFormat::Json,
+                    lazy_threshold_bytes: 1,
+                    schema_scan_bytes: 1,
+                    ..crate::ingest::OpenOptions::default()
+                },
+            )
+            .expect("open json")
+            .into_implicit_table()
+            .expect("json table");
+        let mut view =
+            TableView::from_opened_table(opened, Viewport::new(1, 1)).expect("json view");
+
+        assert_eq!(view.effective_column_widths_cached(), [5]);
+        view.goto(1, 0);
+        assert_eq!(view.effective_column_widths_cached(), [5]);
+    }
+
+    #[test]
+    fn automatic_width_is_capped_at_eighty_percent_but_explicit_width_is_not() {
+        let mut view = TableView::classify(rows(&[&["12345678901234567890"]]), Viewport::new(1, 1));
+        view.set_terminal_width(20);
+
+        assert_eq!(view.effective_column_widths_cached(), [16]);
+        view.set_current_column_width(24);
+        assert_eq!(view.effective_column_widths_cached(), [24]);
+    }
+
+    #[test]
     fn captures_and_applies_reload_state() {
         let mut view = TableView::classify(
             rows(&[&["Name", "Value"], &["alpha", "1"], &["beta", "2"]]),
@@ -2354,6 +3982,49 @@ mod tests {
         state.apply_to(&mut reloaded);
         assert_eq!(reloaded.cursor(), Position { row: 1, column: 1 });
         assert_eq!(state.search.as_deref(), Some("beta"));
+    }
+
+    #[test]
+    fn reload_settings_follow_structured_source_identity_after_reordering() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("data.json");
+        std::fs::write(&path, r#"[{"a":1,"b":2}]"#).expect("first source");
+        let options = crate::ingest::OpenOptions {
+            format: crate::ingest::InputFormat::Json,
+            ..crate::ingest::OpenOptions::default()
+        };
+        let opened = crate::ingest::JsonAdapter::json()
+            .open(
+                crate::ingest::source::InputSource::Path(path.clone()),
+                &options,
+            )
+            .expect("open first")
+            .into_implicit_table()
+            .expect("table");
+        let mut previous =
+            TableView::from_opened_table(opened, Viewport::new(5, 2)).expect("first view");
+        previous.goto(0, 1);
+        previous.set_current_column_width(17);
+        previous.set_mark();
+        let old_generation = previous.source_generation();
+
+        std::fs::write(&path, r#"[{"b":2,"a":1}]"#).expect("replacement source");
+        let opened = crate::ingest::JsonAdapter::json()
+            .open(crate::ingest::source::InputSource::Path(path), &options)
+            .expect("open replacement")
+            .into_implicit_table()
+            .expect("table");
+        let mut reloaded =
+            TableView::from_opened_table(opened, Viewport::new(5, 2)).expect("replacement view");
+        reloaded.restore_view_settings_from(&previous);
+
+        assert_ne!(reloaded.source_generation(), old_generation);
+        assert_eq!(reloaded.cursor().column, 0, "cursor follows canonical /b");
+        assert_eq!(reloaded.column_widths[0], 17, "width follows canonical /b");
+        assert!(
+            reloaded.mark().is_none(),
+            "row identity is generation-scoped"
+        );
     }
 
     #[test]
@@ -2431,6 +4102,39 @@ mod tests {
         assert_eq!(view.effective_column_widths()[0], 1);
         view.adjust_column_gap(3);
         assert_eq!(view.column_gap(), 5);
+    }
+
+    #[test]
+    fn single_column_resize_scales_and_caps_at_cached_rendered_value_width() {
+        let mut view = TableView::classify(
+            rows(&[
+                &["A header wider than every value"],
+                &["1"],
+                &["1234567890"],
+            ]),
+            Viewport::new(3, 1),
+        );
+
+        view.set_current_column_width(5);
+        view.adjust_current_column_width(1);
+        assert_eq!(view.effective_column_widths(), [6]);
+        view.adjust_current_column_width(2);
+        assert_eq!(view.effective_column_widths(), [8]);
+        view.adjust_current_column_width(20);
+        assert_eq!(view.effective_column_widths(), [10]);
+
+        view.adjust_current_column_width(-1);
+        assert_eq!(view.effective_column_widths(), [8]);
+        view.adjust_current_column_width(-20);
+        assert_eq!(view.effective_column_widths(), [1]);
+        view.adjust_current_column_width(-1);
+        assert_eq!(view.effective_column_widths(), [1]);
+
+        view.set_current_column_width(20);
+        view.adjust_current_column_width(1);
+        assert_eq!(view.effective_column_widths(), [20]);
+        view.adjust_current_column_width(-1);
+        assert_eq!(view.effective_column_widths(), [16]);
     }
 
     #[test]
@@ -2661,11 +4365,13 @@ mod tests {
                     column: 0,
                     mode: SortMode::Lexical,
                     direction: SortDirection::Ascending,
+                    nulls: NullPlacement::Last,
                 },
                 ActiveSortKey {
                     column: 1,
                     mode: SortMode::Numeric,
                     direction: SortDirection::Ascending,
+                    nulls: NullPlacement::Last,
                 },
             ]
         );
@@ -2985,6 +4691,7 @@ columns:
             column_type: ColumnTypeChoice::Text,
             format: ColumnFormatChoice::Lowercase,
             sort: ColumnSortChoice::None,
+            nulls: ColumnNullPlacementChoice::Inherited,
             clear_filters: false,
         });
 
@@ -3143,5 +4850,202 @@ columns:
             ip_view.visible_raw_rows_vec(),
             rows(&[&["10.0.0.2"], &["2001:db8::1"]])
         );
+    }
+
+    #[test]
+    fn opened_incremental_table_loads_viewport_then_indexes_navigation() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("data.csv");
+        std::fs::write(&path, "name,value\na,1\na,2\nc,3\n").expect("write");
+        let options = crate::ingest::OpenOptions {
+            lazy_threshold_bytes: 0,
+            ..crate::ingest::OpenOptions::default()
+        };
+        let opened = crate::ingest::DelimitedAdapter
+            .open(crate::ingest::source::InputSource::Path(path), &options)
+            .expect("open")
+            .into_implicit_table()
+            .expect("table");
+        let mut view = TableView::from_opened_table(opened, Viewport::new(1, 2)).expect("view");
+        assert_eq!(view.total_row_count(), 1);
+        assert!(matches!(view.row_count_state(), RowCount::AtLeast(_)));
+
+        let found = view
+            .progressive_search("c", crate::ops::search::SearchDirection::Forward)
+            .expect("progressive match");
+        assert_eq!(found, Position { row: 2, column: 0 });
+        assert_eq!(view.total_row_count(), 3);
+        view.goto(found.row, found.column);
+        assert_eq!(view.current_raw_cell(), Some("c"));
+
+        view.goto(0, 0);
+        assert_eq!(
+            view.progressive_skip_to_change(
+                crate::ops::skip::Axis::Row,
+                crate::ops::skip::Direction::Forward,
+                1,
+            ),
+            Position { row: 2, column: 0 }
+        );
+    }
+
+    #[test]
+    fn goto_bottom_batch_loads_large_incremental_delimited_source() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("large.csv");
+        let mut data = String::from("value\n");
+        for value in 0..10_000 {
+            data.push_str(&format!("{value}\n"));
+        }
+        std::fs::write(&path, data).expect("write");
+        let opened = crate::ingest::DelimitedAdapter
+            .open(
+                crate::ingest::source::InputSource::Path(path),
+                &crate::ingest::OpenOptions {
+                    lazy_threshold_bytes: 0,
+                    ..crate::ingest::OpenOptions::default()
+                },
+            )
+            .expect("open")
+            .into_implicit_table()
+            .expect("table");
+        let mut view = TableView::from_opened_table(opened, Viewport::new(1, 1)).expect("view");
+        assert_eq!(view.effective_column_widths_cached(), [5]);
+
+        view.goto_bottom();
+
+        assert_eq!(view.row_count_state(), RowCount::Exact(10_000));
+        assert_eq!(view.current_raw_cell(), Some("9999"));
+        assert_eq!(view.effective_column_widths_cached(), [5]);
+    }
+
+    #[test]
+    fn opened_typed_table_queries_preserve_identity_and_null_policy() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("data.json");
+        std::fs::write(&path, r#"[{"n":2},{"n":null},{"n":1}]"#).expect("write");
+        let options = crate::ingest::OpenOptions {
+            format: crate::ingest::InputFormat::Json,
+            ..crate::ingest::OpenOptions::default()
+        };
+        let opened = crate::ingest::JsonAdapter::json()
+            .open(crate::ingest::source::InputSource::Path(path), &options)
+            .expect("open")
+            .into_implicit_table()
+            .expect("table");
+        let mut view = TableView::from_opened_table(opened, Viewport::new(3, 1)).expect("view");
+        view.goto(2, 0);
+        view.set_view_null_placement(Some(NullPlacement::First));
+        view.sort_current_column(SortMode::Numeric, SortDirection::Ascending);
+        assert_eq!(view.visible_raw_rows_vec(), rows(&[&[""], &["1"], &["2"]]));
+        assert_eq!(view.current_raw_cell(), Some("1"));
+        assert_eq!(
+            view.active_table_query().unwrap().order_by[0].nulls,
+            NullPlacement::First
+        );
+
+        view.clear_current_column_sort();
+        assert_eq!(view.visible_raw_rows_vec(), rows(&[&["2"], &[""], &["1"]]));
+        assert_eq!(view.current_raw_cell(), Some("1"));
+
+        view.goto(0, 0);
+        view.set_mark();
+        view.apply_filter(0, FilterMode::In, FilterKind::Text, "1".to_owned())
+            .expect("filter");
+        assert_eq!(view.visible_raw_rows_vec(), rows(&[&["1"]]));
+        view.goto_mark();
+        assert_eq!(view.current_raw_cell(), Some("1"));
+        view.clear_filters_for_column(0);
+        view.goto_mark();
+        assert_eq!(view.current_raw_cell(), Some("2"));
+    }
+
+    #[cfg(feature = "saved-views")]
+    #[test]
+    fn pending_canonical_saved_column_applies_when_schema_delta_arrives() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("late.json");
+        std::fs::write(&path, r#"[{"a":1},{"a":2,"late":3}]"#).expect("write");
+        let options = crate::ingest::OpenOptions {
+            format: crate::ingest::InputFormat::Json,
+            schema_scan_bytes: 1,
+            ..crate::ingest::OpenOptions::default()
+        };
+        let opened = crate::ingest::JsonAdapter::json()
+            .open(crate::ingest::source::InputSource::Path(path), &options)
+            .expect("open")
+            .into_implicit_table()
+            .expect("table");
+        let mut view = TableView::from_opened_table(opened, Viewport::new(1, 2)).expect("view");
+        let saved = crate::saved_views::parse_saved_view_yaml(
+            r#"
+name: late
+filenames: [late.json]
+columns:
+  /late:
+    label: Later
+    nulls: first
+"#,
+        )
+        .expect("saved");
+        let resolved = crate::saved_views::resolve_structured_columns(
+            &saved.view,
+            view.table_definition().expect("definition"),
+        );
+        assert!(resolved.pending.contains_key("/late"));
+        view.apply_saved_columns(&resolved, None);
+
+        view.goto(1, 0);
+        assert_eq!(view.header().unwrap()[1], "Later");
+        assert_eq!(view.resolved_null_placement(1), NullPlacement::First);
+        assert!(matches!(
+            &view.table_definition().unwrap().columns[1].source_identity,
+            crate::table::ColumnSourceIdentity::JsonPointer(pointer) if pointer.as_str() == "/late"
+        ));
+    }
+
+    #[cfg(feature = "saved-views")]
+    #[test]
+    fn pending_structured_sort_and_filter_apply_when_late_column_arrives() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("late.json");
+        std::fs::write(&path, r#"[{"a":1},{"a":2,"late":3}]"#).expect("write");
+        let options = crate::ingest::OpenOptions {
+            format: crate::ingest::InputFormat::Json,
+            schema_scan_bytes: 1,
+            ..crate::ingest::OpenOptions::default()
+        };
+        let opened = crate::ingest::JsonAdapter::json()
+            .open(crate::ingest::source::InputSource::Path(path), &options)
+            .expect("open")
+            .into_implicit_table()
+            .expect("table");
+        let mut view = TableView::from_opened_table(opened, Viewport::new(1, 2)).expect("view");
+        let saved = crate::saved_views::parse_saved_view_yaml(
+            r#"
+name: late operations
+filenames: [late.json]
+sort:
+  - column: /late
+    direction: desc
+    kind: numeric
+filters:
+  - column: /late
+    action: in
+    kind: numeric
+    condition: "> 2"
+"#,
+        )
+        .expect("saved");
+        view.retain_pending_saved_operations(saved.view.sort.clone(), saved.view.filters.clone());
+
+        view.goto(1, 0);
+
+        let query = view.active_table_query().expect("query");
+        assert_eq!(query.order_by.len(), 1);
+        assert_eq!(query.order_by[0].column.ordinal, 1);
+        assert_eq!(query.filters.len(), 1);
+        assert_eq!(query.filters[0].column.ordinal, 1);
+        assert_eq!(view.visible_raw_rows_vec(), rows(&[&["2", "3"]]));
     }
 }

@@ -1,10 +1,5 @@
-use crate::view::Position;
-
-pub fn yank_cell(rows: &[Vec<String>], position: Position) -> anyhow::Result<bool> {
-    let Some(text) = rows
-        .get(position.row)
-        .and_then(|row| row.get(position.column))
-    else {
+pub fn yank_text(text: Option<&str>) -> anyhow::Result<bool> {
+    let Some(text) = text else {
         return Ok(false);
     };
     set_text(text)?;
@@ -29,14 +24,12 @@ mod tests {
 
     #[cfg(not(feature = "clipboard"))]
     #[test]
-    fn yanks_existing_cell_without_clipboard_feature() {
-        let rows = vec![vec!["cell".to_owned()]];
-        assert!(yank_cell(&rows, Position { row: 0, column: 0 }).expect("yank"));
+    fn yanks_existing_text_without_clipboard_feature() {
+        assert!(yank_text(Some("cell")).expect("yank"));
     }
 
     #[test]
     fn missing_cell_is_non_fatal() {
-        let rows = vec![vec!["cell".to_owned()]];
-        assert!(!yank_cell(&rows, Position { row: 10, column: 0 }).expect("yank"));
+        assert!(!yank_text(None).expect("yank"));
     }
 }

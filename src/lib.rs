@@ -18,14 +18,45 @@ pub fn run(args: cli::Args) -> anyhow::Result<()> {
     let config = cli::Config::from_args(args)?;
     let theme_load = theme::load_active_theme(None)?;
     let source = ingest::source::InputSource::from_cli_value(&config.filename.to_string_lossy());
+    let mut terminal = ui::terminal::TerminalSession::enter()?;
+    let loading_message = format!("Loading {}", source.display_name());
+    terminal.terminal_mut().draw(|frame| {
+        ui::render_footer_with_theme(
+            Some(&loading_message),
+            frame.area(),
+            frame.buffer_mut(),
+            &theme_load.theme,
+        );
+    })?;
     let parse_options = ingest::ParseOptions {
         encoding: config.encoding.clone(),
         delimiter: config.delimiter,
         quoting: config.quoting,
         quote_char: config.quote_char,
     };
-    let rows = read_rows(&source, &parse_options)?;
-    let mut view = view::TableView::classify(rows, view::Viewport::new(20, 8))
+    #[cfg(feature = "saved-views")]
+    let saved_source_options = selected_saved_view_source_options(&config)?;
+    #[cfg(not(feature = "saved-views"))]
+    let saved_source_options = ingest::SourceOptionOverrides::default();
+    let mut open_options = ingest::OpenOptions::merge(
+        ingest::OpenOptions::default(),
+        &saved_source_options,
+        &config.source_options,
+    );
+    open_options.delimited = parse_options.clone();
+    open_options.validate()?;
+    if let Some(schema_status) = full_schema_scan_status(&source, &open_options) {
+        terminal.terminal_mut().draw(|frame| {
+            ui::render_footer_with_theme(
+                Some(&schema_status),
+                frame.area(),
+                frame.buffer_mut(),
+                &theme_load.theme,
+            );
+        })?;
+    }
+    let opened = ingest::open_source(source.clone(), &open_options)?.into_implicit_table()?;
+    let mut view = view::TableView::from_opened_table(opened, view::Viewport::new(20, 8))?
         .with_column_width_mode(config.width);
     #[cfg(feature = "saved-views")]
     let saved_view = apply_saved_view(&config, &mut view)?;
@@ -48,7 +79,7 @@ pub fn run(args: cli::Args) -> anyhow::Result<()> {
 
     let mut app = App {
         source,
-        parse_options,
+        open_options,
         view,
         popup: None,
         filter_prompt: None,
@@ -62,8 +93,6 @@ pub fn run(args: cli::Args) -> anyhow::Result<()> {
         #[cfg(feature = "saved-views")]
         view_modal: None,
     };
-    let mut terminal = ui::terminal::TerminalSession::enter()?;
-
     loop {
         terminal.terminal_mut().draw(|frame| {
             let area = frame.area();
@@ -162,9 +191,41 @@ pub fn run(args: cli::Args) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn full_schema_scan_status(
+    source: &ingest::source::InputSource,
+    options: &ingest::OpenOptions,
+) -> Option<String> {
+    (options.schema_scan == ingest::SchemaScan::Full)
+        .then(|| format!("Scanning full schema for {}", source.display_name()))
+}
+
+#[cfg(feature = "saved-views")]
+fn selected_saved_view_source_options(
+    config: &cli::Config,
+) -> anyhow::Result<ingest::SourceOptionOverrides> {
+    use crate::cli::SavedViewSelection as CliSavedViewSelection;
+    use crate::saved_views::SavedViewSelection;
+
+    let selection = match &config.saved_view {
+        CliSavedViewSelection::Disabled => return Ok(ingest::SourceOptionOverrides::default()),
+        CliSavedViewSelection::Auto => SavedViewSelection::Auto {
+            input_path: &config.filename,
+        },
+        CliSavedViewSelection::Force(name) => SavedViewSelection::Force { name },
+    };
+    let discovered = saved_views::discover_saved_views(None);
+    let Some(selected) = saved_views::select_saved_view(&discovered.views, selection) else {
+        if let CliSavedViewSelection::Force(name) = &config.saved_view {
+            anyhow::bail!("saved view '{name}' was requested but was not found");
+        }
+        return Ok(ingest::SourceOptionOverrides::default());
+    };
+    Ok(selected.view.view.source_options())
+}
+
 struct App {
     source: ingest::source::InputSource,
-    parse_options: ingest::ParseOptions,
+    open_options: ingest::OpenOptions,
     view: view::TableView,
     popup: Option<ui::Popup>,
     filter_prompt: Option<FilterPrompt>,
@@ -337,12 +398,11 @@ impl App {
                 .view
                 .sort_current_column(SortMode::Lexical, SortDirection::Descending),
             Command::YankCell => {
-                let rows = self.view.visible_rows_vec();
-                let _ = ops::clipboard::yank_cell(&rows, self.view.cursor());
+                let rendered = self.view.current_cell_rendered();
+                let _ = ops::clipboard::yank_text(rendered.as_deref());
             }
             Command::YankRawCell => {
-                let rows = self.view.visible_raw_rows_vec();
-                let _ = ops::clipboard::yank_cell(&rows, self.view.cursor());
+                let _ = ops::clipboard::yank_text(self.view.current_raw_cell());
             }
             Command::ToggleColumnWidthMode => {
                 if let Some(width) = action.count {
@@ -383,51 +443,34 @@ impl App {
             }
             Command::ColumnSortClear => self.view.clear_current_column_sort(),
             Command::SkipRowChangeForward => {
-                let rows = self.view.visible_rows_vec();
-                let position = ops::skip::skip_to_change(
-                    &rows,
-                    self.view.cursor(),
-                    Axis::Row,
-                    Direction::Forward,
-                    count,
-                );
+                let position =
+                    self.view
+                        .progressive_skip_to_change(Axis::Row, Direction::Forward, count);
                 self.view.goto(position.row, position.column);
             }
             Command::SkipRowChangeBackward => {
-                let rows = self.view.visible_rows_vec();
-                let position = ops::skip::skip_to_change(
-                    &rows,
-                    self.view.cursor(),
-                    Axis::Row,
-                    Direction::Backward,
-                    count,
-                );
+                let position =
+                    self.view
+                        .progressive_skip_to_change(Axis::Row, Direction::Backward, count);
                 self.view.goto(position.row, position.column);
             }
             Command::SkipColumnChangeForward => {
-                let rows = self.view.visible_rows_vec();
-                let position = ops::skip::skip_to_change(
-                    &rows,
-                    self.view.cursor(),
-                    Axis::Column,
-                    Direction::Forward,
-                    count,
-                );
+                let position =
+                    self.view
+                        .progressive_skip_to_change(Axis::Column, Direction::Forward, count);
                 self.view.goto(position.row, position.column);
             }
             Command::SkipColumnChangeBackward => {
-                let rows = self.view.visible_rows_vec();
-                let position = ops::skip::skip_to_change(
-                    &rows,
-                    self.view.cursor(),
-                    Axis::Column,
-                    Direction::Backward,
-                    count,
-                );
+                let position =
+                    self.view
+                        .progressive_skip_to_change(Axis::Column, Direction::Backward, count);
                 self.view.goto(position.row, position.column);
             }
             Command::ShowInfo => self.popup = Some(ui::Popup::Info),
             Command::Redraw => {}
+        }
+        if let Some(status) = self.view.take_source_status() {
+            self.message = Some(status);
         }
         Ok(())
     }
@@ -559,10 +602,7 @@ impl App {
     }
 
     fn search(&mut self, direction: ops::search::SearchDirection) {
-        let rows = self.view.search_rows_vec();
-        if let Some(position) =
-            ops::search::find_match(&rows, self.view.cursor(), &self.search_query, direction)
-        {
+        if let Some(position) = self.view.progressive_search(&self.search_query, direction) {
             self.view.goto(position.row, position.column);
         }
     }
@@ -678,20 +718,27 @@ impl App {
             return Ok(());
         }
 
-        let cursor = self.view.cursor();
+        let cursor_row = self.view.cursor().row;
         let viewport = self.view.viewport();
-        let rows = read_rows(&self.source, &self.parse_options)?;
-        let mut reloaded = view::TableView::classify(rows, viewport);
+        let opened =
+            ingest::open_source(self.source.clone(), &self.open_options)?.into_implicit_table()?;
+        let mut reloaded = view::TableView::from_opened_table(opened, viewport)?;
         reloaded.restore_view_settings_from(&self.view);
-        reloaded.goto(cursor.row, cursor.column);
+        let restored_column = reloaded.cursor().column;
+        reloaded.goto(cursor_row, restored_column);
         self.view = reloaded;
         Ok(())
     }
 
     fn info_text(&self) -> String {
+        let rows = match self.view.row_count_state() {
+            crate::table::RowCount::Exact(count) => count.to_string(),
+            crate::table::RowCount::AtLeast(count) => format!("{count}+"),
+            crate::table::RowCount::Unknown => "unknown".to_owned(),
+        };
         format!(
             "Rows: {}\nColumns: {}\nPosition: {},{}\nWidth mode: {:?}\nColumn gap: {}\nMark: {}",
-            self.view.row_count(),
+            rows,
             self.view.column_count(),
             self.view.cursor().row + 1,
             self.view.cursor().column + 1,
@@ -768,6 +815,9 @@ struct ColumnInfoModal {
     column_type: usize,
     format: usize,
     sort: usize,
+    nulls: view::ColumnNullPlacementChoice,
+    canonical_source: Option<String>,
+    source_type: Option<String>,
     filters: usize,
 }
 
@@ -801,6 +851,9 @@ impl ColumnInfoModal {
                 view::ColumnSortChoice::Ascending => 1,
                 view::ColumnSortChoice::Descending => 2,
             },
+            nulls: info.nulls,
+            canonical_source: info.canonical_source,
+            source_type: info.source_type,
             filters: 0,
         }
     }
@@ -809,10 +862,19 @@ impl ColumnInfoModal {
         ui::ColumnInfoPopup {
             title: "Column Info".to_owned(),
             summary: format!(
-                "{}  visible:{} source:{}",
+                "{}  visible:{} source:{}  nulls:{:?}{}{}",
                 self.column_name,
                 self.visible_column + 1,
-                self.source_column + 1
+                self.source_column + 1,
+                self.nulls,
+                self.canonical_source
+                    .as_ref()
+                    .map(|value| format!(" canonical:{value}"))
+                    .unwrap_or_default(),
+                self.source_type
+                    .as_ref()
+                    .map(|value| format!(" type:{value}"))
+                    .unwrap_or_default()
             ),
             sections: ColumnInfoGroup::VISUAL
                 .into_iter()
@@ -980,6 +1042,7 @@ impl ColumnInfoModal {
                 2 => view::ColumnSortChoice::Descending,
                 _ => view::ColumnSortChoice::None,
             },
+            nulls: self.nulls,
             clear_filters: self.filters == 1,
         }
     }
@@ -1108,14 +1171,6 @@ impl<'a> From<&'a FilterPrompt> for FilterPromptView<'a> {
     }
 }
 
-fn read_rows(
-    source: &ingest::source::InputSource,
-    parse_options: &ingest::ParseOptions,
-) -> anyhow::Result<Vec<Vec<String>>> {
-    let bytes = ingest::source::read_source(source)?;
-    Ok(ingest::parse_rows(&bytes, parse_options)?)
-}
-
 #[cfg(feature = "saved-views")]
 fn apply_saved_view(
     config: &cli::Config,
@@ -1172,7 +1227,23 @@ fn apply_saved_view(
         }));
     };
     let header = header.to_vec();
-    let resolved = saved_views::resolve_columns(&selected.view.view, &header);
+    view.set_view_null_placement(selected.view.view.nulls);
+    let structured_definition = view.table_definition().filter(|definition| {
+        definition.columns.iter().any(|column| {
+            matches!(
+                column.source_identity,
+                crate::table::ColumnSourceIdentity::JsonPointer(_)
+            )
+        })
+    });
+    let structured_schema_provisional = structured_definition.is_some_and(|definition| {
+        definition.schema_state == crate::table::SchemaState::Provisional
+    });
+    let resolved = if let Some(definition) = structured_definition {
+        saved_views::resolve_structured_columns(&selected.view.view, definition)
+    } else {
+        saved_views::resolve_columns(&selected.view.view, &header)
+    };
     messages.extend(resolved.warnings.iter().map(format_saved_view_warning));
     view.apply_saved_columns(&resolved, selected.view.view.locale.as_deref());
 
@@ -1182,7 +1253,20 @@ fn apply_saved_view(
         .sort
         .iter()
         .filter_map(|sort| {
-            let column = saved_views::resolve_column_reference(&header, &sort.column)?;
+            let column = view
+                .table_definition()
+                .filter(|definition| {
+                    definition.columns.iter().any(|column| {
+                        matches!(
+                            column.source_identity,
+                            crate::table::ColumnSourceIdentity::JsonPointer(_)
+                        )
+                    })
+                })
+                .and_then(|definition| {
+                    saved_views::resolve_structured_column_reference(definition, &sort.column)
+                })
+                .or_else(|| saved_views::resolve_column_reference(&header, &sort.column))?;
             let direction = match sort.direction {
                 saved_views::SortDirection::Asc => SortDirection::Ascending,
                 saved_views::SortDirection::Desc => SortDirection::Descending,
@@ -1197,13 +1281,32 @@ fn apply_saved_view(
                 column,
                 mode,
                 direction,
+                nulls: view.resolved_null_placement(column),
             })
         })
         .collect::<Vec<_>>();
     view.apply_saved_sort_keys(sort_keys);
 
+    let mut unresolved_filters = Vec::new();
     for filter in &selected.view.view.filters {
-        let Some(column) = saved_views::resolve_column_reference(&header, &filter.column) else {
+        let column = view
+            .table_definition()
+            .filter(|definition| {
+                definition.columns.iter().any(|column| {
+                    matches!(
+                        column.source_identity,
+                        crate::table::ColumnSourceIdentity::JsonPointer(_)
+                    )
+                })
+            })
+            .and_then(|definition| {
+                saved_views::resolve_structured_column_reference(definition, &filter.column)
+            })
+            .or_else(|| saved_views::resolve_column_reference(&header, &filter.column));
+        let Some(column) = column else {
+            if structured_schema_provisional && filter.column.starts_with('/') {
+                unresolved_filters.push(filter.clone());
+            }
             continue;
         };
         let mode = match filter.action {
@@ -1216,6 +1319,9 @@ fn apply_saved_view(
             saved_views::FilterKind::Numeric => FilterKind::Numeric,
         };
         let _ = view.apply_source_filter(column, mode, kind, filter.condition.clone());
+    }
+    if structured_schema_provisional {
+        view.retain_pending_saved_operations(selected.view.view.sort.clone(), unresolved_filters);
     }
     log_saved_view_messages(&messages);
     Ok(Some(SavedViewRuntime {
@@ -1514,10 +1620,25 @@ mod tests {
             .collect()
     }
 
+    #[test]
+    fn explicit_full_schema_scan_has_specific_opening_status() {
+        let source = ingest::source::InputSource::Path("response.json".into());
+        let options = ingest::OpenOptions {
+            schema_scan: ingest::SchemaScan::Full,
+            ..ingest::OpenOptions::default()
+        };
+
+        assert_eq!(
+            full_schema_scan_status(&source, &options).as_deref(),
+            Some("Scanning full schema for response.json")
+        );
+        assert!(full_schema_scan_status(&source, &ingest::OpenOptions::default()).is_none());
+    }
+
     fn app_with_rows(rows: Vec<Vec<String>>) -> App {
         App {
             source: ingest::source::InputSource::Stdin,
-            parse_options: ingest::ParseOptions::default(),
+            open_options: ingest::OpenOptions::default(),
             view: view::TableView::classify(rows, view::Viewport::new(10, 4)),
             popup: None,
             filter_prompt: None,
@@ -1541,7 +1662,7 @@ mod tests {
     fn app_with_saved_view_target(rows: Vec<Vec<String>>, target_path: PathBuf) -> App {
         App {
             source: ingest::source::InputSource::Path(PathBuf::from("cat_shards.txt")),
-            parse_options: ingest::ParseOptions::default(),
+            open_options: ingest::OpenOptions::default(),
             view: view::TableView::classify(rows, view::Viewport::new(10, 4)),
             popup: None,
             filter_prompt: None,
@@ -1680,7 +1801,7 @@ mod tests {
 
         let mut app = App {
             source: ingest::source::InputSource::Path(file.path().to_path_buf()),
-            parse_options: ingest::ParseOptions::default(),
+            open_options: ingest::OpenOptions::default(),
             view: view::TableView::classify(
                 rows(&[&["Name"], &["alpha"], &["beta"]]),
                 view::Viewport::new(10, 4),

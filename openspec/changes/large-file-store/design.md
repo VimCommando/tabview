@@ -80,7 +80,7 @@ struct OpenedTable {
 }
 ```
 
-`OpenedSource` exposes one implicit relation for delimited, JSON, and NDJSON inputs. The relation API exists so a later SQLite source can expose multiple tables/views without changing `TableView`; no database adapter is included here.
+`OpenedSource` exposes one implicit relation for delimited, JSON, and NDJSON inputs. Relation metadata reserves the source/table separation, while public multi-relation construction and selected-relation opening are explicitly deferred to the follow-on SQLite/database-source feature in the database worktree; no database adapter or relation selector is included here.
 
 Alternative considered: one generic `FileParser` that returns rows. This keeps the current coupling between parsing, schema discovery, and materialization and cannot naturally represent multiple future relations, so it is rejected.
 
@@ -164,6 +164,7 @@ trait TableStore {
     fn row_count(&self) -> RowCount;
     fn row(&mut self, index: RowIndex) -> Result<Option<Row>>;
     fn ensure_indexed_through(&mut self, index: RowIndex) -> Result<IndexProgress>;
+    fn index_and_scan_rows(&mut self, through: RowIndex, request: ScanRequest, visitor: &mut dyn RowVisitor) -> Result<IndexScanProgress>;
     fn scan_rows(&mut self, request: ScanRequest, visitor: &mut dyn RowVisitor) -> Result<ScanProgress>;
     fn materialize(&mut self) -> Result<InMemoryTable>;
     fn try_execute_query(&mut self, query: &TableQuery) -> Result<QueryExecution>;
@@ -316,6 +317,10 @@ Operations remain divided by how much source access they require:
 - **Viewport-local:** rendering indexed rows, cursor movement within the indexed range, current cell popup, table info from known state, raw/rendered current-cell yank.
 - **Progressive:** navigation beyond the indexed range, forward search, and skip-to-change. These request bounded indexing until a result or selected-table end.
 - **Full-table local fallback:** sort, complete filtering, exact max-content sizing, and exact auto-range/identifier profiling. These fully scan, index, or materialize with status when executed locally, build replacement state separately, and swap it into the view only after success. A source-executed query result may remain lazy.
+
+Automatic column widths are sampled from the initial loaded rows and then frozen; later scrolling or forward indexing does not resize existing columns as a side effect. An automatic width is capped at 80 percent of the current terminal cell width, while explicit fixed widths and manual column growth remain uncapped by that viewport policy. Terminal resizing may reapply the viewport cap to the frozen sample without resampling later rows.
+
+Large forward jumps use store scans in sequential batches. In particular, `G` may index through EOF to establish the exact last row, but a delimited store performs that indexing and row delivery in one forward parser pass: each logical record contributes its offset and decoded row together, and the view retains that decoded row instead of seeking and decoding it again. The operation stages index metadata until the source-stability check succeeds. It must not reopen and independently parse the source once per indexed row, parse the same remaining range once for indexing and again for loading, or rerun sampled width/profile inference over the growing prefix.
 
 Helpers that currently build `visible_rows_vec`, `visible_raw_rows_vec`, or `search_rows_vec` for a single-cell or progressive command must be replaced by row/cell accessors and iterators/scans over the store. Rendering must accept `Unknown` and `AtLeast` counts.
 

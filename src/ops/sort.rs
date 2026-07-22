@@ -85,7 +85,7 @@ pub(crate) fn sort_rows_by_specs(rows: &mut [Vec<String>], specs: &[SortSpec]) {
     });
 }
 
-fn compare_cells(
+pub(crate) fn compare_cells(
     left: &str,
     right: &str,
     mode: SortMode,

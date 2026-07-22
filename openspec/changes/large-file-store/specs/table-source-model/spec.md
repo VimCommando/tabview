@@ -11,10 +11,6 @@ The system SHALL resolve an input format and open it through a format adapter ra
 - **WHEN** no explicit or saved-view format is selected
 - **THEN** the system resolves a supported adapter from the source name and bounded content probing
 
-#### Scenario: Future multi-relation source
-- **WHEN** a future adapter exposes more than one tabular relation from one source
-- **THEN** the source boundary can enumerate and open a selected relation without changing `TableView`
-
 ### Requirement: Opened table contract
 Every opened table SHALL provide a table definition and a row store as separate responsibilities.
 

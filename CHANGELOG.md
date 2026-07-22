@@ -15,12 +15,20 @@ All notable changes to this project are documented in this file.
 - Switched installation to `cargo install tabview`.
 - Made clipboard support an optional Cargo feature backed by Rust clipboard
   integration.
+- Made large seekable inputs open through incremental stores with partial row
+  counts, bounded initial rendering, and controlled full-table operations.
+- Made sort and filter execution source-neutral while preserving typed values,
+  stable row identity, null placement, and failure-safe query transitions.
 
 ### Added
 
 - Added Rust test coverage for CLI compatibility, data ingestion, table
   operations, rendering snapshots, and accepted behavior changes.
-- Added groundwork for lazy table storage for very large files.
+- Added JSON and NDJSON table inputs with automatic or explicit format
+  selection, RFC 6901 starting paths, typed cells, and streaming schema
+  discovery.
+- Added saved-view source options, canonical JSON column matching, display-label
+  overrides, and view/per-column null-placement policy.
 
 ### Removed
 

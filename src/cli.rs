@@ -2,13 +2,13 @@ use std::path::PathBuf;
 
 use clap::{ArgAction, Parser};
 
-use crate::ingest::Quoting;
+use crate::ingest::{InputFormat, JsonPointer, Quoting, SchemaScan, SourceOptionOverrides};
 use crate::view::ColumnWidthMode;
 
 #[derive(Debug, Clone, PartialEq, Eq, Parser)]
 #[command(
     name = "tabview",
-    about = "View a delimited file in a spreadsheet-like display.",
+    about = "View delimited, JSON, or NDJSON data in a spreadsheet-like display.",
     disable_help_subcommand = true
 )]
 pub struct Args {
@@ -43,6 +43,18 @@ pub struct Args {
     #[arg(short = 'q', long = "quote-char", default_value = "\"")]
     pub quote_char: String,
 
+    /// Input format. Automatic selection uses the filename and bounded content probing.
+    #[arg(long = "format", value_parser = parse_input_format)]
+    pub format: Option<InputFormat>,
+
+    /// RFC 6901 JSON Pointer selecting the table within each JSON document.
+    #[arg(long = "json-path", value_parser = parse_json_pointer)]
+    pub json_path: Option<JsonPointer>,
+
+    /// JSON schema discovery policy.
+    #[arg(long = "schema-scan", value_parser = parse_schema_scan)]
+    pub schema_scan: Option<SchemaScan>,
+
     /// Force a saved view by canonical name.
     #[cfg(feature = "saved-views")]
     #[arg(long = "view", conflicts_with = "no_view")]
@@ -74,12 +86,40 @@ pub struct Config {
     pub width: ColumnWidthMode,
     pub double_width: bool,
     pub quote_char: u8,
+    pub source_options: SourceOptionOverrides,
     #[cfg(feature = "saved-views")]
     pub saved_view: SavedViewSelection,
 }
 
 impl Config {
     pub fn from_args(args: Args) -> Result<Self, CliError> {
+        let delimited_option_selected = args.encoding.is_some()
+            || args.delimiter.is_some()
+            || args.quoting.is_some()
+            || args.quote_char != "\"";
+        let explicit_format = args.format;
+        if matches!(
+            explicit_format,
+            Some(InputFormat::Json | InputFormat::Ndjson)
+        ) && delimited_option_selected
+        {
+            return Err(CliError::IncompatibleOptions {
+                format: explicit_format.expect("checked format"),
+                option: "delimited parsing options",
+            });
+        }
+        if explicit_format == Some(InputFormat::Delimited) && args.json_path.is_some() {
+            return Err(CliError::IncompatibleOptions {
+                format: InputFormat::Delimited,
+                option: "--json-path",
+            });
+        }
+        let resolved_cli_format = match explicit_format {
+            Some(InputFormat::Auto) | None if delimited_option_selected => {
+                Some(InputFormat::Delimited)
+            }
+            value => value,
+        };
         Ok(Self {
             filename: args.filename,
             encoding: args.encoding,
@@ -89,6 +129,11 @@ impl Config {
             width: parse_width(&args.width)?,
             double_width: args.double_width,
             quote_char: parse_ascii_char(&args.quote_char, "quote character")?,
+            source_options: SourceOptionOverrides {
+                format: resolved_cli_format,
+                json_path: args.json_path,
+                schema_scan: args.schema_scan,
+            },
             #[cfg(feature = "saved-views")]
             saved_view: SavedViewSelection::from_args(args.view, args.no_view),
         })
@@ -132,6 +177,29 @@ pub enum CliError {
     InvalidQuoting { value: String },
     #[error("invalid {what} '{value}'")]
     InvalidChar { what: &'static str, value: String },
+    #[error("{option} cannot be used with explicitly selected {format} input")]
+    IncompatibleOptions {
+        format: InputFormat,
+        option: &'static str,
+    },
+}
+
+fn parse_input_format(value: &str) -> Result<InputFormat, String> {
+    value
+        .parse::<InputFormat>()
+        .map_err(|error| error.to_string())
+}
+
+fn parse_json_pointer(value: &str) -> Result<JsonPointer, String> {
+    value
+        .parse::<JsonPointer>()
+        .map_err(|error| error.to_string())
+}
+
+fn parse_schema_scan(value: &str) -> Result<SchemaScan, String> {
+    value
+        .parse::<SchemaScan>()
+        .map_err(|error| error.to_string())
 }
 
 fn parse_start_position(normal: Option<&str>, extra: &[String]) -> Result<StartPosition, CliError> {
@@ -361,6 +429,114 @@ mod tests {
         assert_eq!(config.filename, PathBuf::from("-"));
         assert_eq!(config.delimiter, Some(b'\t'));
         assert_eq!(config.quoting, Some(Quoting::None));
+        assert_eq!(config.source_options.format, Some(InputFormat::Delimited));
+    }
+
+    #[test]
+    fn parses_source_open_options() {
+        let config = parse(&[
+            "tabview",
+            "--format",
+            "json",
+            "--json-path",
+            "/hits/hits",
+            "--schema-scan",
+            "full",
+            "response.data",
+        ]);
+        assert_eq!(config.source_options.format, Some(InputFormat::Json));
+        assert_eq!(
+            config
+                .source_options
+                .json_path
+                .as_ref()
+                .expect("path")
+                .segments(),
+            ["hits", "hits"]
+        );
+        assert_eq!(config.source_options.schema_scan, Some(SchemaScan::Full));
+    }
+
+    #[test]
+    fn elasticsearch_json_path_cli_opens_only_hit_rows() {
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("sample/json/elasticsearch-response.json");
+        let fixture_arg = fixture.to_string_lossy().into_owned();
+        let config = parse(&[
+            "tabview",
+            "--format",
+            "json",
+            "--json-path",
+            "/hits/hits",
+            &fixture_arg,
+        ]);
+        let options = crate::ingest::OpenOptions::merge(
+            crate::ingest::OpenOptions::default(),
+            &crate::ingest::SourceOptionOverrides::default(),
+            &config.source_options,
+        );
+        let table =
+            crate::ingest::open_source(crate::ingest::source::InputSource::Path(fixture), &options)
+                .expect("open fixture")
+                .into_implicit_table()
+                .expect("table");
+        let identities = table
+            .definition
+            .columns
+            .iter()
+            .filter_map(|column| match &column.source_identity {
+                crate::table::ColumnSourceIdentity::JsonPointer(pointer) => Some(pointer.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert!(identities.contains(&"/_source/user/id"));
+        assert!(!identities.iter().any(|path| path.contains("took")));
+        assert!(!identities.iter().any(|path| path.contains("total")));
+    }
+
+    #[test]
+    fn rejects_invalid_json_pointer_during_argument_parsing() {
+        assert!(
+            Args::try_parse_from(["tabview", "--json-path", "hits/hits", "response.json"]).is_err()
+        );
+    }
+
+    #[test]
+    fn explicit_delimited_options_imply_delimited_auto_format() {
+        let config = parse(&["tabview", "--delimiter", "|", "data.unknown"]);
+        assert_eq!(config.source_options.format, Some(InputFormat::Delimited));
+    }
+
+    #[test]
+    fn rejects_delimited_options_with_structured_format() {
+        assert_eq!(
+            parse_config_error(&[
+                "tabview",
+                "--format",
+                "json",
+                "--delimiter",
+                ",",
+                "data.json"
+            ]),
+            CliError::IncompatibleOptions {
+                format: InputFormat::Json,
+                option: "delimited parsing options"
+            }
+        );
+        assert_eq!(
+            parse_config_error(&[
+                "tabview",
+                "--format",
+                "delimited",
+                "--json-path",
+                "/rows",
+                "data.csv"
+            ]),
+            CliError::IncompatibleOptions {
+                format: InputFormat::Delimited,
+                option: "--json-path"
+            }
+        );
     }
 
     #[cfg(feature = "saved-views")]

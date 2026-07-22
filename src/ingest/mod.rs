@@ -1,4 +1,19 @@
+mod adapter;
+mod delimited;
+mod json;
+mod options;
 pub mod source;
+mod streaming_json;
+
+pub use adapter::{
+    open_source, FormatResolver, OpenedSource, OpenedTable, ProbeResult, SourceAdapter,
+};
+pub use delimited::DelimitedAdapter;
+pub use json::JsonAdapter;
+pub use options::{
+    InputFormat, JsonPointer, OpenOptions, SchemaScan, SourceOptionError, SourceOptionOverrides,
+    DEFAULT_SCHEMA_SCAN_BYTES,
+};
 
 use std::borrow::Cow;
 use std::env;

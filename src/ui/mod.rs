@@ -10,7 +10,9 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::command::KeyBinding;
 use crate::ops::filter::{FilterKind, FilterMode};
 use crate::ops::search::CaseInsensitiveQuery;
-use crate::theme::{default_theme_for_terminal, terminal_color_mode_from_env, ResolvedTheme};
+use crate::theme::ResolvedTheme;
+#[cfg(not(test))]
+use crate::theme::{default_theme_for_terminal, terminal_color_mode_from_env};
 use crate::view::{ColumnAlignment, TableView};
 use crate::FilterPromptView;
 
@@ -57,13 +59,24 @@ pub fn render_table_with_theme(
     search_query: Option<&str>,
 ) {
     let search_query = search_query.and_then(CaseInsensitiveQuery::new);
+    view.set_terminal_width(usize::from(area.width));
     let viewport_height = visible_row_capacity(view, area);
     let viewport_width = visible_column_capacity(view, area);
     view.resize_viewport(viewport_height, viewport_width);
 
     let cursor = view.cursor();
     let viewport = view.viewport();
-    let location = format!(" ({},{}) ", cursor.row + 1, cursor.column + 1);
+    let row_progress = match view.row_count_state() {
+        crate::table::RowCount::Exact(_) => String::new(),
+        crate::table::RowCount::AtLeast(count) => format!(" {count}+ rows"),
+        crate::table::RowCount::Unknown => " ? rows".to_owned(),
+    };
+    let location = format!(
+        " ({},{}){} ",
+        cursor.row + 1,
+        cursor.column + 1,
+        row_progress
+    );
     buffer.set_string(area.x, area.y, &location, theme.style("table.location"));
 
     if let Some(cell) = view.current_cell() {
@@ -562,15 +575,21 @@ fn visible_row_capacity(view: &TableView, area: Rect) -> usize {
 
 fn visible_column_capacity(view: &mut TableView, area: Rect) -> usize {
     let widths = view.effective_column_widths_cached();
+    let area_width = usize::from(area.width);
     let mut used = 0usize;
     let mut columns = 0usize;
     for width in widths.iter().skip(view.viewport().origin.column) {
-        let required = *width + usize::from(columns > 0) * view.column_gap();
-        if columns > 0 && used + required > usize::from(area.width) {
+        let gap = usize::from(columns > 0) * view.column_gap();
+        let column_start = used.saturating_add(gap);
+        if column_start >= area_width {
             break;
         }
-        used += required;
         columns += 1;
+        let column_end = column_start.saturating_add(*width);
+        if column_end >= area_width {
+            break;
+        }
+        used = column_end;
     }
     columns.max(1).min(view.column_count().max(1))
 }
@@ -1487,6 +1506,143 @@ columns:
             .contains("saved view warning"));
     }
 
+    #[test]
+    fn renders_loading_then_operation_progress_on_the_status_line() {
+        let area = Rect::new(0, 0, 48, 4);
+        let mut loading = Buffer::empty(area);
+        render_footer(Some("Loading response.json"), area, &mut loading);
+        assert!(buffer_text(&loading)
+            .lines()
+            .last()
+            .unwrap()
+            .contains("Loading response.json"));
+
+        let mut progress = Buffer::empty(area);
+        render_footer(Some("Indexed 4096 rows"), area, &mut progress);
+        assert!(buffer_text(&progress)
+            .lines()
+            .last()
+            .unwrap()
+            .contains("Indexed 4096 rows"));
+    }
+
+    #[cfg(feature = "saved-views")]
+    #[test]
+    fn renders_provisional_json_partial_count_and_late_overridden_label() {
+        use crate::ingest::SourceAdapter;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("late.json");
+        std::fs::write(
+            &path,
+            r#"[{"a":1},{"a":2},{"a":3},{"a":4},{"a":5,"late":6}]"#,
+        )
+        .expect("write");
+        let options = crate::ingest::OpenOptions {
+            format: crate::ingest::InputFormat::Json,
+            lazy_threshold_bytes: 1,
+            schema_scan_bytes: 1,
+            ..crate::ingest::OpenOptions::default()
+        };
+        let opened = crate::ingest::JsonAdapter::json()
+            .open(crate::ingest::source::InputSource::Path(path), &options)
+            .expect("open")
+            .into_implicit_table()
+            .expect("table");
+        let mut view = TableView::from_opened_table(opened, Viewport::new(1, 3)).expect("view");
+        let saved = crate::saved_views::parse_saved_view_yaml(
+            r#"
+name: late
+filenames: [late.json]
+columns:
+  /late:
+    label: Later
+"#,
+        )
+        .expect("saved");
+        let resolved = crate::saved_views::resolve_structured_columns(
+            &saved.view,
+            view.table_definition().expect("definition"),
+        );
+        view.apply_saved_columns(&resolved, None);
+
+        let area = Rect::new(0, 0, 48, 6);
+        let mut initial = Buffer::empty(area);
+        render_table(&mut view, area, &mut initial);
+        let initial = buffer_text(&initial);
+        assert!(initial.contains("a"));
+        assert!(
+            initial.contains('+'),
+            "partial row count should be explicit"
+        );
+        assert!(!initial.contains("Later"));
+
+        view.goto(4, 0);
+        let mut completed = Buffer::empty(area);
+        render_table(&mut view, area, &mut completed);
+        let completed = buffer_text(&completed);
+        assert!(completed.contains("Later"));
+        assert!(completed.contains("6"));
+    }
+
+    #[test]
+    fn renders_source_defined_delimited_header() {
+        use crate::ingest::SourceAdapter;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("data.csv");
+        std::fs::write(&path, "Server,Requests\napi-1,42\n").expect("write");
+        let opened = crate::ingest::DelimitedAdapter
+            .open(
+                crate::ingest::source::InputSource::Path(path),
+                &crate::ingest::OpenOptions::default(),
+            )
+            .expect("open")
+            .into_implicit_table()
+            .expect("table");
+        let mut view = TableView::from_opened_table(opened, Viewport::new(4, 3)).expect("view");
+        let area = Rect::new(0, 0, 48, 6);
+        let mut buffer = Buffer::empty(area);
+        render_table(&mut view, area, &mut buffer);
+        let text = buffer_text(&buffer);
+        assert_eq!(
+            view.rendered_header().expect("rendered header"),
+            ["Server", "Requests"]
+        );
+        assert!(text.contains("Server"));
+        assert!(text.contains("api-1"));
+    }
+
+    #[test]
+    fn first_render_fills_resized_store_backed_viewport() {
+        use crate::ingest::SourceAdapter;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("rows.json");
+        let json = (0..20)
+            .map(|row| format!(r#"{{"value":"row-{row:02}"}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        std::fs::write(&path, format!("[{json}]")).expect("write");
+        let opened = crate::ingest::JsonAdapter::json()
+            .open(
+                crate::ingest::source::InputSource::Path(path),
+                &crate::ingest::OpenOptions::default(),
+            )
+            .expect("open")
+            .into_implicit_table()
+            .expect("table");
+        let mut view = TableView::from_opened_table(opened, Viewport::new(2, 10)).expect("view");
+        assert_eq!(view.rows().len(), 2);
+
+        let area = Rect::new(0, 0, 40, 9);
+        let mut buffer = Buffer::empty(area);
+        render_table(&mut view, area, &mut buffer);
+
+        assert_eq!(view.rows().len(), 6);
+        assert!(buffer_text(&buffer).contains("row-05"));
+    }
+
     #[cfg(feature = "saved-views")]
     #[test]
     fn themed_rendering_applies_conditional_colors_and_search_highlight() {
@@ -1599,7 +1755,7 @@ columns:
     }
 
     #[test]
-    fn rendering_does_not_show_partial_extra_columns_outside_viewport() {
+    fn rendering_clips_partial_final_column_instead_of_skipping_it() {
         let mut view =
             TableView::classify(rows(&[&["A", "B"], &["aaa", "bbb"]]), Viewport::new(10, 2));
         view.set_all_column_widths(3);
@@ -1608,8 +1764,10 @@ columns:
 
         render_table_with_theme(&mut view, area, &mut buffer, &default_theme(), Some("bbb"));
 
-        assert_eq!(buffer_text(&buffer).lines().nth(3), Some("aaa   "));
-        assert_eq!(buffer[(5, 3)].symbol(), " ");
+        let text = buffer_text(&buffer);
+        assert_eq!(text.lines().nth(2), Some("A    B"));
+        assert_eq!(text.lines().nth(3), Some("aaa  …"));
+        assert_eq!(buffer[(5, 3)].symbol(), "…");
     }
 
     #[test]

@@ -23,6 +23,26 @@ The viewer SHALL render the first screen for a large seekable input after format
 - **THEN** the adapter performs enough bounded work to define the initial columns, profile initial values, and provide visible rows
 - **AND** it does not materialize every row before the first frame
 
+#### Scenario: First frame fills the terminal viewport
+- **WHEN** the first terminal layout has room for more rows than the provisional viewport used while opening the source
+- **THEN** rendering indexes through the final visible row before drawing the first table frame
+- **AND** the user does not need to scroll before the available row area is filled
+
+#### Scenario: Sampled widths fit observed values
+- **WHEN** default sampled width calculation observes values of different rendered widths in any supported source format
+- **THEN** each automatic column width is at least the widest value observed in that sample
+- **AND** indexing or scrolling beyond the initial sample does not change an existing automatic width
+
+#### Scenario: Automatic widths respect the viewport
+- **WHEN** an automatically calculated column width exceeds 80 percent of the terminal viewport width
+- **THEN** the automatic width is capped at 80 percent of the viewport
+- **AND** an explicit user width or subsequent manual growth may exceed that automatic cap
+
+#### Scenario: Single-column resizing scales within cached values
+- **WHEN** the user shrinks or grows the current column with `,` or `.`
+- **THEN** each step changes its current width by 20 percent with a minimum one-character adjustment
+- **AND** shrinking stops at one character while growth stops at the widest currently cached rendered value in that column
+
 #### Scenario: Lazy threshold remains centralized
 - **WHEN** a size-based adapter selects between in-memory and incremental stores
 - **THEN** it uses the centralized 100 MiB default lazy threshold unless configuration overrides it
@@ -38,6 +58,12 @@ An incremental store SHALL index logical rows as navigation, search, skip, or re
 - **WHEN** the cursor moves beyond the currently indexed rows
 - **THEN** the store indexes additional logical rows through the target row or until the selected table ends
 
+#### Scenario: Jump to end scans sequentially
+- **WHEN** a user presses `G` on a large incremental file
+- **THEN** the viewer indexes and loads the remaining logical rows in one forward parser pass that records logical offsets and retains each decoded row in the active view cache
+- **AND** it does not parse the same remaining range once for indexing and again for row loading
+- **AND** it does not recompute frozen sampled widths or profiles for every newly indexed row
+
 #### Scenario: Multi-line delimited record
 - **WHEN** a quoted delimited record spans multiple physical lines
 - **THEN** the store indexes it as one logical row rather than treating each newline as a row boundary
@@ -52,6 +78,11 @@ The viewer SHALL give every existing table operation explicit behavior over a pa
 #### Scenario: Viewport-local operation
 - **WHEN** a user renders indexed rows, opens the current cell, views table information, or yanks the current cell
 - **THEN** the operation accesses only required indexed rows and does not clone or materialize the full visible table
+
+#### Scenario: Final column is partially visible
+- **WHEN** the next visible column begins within the terminal width but its configured width extends beyond the right edge
+- **THEN** the viewer renders and clips that column into the remaining screen cells instead of omitting it entirely
+- **AND** the same clipping boundary is used for its header and data cells
 
 #### Scenario: Progressive search or skip
 - **WHEN** search or skip-to-change needs to inspect rows beyond the indexed range

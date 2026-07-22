@@ -14,6 +14,21 @@ impl InputSource {
         }
         Self::Path(parse_path(value))
     }
+
+    pub fn display_name(&self) -> String {
+        match self {
+            Self::Path(path) => path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or_else(|| path.to_str().unwrap_or("input"))
+                .to_owned(),
+            Self::Stdin => "stdin".to_owned(),
+        }
+    }
+
+    pub fn is_seekable(&self) -> bool {
+        matches!(self, Self::Path(_))
+    }
 }
 
 pub fn read_stdin_then_restore_tty() -> io::Result<Vec<u8>> {

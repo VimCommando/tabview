@@ -1,6 +1,7 @@
 # Tabview
 
-View CSV and delimited text files in a spreadsheet-like terminal interface.
+View delimited text, JSON, and NDJSON files in a spreadsheet-like terminal
+interface.
 
 **This project is functional but future development will be sporadic and
 limited. For a more fully featured CSV viewer/spreadsheet app, check out the
@@ -26,6 +27,9 @@ contents of that cell are shown next to it.
 
 - Rust command-line application distributed as the `tabview` binary.
 - Spreadsheet-like view for visualizing tabular data.
+- Automatic or explicit delimited, JSON, and NDJSON input selection.
+- RFC 6901 JSON Pointer selection for tables embedded in response documents.
+- Incremental indexing for large seekable inputs and typed JSON scalar values.
 - Vim-like navigation, including `h`, `j`, `k`, `l`, `g`, `G`, marks, and
   numeric prefixes such as `12G`.
 - Persistent header row toggling.
@@ -81,13 +85,33 @@ tabview <filename> --width max
 tabview <filename> --width 20
 tabview <filename> --view cat-shards
 tabview <filename> --no-view
+tabview response.json --json-path /hits/hits
+tabview records.ndjson --format ndjson
+tabview response.data --format json --schema-scan full
 ```
 
 Read from standard input:
 
 ```sh
 cat data.csv | tabview -
+cat records.ndjson | tabview --format ndjson -
 ```
+
+`--format auto|delimited|json|ndjson` defaults to `auto`. Filename extensions
+are considered before bounded content probing; an explicit format always wins.
+Delimited-only options such as `--delimiter` imply delimited input under
+`auto` and are rejected with an explicitly selected JSON format.
+
+For regular JSON, the selected root object becomes one row and the elements of
+a selected root array become rows. `--json-path` uses RFC 6901 JSON Pointer,
+not JSONPath. For example, `--json-path /hits/hits` selects Elasticsearch search
+hits while ignoring response metadata. For NDJSON the pointer is resolved in
+each complete document and the selected object or array remains that document's
+single row.
+
+Nested objects are flattened to canonical row-relative pointers. Nested arrays
+remain atomic JSON cells. Native null, boolean, integer, floating-point, and
+text values remain distinct; notably, JSON `null` is not an empty string.
 
 Use as the pager for MySQL by setting these options in `~/.my.cnf`:
 
@@ -226,11 +250,15 @@ Saved views can define sparse per-column state:
 name: cat-shards
 filenames:
   - cat_shards.txt
+format: delimited
+schema_scan: default
+nulls: last
 columns:
   shard:
     type: integer
     width: header
     align: left
+    nulls: first
   "*count":
     type: integer
     format: locale
@@ -259,6 +287,38 @@ uses the system POSIX locale with `en_US` fallback, or a top-level `locale`.
 Headers are prefixed first with sort state, then filter state: `▲` for
 ascending sort, `▼` for descending sort, `+` for filter-in, `-` for filter-out,
 and `±` for multiple filters. Truncation applies after those prefix markers.
+
+Source options are selected before the table opens. Saved views accept
+`format`, `json_path`, and `schema_scan`; precedence is explicit CLI options,
+then the selected saved view, then defaults. Supplying `--schema-scan default`
+therefore overrides a saved `schema_scan: full` for one invocation.
+
+Structured column configuration should use exact, case-sensitive canonical
+JSON Pointers such as `/_source/user/email`. An unambiguous compact display
+label is accepted as a fallback. A column can set `label` without changing its
+canonical identity or raw data. Top-level and per-column `nulls: first|last`
+control direction-independent sort placement, with the column policy winning
+over the view policy and `last` as the built-in default.
+
+## Large Files and Schema Discovery
+
+Large seekable inputs are opened with incremental logical-row indexing. CSV
+offsets come from the CSV parser, so quoted multiline records remain one row.
+Navigation requests additional bounded ranges; viewport rendering, current-cell
+popups, and yanks do not require a full-table clone.
+
+JSON schema discovery examines up to 100 MiB of selected logical-row payload by
+default and finishes the row crossing that boundary. A schema stopped at the
+bound is provisional: newly encountered canonical paths append on the right,
+earlier rows receive nulls, and existing labels and order remain fixed. Use
+`--schema-scan full` when every column and inferred source type must be known
+before the first data frame.
+
+Exact sorting, filtering, maximum-width calculation, full auto-range profiling,
+and similar whole-dataset operations may need to index or materialize the
+selected table. Their cost grows with the complete source even when initial
+opening was bounded. Stdin and encodings that cannot safely use byte offsets
+use materialized storage.
 
 Columns can also define ordered conditional color rules. The first matching
 rule wins, and colors affect only cell styling; raw values, formatted values,

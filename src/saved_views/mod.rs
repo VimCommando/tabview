@@ -6,6 +6,8 @@ use regex::Regex;
 use serde::Deserialize;
 use yaml_serde::{Mapping, Value};
 
+use crate::ingest::{InputFormat, JsonPointer, OpenOptions, SchemaScan, SourceOptionOverrides};
+use crate::table::{ColumnSourceIdentity, NullPlacement, SchemaState, TableDefinition};
 use crate::theme::{
     ConditionalColorRule, ConditionalValue, GradientStop, IdentifierColors, MatchEntry, RangeEntry,
 };
@@ -18,6 +20,10 @@ pub struct SavedView {
     pub name: String,
     pub locale: Option<String>,
     pub filenames: Vec<FilenamePattern>,
+    pub format: Option<InputFormat>,
+    pub json_path: Option<JsonPointer>,
+    pub schema_scan: Option<SchemaScan>,
+    pub nulls: Option<NullPlacement>,
     pub columns: BTreeMap<String, ColumnView>,
     pub sort: Vec<SortKey>,
     pub filters: Vec<SavedFilter>,
@@ -52,6 +58,7 @@ pub struct SelectedSavedView<'a> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedColumns {
     pub columns: Vec<Option<ResolvedColumnView>>,
+    pub pending: BTreeMap<String, ColumnView>,
     pub warnings: Vec<SavedViewWarning>,
 }
 
@@ -83,6 +90,8 @@ pub enum FilenamePatternKind {
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ColumnView {
+    pub label: Option<String>,
+    pub nulls: Option<NullPlacement>,
     pub column_type: Option<ColumnType>,
     pub format: Option<DisplayFormat>,
     pub mask: Option<NumberMask>,
@@ -214,6 +223,10 @@ struct RawSavedView {
     name: String,
     locale: Option<String>,
     filenames: Vec<String>,
+    format: Option<String>,
+    json_path: Option<String>,
+    schema_scan: Option<String>,
+    nulls: Option<String>,
     #[serde(default)]
     columns: BTreeMap<String, RawColumnView>,
     #[serde(default)]
@@ -225,6 +238,8 @@ struct RawSavedView {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawColumnView {
+    label: Option<String>,
+    nulls: Option<String>,
     #[serde(rename = "type")]
     column_type: Option<String>,
     format: Option<String>,
@@ -492,6 +507,76 @@ pub fn resolve_columns(view: &SavedView, headers: &[String]) -> ResolvedColumns 
 
     ResolvedColumns {
         columns: resolved,
+        pending: BTreeMap::new(),
+        warnings,
+    }
+}
+
+pub fn resolve_structured_columns(
+    view: &SavedView,
+    definition: &TableDefinition,
+) -> ResolvedColumns {
+    let mut resolved = vec![None; definition.columns.len()];
+    let mut matched_keys = BTreeSet::new();
+    let mut warnings = Vec::new();
+
+    for (index, column) in definition.columns.iter().enumerate() {
+        let canonical = match &column.source_identity {
+            ColumnSourceIdentity::JsonPointer(pointer) => Some(pointer.as_str()),
+            _ => None,
+        };
+        if let Some((key, column_view)) =
+            canonical.and_then(|canonical| view.columns.get_key_value(canonical))
+        {
+            matched_keys.insert(key.clone());
+            resolved[index] = Some(ResolvedColumnView {
+                column_index: index,
+                source_key: key.clone(),
+                view: column_view.clone(),
+            });
+            continue;
+        }
+
+        let label_matches = definition
+            .columns
+            .iter()
+            .filter(|candidate| candidate.display_name == column.display_name)
+            .count();
+        if label_matches == 1 {
+            if let Some((key, column_view)) = view.columns.get_key_value(&column.display_name) {
+                matched_keys.insert(key.clone());
+                resolved[index] = Some(ResolvedColumnView {
+                    column_index: index,
+                    source_key: key.clone(),
+                    view: column_view.clone(),
+                });
+            }
+        } else if view.columns.contains_key(&column.display_name) {
+            warnings.push(warning(
+                format!("columns.{}", column.display_name),
+                "display label is ambiguous; use a canonical JSON Pointer",
+            ));
+        }
+    }
+
+    let mut pending = BTreeMap::new();
+    for (key, column_view) in &view.columns {
+        if matched_keys.contains(key) {
+            continue;
+        }
+        if definition.schema_state == SchemaState::Provisional && key.starts_with('/') {
+            pending.insert(key.clone(), column_view.clone());
+        } else {
+            warnings.push(warning(
+                format!("columns.{key}"),
+                "configured column matched no structured source column",
+            ));
+        }
+    }
+
+    ResolvedColumns {
+        columns: resolved,
+        pending,
         warnings,
     }
 }
@@ -512,8 +597,69 @@ pub fn resolve_column_reference(headers: &[String], key: &str) -> Option<usize> 
         })
 }
 
+pub fn resolve_structured_column_reference(
+    definition: &TableDefinition,
+    key: &str,
+) -> Option<usize> {
+    definition
+        .columns
+        .iter()
+        .position(|column| {
+            matches!(
+                &column.source_identity,
+                ColumnSourceIdentity::JsonPointer(pointer) if pointer.as_str() == key
+            )
+        })
+        .or_else(|| {
+            let matches = definition
+                .columns
+                .iter()
+                .enumerate()
+                .filter(|(_, column)| column.display_name == key)
+                .map(|(index, _)| index)
+                .collect::<Vec<_>>();
+            (matches.len() == 1).then_some(matches[0])
+        })
+}
+
 fn validate_raw_view(raw: RawSavedView) -> ValidatedSavedView {
     let mut warnings = Vec::new();
+    let format = raw.format.and_then(|value| match value.parse() {
+        Ok(value) => Some(value),
+        Err(_) => {
+            warnings.push(warning("format", format!("unknown input format '{value}'")));
+            None
+        }
+    });
+    let json_path = raw.json_path.and_then(|value| match value.parse() {
+        Ok(value) => Some(value),
+        Err(_) => {
+            warnings.push(warning(
+                "json_path",
+                format!("invalid RFC 6901 JSON Pointer '{value}'"),
+            ));
+            None
+        }
+    });
+    let schema_scan = raw.schema_scan.and_then(|value| match value.parse() {
+        Ok(value) => Some(value),
+        Err(_) => {
+            warnings.push(warning(
+                "schema_scan",
+                format!("unknown schema scan policy '{value}'"),
+            ));
+            None
+        }
+    });
+    let nulls = raw.nulls.and_then(|value| {
+        parse_null_placement(&value).or_else(|| {
+            warnings.push(warning(
+                "nulls",
+                format!("unknown null placement '{value}'"),
+            ));
+            None
+        })
+    });
     let locale = raw.locale.and_then(|locale| {
         if is_posix_locale(&locale) {
             Some(locale)
@@ -559,6 +705,10 @@ fn validate_raw_view(raw: RawSavedView) -> ValidatedSavedView {
             name: raw.name,
             locale,
             filenames,
+            format,
+            json_path,
+            schema_scan,
+            nulls,
             columns,
             sort,
             filters,
@@ -820,6 +970,23 @@ fn validate_column(
             None
         })
     });
+    let label = raw.label.and_then(|value| {
+        if value.is_empty() {
+            warnings.push(warning(field("label"), "label cannot be empty"));
+            None
+        } else {
+            Some(value)
+        }
+    });
+    let nulls = raw.nulls.and_then(|value| {
+        parse_null_placement(&value).or_else(|| {
+            warnings.push(warning(
+                field("nulls"),
+                format!("unknown null placement '{value}'"),
+            ));
+            None
+        })
+    });
     if format == Some(DisplayFormat::Mask) && mask.is_none() {
         warnings.push(warning(field("mask"), "format: mask requires a valid mask"));
     }
@@ -843,6 +1010,8 @@ fn validate_column(
     Some((
         key,
         ColumnView {
+            label,
+            nulls,
             column_type,
             format,
             mask,
@@ -1318,6 +1487,32 @@ fn parse_align(value: &str) -> Option<ColumnAlign> {
     }
 }
 
+fn parse_null_placement(value: &str) -> Option<NullPlacement> {
+    match value {
+        "first" => Some(NullPlacement::First),
+        "last" => Some(NullPlacement::Last),
+        _ => None,
+    }
+}
+
+impl SavedView {
+    pub fn source_options(&self) -> SourceOptionOverrides {
+        SourceOptionOverrides {
+            format: self.format,
+            json_path: self.json_path.clone(),
+            schema_scan: self.schema_scan,
+        }
+    }
+
+    pub fn merged_open_options(
+        &self,
+        defaults: OpenOptions,
+        cli: &SourceOptionOverrides,
+    ) -> OpenOptions {
+        OpenOptions::merge(defaults, &self.source_options(), cli)
+    }
+}
+
 fn parse_sort_direction(value: &str) -> Option<SortDirection> {
     match value {
         "asc" => Some(SortDirection::Asc),
@@ -1419,6 +1614,75 @@ filters:
         );
         assert_eq!(parsed.view.sort.len(), 1);
         assert_eq!(parsed.view.filters.len(), 1);
+    }
+
+    #[test]
+    fn parses_and_merges_source_label_and_null_options() {
+        let parsed = parse_saved_view_yaml(
+            r#"
+name: elastic
+filenames: [response.json]
+format: json
+json_path: /hits/hits
+schema_scan: full
+nulls: first
+columns:
+  /_source/user/email:
+    label: User email
+    nulls: last
+"#,
+        )
+        .expect("parse");
+
+        assert!(parsed.warnings.is_empty());
+        assert_eq!(parsed.view.format, Some(InputFormat::Json));
+        assert_eq!(
+            parsed.view.json_path.as_ref().expect("path").segments(),
+            ["hits", "hits"]
+        );
+        assert_eq!(parsed.view.schema_scan, Some(SchemaScan::Full));
+        assert_eq!(parsed.view.nulls, Some(NullPlacement::First));
+        let email = parsed
+            .view
+            .columns
+            .get("/_source/user/email")
+            .expect("email");
+        assert_eq!(email.label.as_deref(), Some("User email"));
+        assert_eq!(email.nulls, Some(NullPlacement::Last));
+
+        let merged = parsed.view.merged_open_options(
+            OpenOptions::default(),
+            &SourceOptionOverrides {
+                schema_scan: Some(SchemaScan::Default),
+                ..SourceOptionOverrides::default()
+            },
+        );
+        assert_eq!(merged.format, InputFormat::Json);
+        assert_eq!(merged.schema_scan, SchemaScan::Default);
+    }
+
+    #[test]
+    fn invalid_source_and_null_values_warn_non_fatally() {
+        let parsed = parse_saved_view_yaml(
+            r#"
+name: bad-source
+filenames: [data]
+format: sqlite
+json_path: hits/hits
+schema_scan: endless
+nulls: middle
+columns:
+  a:
+    label: ""
+    nulls: middle
+"#,
+        )
+        .expect("parse");
+        assert_eq!(parsed.warnings.len(), 6);
+        assert_eq!(parsed.view.format, None);
+        assert_eq!(parsed.view.json_path, None);
+        assert_eq!(parsed.view.schema_scan, None);
+        assert_eq!(parsed.view.nulls, None);
     }
 
     #[test]
@@ -1568,6 +1832,10 @@ sort:
                 name: "cat-shards".to_owned(),
                 locale: None,
                 filenames: Vec::new(),
+                format: None,
+                json_path: None,
+                schema_scan: None,
+                nulls: None,
                 columns: BTreeMap::new(),
                 sort: Vec::new(),
                 filters: Vec::new(),
@@ -1660,6 +1928,122 @@ columns:
             .warnings
             .iter()
             .any(|warning| warning.field == "columns.missing"));
+    }
+
+    #[test]
+    fn structured_columns_prefer_canonical_identity_and_retain_pending_paths() {
+        let parsed = parse_saved_view_yaml(
+            r#"
+name: json
+filenames: [data.json]
+columns:
+  /customer/email:
+    label: Customer
+  email:
+    visible: false
+  /late/value:
+    width: 12
+"#,
+        )
+        .expect("parse");
+        let generation = crate::table::SourceGeneration::new();
+        let definition = TableDefinition {
+            generation,
+            columns: vec![
+                crate::table::ColumnDefinition {
+                    id: crate::table::ColumnId {
+                        generation,
+                        ordinal: 0,
+                    },
+                    source_identity: ColumnSourceIdentity::JsonPointer(
+                        "/customer/email".parse().unwrap(),
+                    ),
+                    display_name: "email".to_owned(),
+                    source_type: crate::table::LogicalType::Text,
+                    type_origin: crate::table::TypeOrigin::Inferred,
+                },
+                crate::table::ColumnDefinition {
+                    id: crate::table::ColumnId {
+                        generation,
+                        ordinal: 1,
+                    },
+                    source_identity: ColumnSourceIdentity::JsonPointer(
+                        "/billing/email".parse().unwrap(),
+                    ),
+                    display_name: "email".to_owned(),
+                    source_type: crate::table::LogicalType::Text,
+                    type_origin: crate::table::TypeOrigin::Inferred,
+                },
+            ],
+            schema_state: SchemaState::Provisional,
+            relation: crate::table::RelationMetadata::implicit("data", true),
+        };
+        let resolved = resolve_structured_columns(&parsed.view, &definition);
+        assert_eq!(
+            resolved.columns[0].as_ref().expect("canonical").source_key,
+            "/customer/email"
+        );
+        assert!(resolved.columns[1].is_none());
+        assert!(resolved.pending.contains_key("/late/value"));
+        assert!(resolved
+            .warnings
+            .iter()
+            .any(|warning| warning.message.contains("ambiguous")));
+    }
+
+    #[test]
+    fn elasticsearch_saved_view_path_opens_hits_and_resolves_canonical_columns() {
+        use crate::ingest::SourceAdapter;
+
+        let parsed = parse_saved_view_yaml(
+            r#"
+name: elasticsearch hits
+filenames: [elasticsearch-response.json]
+format: json
+json_path: /hits/hits
+columns:
+  /_source/user/id:
+    label: User ID
+"#,
+        )
+        .expect("saved view");
+        let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("sample/json/elasticsearch-response.json");
+        let options = parsed
+            .view
+            .merged_open_options(OpenOptions::default(), &SourceOptionOverrides::default());
+        let table = crate::ingest::JsonAdapter::json()
+            .open(crate::ingest::source::InputSource::Path(fixture), &options)
+            .expect("open fixture")
+            .into_implicit_table()
+            .expect("table");
+        let resolved = resolve_structured_columns(&parsed.view, &table.definition);
+
+        let user_id = table
+            .definition
+            .columns
+            .iter()
+            .position(|column| {
+                matches!(
+                    &column.source_identity,
+                    ColumnSourceIdentity::JsonPointer(pointer)
+                        if pointer.as_str() == "/_source/user/id"
+                )
+            })
+            .expect("user id column");
+        assert_eq!(
+            resolved.columns[user_id]
+                .as_ref()
+                .and_then(|column| column.view.label.as_deref()),
+            Some("User ID")
+        );
+        assert!(!table.definition.columns.iter().any(|column| {
+            matches!(
+                &column.source_identity,
+                ColumnSourceIdentity::JsonPointer(pointer)
+                    if pointer.as_str().contains("took") || pointer.as_str().contains("total")
+            )
+        }));
     }
 
     #[test]
