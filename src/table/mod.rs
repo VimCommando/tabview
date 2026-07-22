@@ -517,6 +517,27 @@ impl LazyFileTable {
         Ok(())
     }
 
+    fn added_column_delta(&self, previous_column_count: usize) -> SchemaDelta {
+        SchemaDelta {
+            added_columns: (previous_column_count..self.column_count)
+                .map(|ordinal| ColumnDefinition {
+                    id: ColumnId {
+                        generation: self.generation,
+                        ordinal: ordinal as u32,
+                    },
+                    source_identity: ColumnSourceIdentity::Delimited {
+                        ordinal,
+                        name: None,
+                    },
+                    display_name: format!("Column {}", ordinal + 1),
+                    source_type: LogicalType::Text,
+                    type_origin: TypeOrigin::Declared,
+                })
+                .collect(),
+            ..SchemaDelta::default()
+        }
+    }
+
     fn index_through(&mut self, index: RowIndex) -> anyhow::Result<()> {
         if self.eof || self.offsets.len() > index.0 {
             return Ok(());
@@ -689,10 +710,11 @@ impl TableStore for LazyFileTable {
     }
 
     fn ensure_indexed_through(&mut self, index: RowIndex) -> anyhow::Result<IndexProgress> {
+        let previous_column_count = self.column_count;
         self.index_through(index)?;
         Ok(IndexProgress {
             row_count: self.row_count(),
-            schema_delta: SchemaDelta::default(),
+            schema_delta: self.added_column_delta(previous_column_count),
             bytes_scanned: self.scan_offset,
         })
     }
@@ -712,11 +734,12 @@ impl TableStore for LazyFileTable {
             && request.start.0 == self.offsets.len()
             && scan_target >= through.0
         {
+            let previous_column_count = self.column_count;
             let scan = self.scan_unindexed_rows_forward(request, visitor)?;
             return Ok(IndexScanProgress {
                 index: IndexProgress {
                     row_count: self.row_count(),
-                    schema_delta: SchemaDelta::default(),
+                    schema_delta: self.added_column_delta(previous_column_count),
                     bytes_scanned: self.scan_offset,
                 },
                 scan,
@@ -1043,6 +1066,61 @@ mod tests {
         finish_index(&mut table);
         assert_eq!(table.row_count(), RowCount::Exact(2));
         assert_eq!(table.column_count(), 3);
+    }
+
+    #[test]
+    fn lazy_file_table_reports_columns_added_during_indexing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ragged.csv");
+        std::fs::write(&path, "header\none\nwide,x,y\n").expect("write");
+        let mut table = LazyFileTable::open(&path, ParseOptions::default()).expect("lazy table");
+
+        assert_eq!(text_row(&mut table, 1), ["one"]);
+        assert_eq!(table.column_count(), 1);
+        let progress = table
+            .ensure_indexed_through(RowIndex(2))
+            .expect("index wider row");
+
+        assert_eq!(table.column_count(), 3);
+        assert_eq!(progress.schema_delta.added_columns.len(), 2);
+        assert_eq!(
+            progress
+                .schema_delta
+                .added_columns
+                .iter()
+                .map(|column| column.display_name.as_str())
+                .collect::<Vec<_>>(),
+            ["Column 2", "Column 3"]
+        );
+    }
+
+    #[test]
+    fn lazy_file_table_reports_columns_added_during_forward_scan() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ragged.csv");
+        std::fs::write(&path, "header\none\nwide,x,y\n").expect("write");
+        let mut table = LazyFileTable::open(&path, ParseOptions::default()).expect("lazy table");
+        assert_eq!(text_row(&mut table, 1), ["one"]);
+        let mut delivered = Vec::new();
+        let mut collect = |_: RowIndex, row: &Row| {
+            delivered.push(row.display_cells());
+            ControlFlow::Continue(())
+        };
+
+        let progress = table
+            .index_and_scan_rows(
+                RowIndex(2),
+                ScanRequest {
+                    start: RowIndex(2),
+                    direction: ScanDirection::Forward,
+                    max_rows: 1,
+                },
+                &mut collect,
+            )
+            .expect("scan wider row");
+
+        assert_eq!(delivered, [vec!["wide", "x", "y"]]);
+        assert_eq!(progress.index.schema_delta.added_columns.len(), 2);
     }
 
     #[test]
