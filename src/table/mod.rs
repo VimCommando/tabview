@@ -8,10 +8,10 @@ pub use query::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
-use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use csv::ReaderBuilder;
 use unicode_width::UnicodeWidthStr;
@@ -479,7 +479,7 @@ pub struct LazyFileTable {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SourceFingerprint {
     len: u64,
-    sample_hash: u64,
+    modified: SystemTime,
 }
 
 impl LazyFileTable {
@@ -557,10 +557,7 @@ impl LazyFileTable {
                 eof = true;
                 break;
             }
-            let relative = record
-                .position()
-                .map(|position| position.byte())
-                .unwrap_or(0);
+            let relative = byte_record_offset(&record)?;
             new_offsets.push(base_offset + relative);
             new_column_count = new_column_count.max(record.len());
         }
@@ -614,10 +611,7 @@ impl LazyFileTable {
                 eof = true;
                 break;
             }
-            let relative = record
-                .position()
-                .map(|position| position.byte())
-                .unwrap_or(0);
+            let relative = byte_record_offset(&record)?;
             new_offsets.push(base_offset + relative);
             new_column_count = new_column_count.max(record.len());
 
@@ -870,22 +864,17 @@ impl TableStore for LazyFileTable {
 
 fn source_fingerprint(path: &Path) -> anyhow::Result<SourceFingerprint> {
     let metadata = std::fs::metadata(path)?;
-    let len = metadata.len();
-    let mut file = File::open(path)?;
-    let mut hasher = DefaultHasher::new();
-    len.hash(&mut hasher);
-    let mut sample = vec![0_u8; LAZY_FILE_SAMPLE_BYTES as usize];
-    let first_len = file.read(&mut sample)?;
-    sample[..first_len].hash(&mut hasher);
-    if len > LAZY_FILE_SAMPLE_BYTES {
-        file.seek(SeekFrom::Start(len.saturating_sub(LAZY_FILE_SAMPLE_BYTES)))?;
-        let last_len = file.read(&mut sample)?;
-        sample[..last_len].hash(&mut hasher);
-    }
     Ok(SourceFingerprint {
-        len,
-        sample_hash: hasher.finish(),
+        len: metadata.len(),
+        modified: metadata.modified()?,
     })
+}
+
+fn byte_record_offset(record: &csv::ByteRecord) -> anyhow::Result<u64> {
+    record
+        .position()
+        .map(|position| position.byte())
+        .ok_or_else(|| anyhow::anyhow!("CSV parser did not report a logical-record byte offset"))
 }
 
 fn sniff_file_delimiter(path: &Path, options: &ParseOptions) -> anyhow::Result<u8> {
@@ -1304,6 +1293,13 @@ mod tests {
         assert!(error.to_string().contains("reload is required"));
         assert_eq!(table.row_count(), prior_count);
         assert_eq!(table.scan_offset, prior_offset);
+    }
+
+    #[test]
+    fn missing_csv_record_position_is_an_indexing_error() {
+        let record = csv::ByteRecord::new();
+        let error = byte_record_offset(&record).expect_err("missing record position");
+        assert!(error.to_string().contains("byte offset"));
     }
 
     #[test]
