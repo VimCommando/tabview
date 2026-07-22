@@ -836,36 +836,54 @@ impl TableStore for LazyFileTable {
             });
         }
 
+        self.index_through(request.start)?;
+        self.ensure_source_unchanged()?;
+        let Some(_) = self.offsets.get(request.start.0) else {
+            return Ok(ScanProgress {
+                visited: 0,
+                next: None,
+                reached_end: self.eof,
+            });
+        };
+        let row_count = request.max_rows.min(request.start.0.saturating_add(1));
+        let first = request.start.0.saturating_add(1).saturating_sub(row_count);
+        let mut file = File::open(&self.path)?;
+        file.seek(SeekFrom::Start(self.offsets[first]))?;
+        let mut reader = csv_reader_builder(&self.options).from_reader(file);
+        let mut record = csv::ByteRecord::new();
+        let mut rows = Vec::with_capacity(row_count);
+        for ordinal in first..=request.start.0 {
+            if !reader.read_byte_record(&mut record)? {
+                anyhow::bail!("indexed CSV record could not be read at row {ordinal}");
+            }
+            rows.push(row_from_byte_record(
+                &record,
+                &self.options,
+                self.generation,
+                RowIndex(ordinal),
+                self.column_count,
+            )?);
+        }
+        self.ensure_source_unchanged()?;
+
         let mut visited = 0;
-        let mut current = request.start.0;
-        while visited < request.max_rows {
-            let Some(row) = self.row(RowIndex(current))? else {
-                break;
-            };
+        for row in rows.iter().rev() {
             visited += 1;
-            if visitor.visit(RowIndex(current), &row).is_break() {
+            if visitor
+                .visit(RowIndex(row.id.ordinal as usize), row)
+                .is_break()
+            {
                 return Ok(ScanProgress {
                     visited,
                     next: None,
                     reached_end: false,
                 });
             }
-            match request.direction {
-                ScanDirection::Forward => current += 1,
-                ScanDirection::Reverse if current > 0 => current -= 1,
-                ScanDirection::Reverse => {
-                    return Ok(ScanProgress {
-                        visited,
-                        next: None,
-                        reached_end: true,
-                    });
-                }
-            }
         }
-        let reached_end = self.eof && current >= self.offsets.len();
+        let reached_end = first == 0;
         Ok(ScanProgress {
             visited,
-            next: (!reached_end).then_some(RowIndex(current)),
+            next: (!reached_end).then_some(RowIndex(first - 1)),
             reached_end,
         })
     }
@@ -1081,6 +1099,42 @@ mod tests {
                 vec!["x".to_owned(), "y".to_owned()]
             ]
         );
+    }
+
+    #[test]
+    fn lazy_file_table_reverse_scan_reads_an_indexed_range() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("data.csv");
+        std::fs::write(&path, "a\n\"b\nline\"\nc\nd\n").expect("write");
+        let mut table = LazyFileTable::open(&path, ParseOptions::default()).expect("lazy table");
+        finish_index(&mut table);
+        let mut delivered = Vec::new();
+        let mut collect = |index: RowIndex, row: &Row| {
+            delivered.push((index, row.display_cells()));
+            ControlFlow::Continue(())
+        };
+
+        let progress = table
+            .scan_rows(
+                ScanRequest {
+                    start: RowIndex(3),
+                    direction: ScanDirection::Reverse,
+                    max_rows: 3,
+                },
+                &mut collect,
+            )
+            .expect("reverse scan");
+
+        assert_eq!(
+            delivered,
+            [
+                (RowIndex(3), vec!["d".to_owned()]),
+                (RowIndex(2), vec!["c".to_owned()]),
+                (RowIndex(1), vec!["b\nline".to_owned()]),
+            ]
+        );
+        assert_eq!(progress.next, Some(RowIndex(0)));
+        assert!(!progress.reached_end);
     }
 
     #[test]

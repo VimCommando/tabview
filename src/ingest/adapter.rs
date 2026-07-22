@@ -129,9 +129,6 @@ fn probe_content(sample: &[u8]) -> InputFormat {
         return InputFormat::Delimited;
     };
     let trimmed = text.trim_start_matches('\u{feff}').trim();
-    if trimmed.starts_with('[') {
-        return InputFormat::Json;
-    }
     let structured_lines = trimmed
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -146,7 +143,7 @@ fn probe_content(sample: &[u8]) -> InputFormat {
         .count();
     if nonempty_lines > 1 && structured_lines == nonempty_lines {
         InputFormat::Ndjson
-    } else if trimmed.starts_with('{') {
+    } else if trimmed.starts_with('{') || trimmed.starts_with('[') {
         InputFormat::Json
     } else {
         InputFormat::Delimited
@@ -176,6 +173,10 @@ mod tests {
                 &InputSource::Path(PathBuf::from("data.jsonl")),
                 b""
             ),
+            InputFormat::Ndjson
+        );
+        assert_eq!(
+            FormatResolver::resolve(InputFormat::Auto, &InputSource::Stdin, b"[1]\n[2]\n"),
             InputFormat::Ndjson
         );
         assert_eq!(
