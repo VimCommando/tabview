@@ -619,12 +619,11 @@ impl LazyFileTable {
         let mut reader = csv_reader_builder(&self.options).from_reader(file);
         let mut record = csv::ByteRecord::new();
         let mut new_offsets = Vec::new();
+        let mut buffered_rows = Vec::new();
         let mut new_column_count = self.column_count;
-        let mut visited = 0;
         let mut eof = false;
-        let mut visitor_broke = false;
 
-        while visited < request.max_rows {
+        while buffered_rows.len() < request.max_rows {
             if !reader.read_byte_record(&mut record)? {
                 eof = true;
                 break;
@@ -634,15 +633,21 @@ impl LazyFileTable {
             new_column_count = new_column_count.max(record.len());
 
             let index = RowIndex(self.offsets.len() + new_offsets.len() - 1);
-            let row = row_from_byte_record(
-                &record,
-                &self.options,
-                self.generation,
-                index,
-                new_column_count,
-            )?;
+            let row =
+                row_from_byte_record(&record, &self.options, self.generation, index, record.len())?;
+            buffered_rows.push(row);
+        }
+
+        for row in &mut buffered_rows {
+            row.cells
+                .resize(new_column_count, CellValue::Text(String::new()));
+        }
+        let mut visited = 0;
+        let mut visitor_broke = false;
+        for row in &buffered_rows {
             visited += 1;
-            if visitor.visit(index, &row).is_break() {
+            let index = RowIndex(row.id.ordinal as usize);
+            if visitor.visit(index, row).is_break() {
                 visitor_broke = true;
                 break;
             }
@@ -1241,6 +1246,33 @@ mod tests {
 
         assert_eq!(delivered, [vec!["wide", "x", "y"]]);
         assert_eq!(progress.index.schema_delta.added_columns.len(), 2);
+    }
+
+    #[test]
+    fn lazy_forward_scan_pads_earlier_rows_to_the_chunk_width() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ragged.csv");
+        std::fs::write(&path, "header\none\nnarrow\nwide,x,y\n").expect("write");
+        let mut table = LazyFileTable::open(&path, ParseOptions::default()).expect("lazy table");
+        assert_eq!(text_row(&mut table, 1), ["one"]);
+        let mut delivered = Vec::new();
+        let mut collect = |_: RowIndex, row: &Row| {
+            delivered.push(row.display_cells());
+            ControlFlow::Continue(())
+        };
+
+        table
+            .scan_rows(
+                ScanRequest {
+                    start: RowIndex(2),
+                    direction: ScanDirection::Forward,
+                    max_rows: 2,
+                },
+                &mut collect,
+            )
+            .expect("scan ragged chunk");
+
+        assert_eq!(delivered, [vec!["narrow", "", ""], vec!["wide", "x", "y"]]);
     }
 
     #[test]
