@@ -1251,7 +1251,7 @@ fn apply_saved_view(
     let structured_definition = view.table_definition().filter(|definition| {
         definition.columns.iter().any(|column| {
             matches!(
-                column.source_identity,
+                &column.source_identity,
                 crate::table::ColumnSourceIdentity::JsonPointer(_)
             )
         })
@@ -1278,7 +1278,7 @@ fn apply_saved_view(
                 .filter(|definition| {
                     definition.columns.iter().any(|column| {
                         matches!(
-                            column.source_identity,
+                            &column.source_identity,
                             crate::table::ColumnSourceIdentity::JsonPointer(_)
                         )
                     })
@@ -1314,7 +1314,7 @@ fn apply_saved_view(
             .filter(|definition| {
                 definition.columns.iter().any(|column| {
                     matches!(
-                        column.source_identity,
+                        &column.source_identity,
                         crate::table::ColumnSourceIdentity::JsonPointer(_)
                     )
                 })
