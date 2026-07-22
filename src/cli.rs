@@ -108,7 +108,9 @@ impl Config {
                 option: "delimited parsing options",
             });
         }
-        if explicit_format == Some(InputFormat::Delimited) && args.json_path.is_some() {
+        if args.json_path.is_some()
+            && (explicit_format == Some(InputFormat::Delimited) || delimited_option_selected)
+        {
             return Err(CliError::IncompatibleOptions {
                 format: InputFormat::Delimited,
                 option: "--json-path",
@@ -499,6 +501,30 @@ mod tests {
         assert!(
             Args::try_parse_from(["tabview", "--json-path", "hits/hits", "response.json"]).is_err()
         );
+    }
+
+    #[test]
+    fn rejects_json_path_with_implicit_delimited_options() {
+        let error = Config::from_args(
+            Args::try_parse_from([
+                "tabview",
+                "--json-path",
+                "/rows",
+                "--delimiter",
+                "|",
+                "response.data",
+            ])
+            .expect("arguments"),
+        )
+        .expect_err("incompatible options");
+
+        assert!(matches!(
+            error,
+            CliError::IncompatibleOptions {
+                format: InputFormat::Delimited,
+                option: "--json-path"
+            }
+        ));
     }
 
     #[test]

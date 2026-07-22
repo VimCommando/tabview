@@ -87,6 +87,9 @@ pub(crate) fn execute_query_with_profiles(
     numeric_profile: &dyn Fn(ColumnId) -> crate::ops::sort::NumericColumnProfile,
     render: &dyn Fn(ColumnId, &CellValue) -> String,
 ) -> anyhow::Result<Box<dyn TableStore>> {
+    if store.generation() != definition.generation {
+        anyhow::bail!("table store belongs to a different source generation");
+    }
     let prepared_regexes = prepare_query(definition, query)?;
     match store.try_execute_query(query)? {
         QueryExecution::Executed(result) => {
@@ -631,5 +634,18 @@ mod tests {
             validate_query(&definition, &query),
             Err(QueryValidationError::InvalidNumericOperand)
         );
+
+        let mut mismatched_store =
+            InMemoryTable::from_text_rows(SourceGeneration::new(), vec![vec!["1".to_owned()]]);
+        let query = TableQuery {
+            generation: definition.generation,
+            ..TableQuery::default()
+        };
+        let error = execute_query(&mut mismatched_store, &definition, &query, &|_, value| {
+            value.display().into_owned()
+        })
+        .err()
+        .expect("mismatched store generation");
+        assert!(error.to_string().contains("table store"));
     }
 }

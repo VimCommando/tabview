@@ -20,6 +20,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::ingest::{decode_input, parse_rows, sniff_delimiter, ParseOptions, Quoting};
 
 const LAZY_FILE_SAMPLE_BYTES: u64 = 64 * 1024;
+const LAZY_FORWARD_SCAN_BATCH_ROWS: usize = 256;
 
 pub trait TableStore {
     fn generation(&self) -> SourceGeneration;
@@ -626,37 +627,43 @@ impl LazyFileTable {
         let mut reader = csv_reader_builder(&self.options).from_reader(file);
         let mut record = csv::ByteRecord::new();
         let mut new_offsets = Vec::new();
-        let mut buffered_rows = Vec::new();
         let mut new_column_count = self.column_count;
-        let mut eof = false;
-
-        while buffered_rows.len() < request.max_rows {
-            if !reader.read_byte_record(&mut record)? {
-                eof = true;
-                break;
-            }
-            let relative = byte_record_offset(&record)?;
-            new_offsets.push(base_offset + relative);
-            new_column_count = new_column_count.max(record.len());
-
-            let index = RowIndex(self.offsets.len() + new_offsets.len() - 1);
-            let row =
-                row_from_byte_record(&record, &self.options, self.generation, index, record.len())?;
-            buffered_rows.push(row);
-        }
-
-        for row in &mut buffered_rows {
-            row.cells
-                .resize(new_column_count, CellValue::Text(String::new()));
-        }
         let mut visited = 0;
+        let mut eof = false;
         let mut visitor_broke = false;
-        for row in &buffered_rows {
-            visited += 1;
-            let index = RowIndex(row.id.ordinal as usize);
-            if visitor.visit(index, row).is_break() {
-                visitor_broke = true;
-                break;
+
+        while visited < request.max_rows && !eof && !visitor_broke {
+            let batch_start = new_offsets.len();
+            let batch_rows = request
+                .max_rows
+                .saturating_sub(visited)
+                .min(LAZY_FORWARD_SCAN_BATCH_ROWS);
+            let mut buffered_records = Vec::with_capacity(batch_rows);
+            while buffered_records.len() < batch_rows {
+                if !reader.read_byte_record(&mut record)? {
+                    eof = true;
+                    break;
+                }
+                let relative = byte_record_offset(&record)?;
+                new_offsets.push(base_offset + relative);
+                new_column_count = new_column_count.max(record.len());
+                buffered_records.push(record.clone());
+            }
+
+            for (offset, record) in buffered_records.iter().enumerate() {
+                let index = RowIndex(self.offsets.len() + batch_start + offset);
+                let row = row_from_byte_record(
+                    record,
+                    &self.options,
+                    self.generation,
+                    index,
+                    new_column_count,
+                )?;
+                visited += 1;
+                if visitor.visit(index, &row).is_break() {
+                    visitor_broke = true;
+                    break;
+                }
             }
         }
 
@@ -1364,6 +1371,36 @@ mod tests {
             text_rows(&mut table),
             vec![vec!["café".to_owned(), "2".to_owned()]]
         );
+    }
+
+    #[test]
+    fn lazy_forward_scan_bounds_read_ahead_when_visitor_breaks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("data.csv");
+        let data = (0..300).map(|row| format!("{row}\n")).collect::<String>();
+        std::fs::write(&path, data).expect("write");
+        let mut table = LazyFileTable::open(&path, ParseOptions::default()).expect("lazy table");
+        let mut visits = 0;
+        let mut stop = |_: RowIndex, _: &Row| {
+            visits += 1;
+            ControlFlow::Break(())
+        };
+
+        let progress = table
+            .scan_rows(
+                ScanRequest {
+                    start: RowIndex(0),
+                    direction: ScanDirection::Forward,
+                    max_rows: usize::MAX,
+                },
+                &mut stop,
+            )
+            .expect("bounded scan");
+
+        assert_eq!(visits, 1);
+        assert_eq!(progress.visited, 1);
+        assert_eq!(table.offsets.len(), LAZY_FORWARD_SCAN_BATCH_ROWS);
+        assert!(!table.eof);
     }
 
     #[test]
