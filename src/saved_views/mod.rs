@@ -519,7 +519,7 @@ pub fn resolve_structured_columns(
     let mut resolved = vec![None; definition.columns.len()];
     let mut matched_keys = BTreeSet::new();
     let mut warnings = Vec::new();
-    let mut label_counts = HashMap::with_capacity(definition.columns.len());
+    let mut label_counts: HashMap<&str, usize> = HashMap::with_capacity(definition.columns.len());
     for column in &definition.columns {
         *label_counts
             .entry(column.display_name.as_str())
