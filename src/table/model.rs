@@ -206,8 +206,10 @@ pub struct TableDefinition {
 
 impl TableDefinition {
     pub fn apply_delta(&mut self, delta: SchemaDelta) -> anyhow::Result<()> {
-        for column in &delta.added_columns {
+        for (offset, column) in delta.added_columns.iter().enumerate() {
+            let expected_ordinal = self.columns.len().saturating_add(offset);
             if column.id.generation != self.generation
+                || column.id.ordinal as usize != expected_ordinal
                 || self.columns.iter().any(|current| current.id == column.id)
             {
                 anyhow::bail!("schema delta is not append-only for the active generation");
@@ -273,5 +275,36 @@ mod tests {
                 ordinal: 0
             }
         );
+    }
+
+    #[test]
+    fn schema_delta_columns_must_have_contiguous_append_ordinals() {
+        let generation = SourceGeneration::new();
+        let column = |ordinal| ColumnDefinition {
+            id: ColumnId {
+                generation,
+                ordinal,
+            },
+            source_identity: ColumnSourceIdentity::Positional(ordinal as usize),
+            display_name: format!("c{ordinal}"),
+            source_type: LogicalType::Text,
+            type_origin: TypeOrigin::Inferred,
+        };
+        let mut definition = TableDefinition {
+            generation,
+            columns: vec![column(0)],
+            schema_state: SchemaState::Provisional,
+            relation: RelationMetadata::implicit("test", true),
+        };
+
+        let error = definition
+            .apply_delta(SchemaDelta {
+                added_columns: vec![column(2)],
+                ..SchemaDelta::default()
+            })
+            .expect_err("non-contiguous ordinal");
+
+        assert!(error.to_string().contains("append-only"));
+        assert_eq!(definition.columns, [column(0)]);
     }
 }
