@@ -907,7 +907,7 @@ fn source_fingerprint(path: &Path) -> anyhow::Result<SourceFingerprint> {
     let metadata = std::fs::metadata(path)?;
     Ok(SourceFingerprint {
         len: metadata.len(),
-        modified: metadata.modified()?,
+        modified: metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH),
     })
 }
 
