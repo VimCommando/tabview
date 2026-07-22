@@ -260,6 +260,37 @@ impl OffsetTableStore {
             RowCount::Unknown => RowCount::Unknown,
         }
     }
+
+    fn adjusted_scan_request(&self, request: ScanRequest) -> ScanRequest {
+        let max_rows = if request.direction == ScanDirection::Reverse {
+            request.max_rows.min(request.start.0.saturating_add(1))
+        } else {
+            request.max_rows
+        };
+        ScanRequest {
+            start: RowIndex(request.start.0.saturating_add(self.skip)),
+            max_rows,
+            ..request
+        }
+    }
+
+    fn adjusted_scan_progress(
+        &self,
+        mut progress: ScanProgress,
+        direction: ScanDirection,
+    ) -> ScanProgress {
+        if direction == ScanDirection::Reverse
+            && progress.next.is_some_and(|index| index.0 < self.skip)
+        {
+            progress.next = None;
+            progress.reached_end = true;
+        } else {
+            progress.next = progress
+                .next
+                .map(|index| RowIndex(index.0.saturating_sub(self.skip)));
+        }
+        progress
+    }
 }
 
 impl TableStore for OffsetTableStore {
@@ -298,17 +329,11 @@ impl TableStore for OffsetTableStore {
             |index: RowIndex, row: &Row| visitor.visit(RowIndex(index.0.saturating_sub(skip)), row);
         let mut progress = self.inner.index_and_scan_rows(
             RowIndex(through.0.saturating_add(skip)),
-            ScanRequest {
-                start: RowIndex(request.start.0.saturating_add(skip)),
-                ..request
-            },
+            self.adjusted_scan_request(request),
             &mut shifted,
         )?;
         progress.index.row_count = self.adjusted_count();
-        progress.scan.next = progress
-            .scan
-            .next
-            .map(|index| RowIndex(index.0.saturating_sub(skip)));
+        progress.scan = self.adjusted_scan_progress(progress.scan, request.direction);
         Ok(progress)
     }
 
@@ -320,17 +345,10 @@ impl TableStore for OffsetTableStore {
         let skip = self.skip;
         let mut shifted =
             |index: RowIndex, row: &Row| visitor.visit(RowIndex(index.0.saturating_sub(skip)), row);
-        let mut progress = self.inner.scan_rows(
-            ScanRequest {
-                start: RowIndex(request.start.0.saturating_add(skip)),
-                ..request
-            },
-            &mut shifted,
-        )?;
-        progress.next = progress
-            .next
-            .map(|index| RowIndex(index.0.saturating_sub(skip)));
-        Ok(progress)
+        let progress = self
+            .inner
+            .scan_rows(self.adjusted_scan_request(request), &mut shifted)?;
+        Ok(self.adjusted_scan_progress(progress, request.direction))
     }
 
     fn materialize(&mut self) -> anyhow::Result<InMemoryTable> {
@@ -956,6 +974,55 @@ mod tests {
         assert_eq!(table.row_count(), RowCount::Exact(1));
         assert_eq!(table.column_count(), 2);
         assert_eq!(text_row(&mut table, 0), ["a", "b"]);
+    }
+
+    #[test]
+    fn offset_table_reverse_scans_do_not_cross_skipped_rows() {
+        let rows = vec![
+            vec!["header".to_owned()],
+            vec!["a".to_owned()],
+            vec!["b".to_owned()],
+            vec!["c".to_owned()],
+        ];
+        let request = ScanRequest {
+            start: RowIndex(2),
+            direction: ScanDirection::Reverse,
+            max_rows: usize::MAX,
+        };
+
+        let mut scan_store = OffsetTableStore::new(Box::new(InMemoryTable::new(rows.clone())), 1);
+        let mut scanned = Vec::new();
+        let mut collect = |index: RowIndex, row: &Row| {
+            scanned.push((index, row.display_cells()));
+            ControlFlow::Continue(())
+        };
+        let progress = scan_store
+            .scan_rows(request, &mut collect)
+            .expect("reverse scan");
+        assert_eq!(
+            scanned,
+            [
+                (RowIndex(2), vec!["c".to_owned()]),
+                (RowIndex(1), vec!["b".to_owned()]),
+                (RowIndex(0), vec!["a".to_owned()]),
+            ]
+        );
+        assert_eq!(progress.visited, 3);
+        assert_eq!(progress.next, None);
+        assert!(progress.reached_end);
+
+        let mut combined_store = OffsetTableStore::new(Box::new(InMemoryTable::new(rows)), 1);
+        let mut scanned = Vec::new();
+        let mut collect = |index: RowIndex, row: &Row| {
+            scanned.push((index, row.display_cells()));
+            ControlFlow::Continue(())
+        };
+        let progress = combined_store
+            .index_and_scan_rows(RowIndex(2), request, &mut collect)
+            .expect("indexed reverse scan");
+        assert_eq!(scanned.len(), 3);
+        assert_eq!(progress.scan.next, None);
+        assert!(progress.scan.reached_end);
     }
 
     #[test]
