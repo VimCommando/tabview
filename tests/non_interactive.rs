@@ -48,6 +48,35 @@ fn stdin_pipeline_uses_data_stream_without_terminal_access() {
 }
 
 #[test]
+fn stdin_pipeline_preserves_keyed_object_modes() {
+    let input = r#"{"alpha":{"stars":1},"beta":{"stars":2},"gamma":{"stars":3}}"#;
+
+    Command::cargo_bin("tabview")
+        .expect("binary")
+        .args(["--format", "json", "-o", "table", "-"])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stdout("name   stars\nalpha      1\nbeta       2\ngamma      3\n");
+
+    Command::cargo_bin("tabview")
+        .expect("binary")
+        .args([
+            "--format",
+            "json",
+            "--object-mode",
+            "record",
+            "-o",
+            "table",
+            "-",
+        ])
+        .write_stdin(input)
+        .assert()
+        .success()
+        .stdout("alpha.stars  beta.stars  gamma.stars\n          1           2            3\n");
+}
+
+#[test]
 fn structured_sources_include_late_columns_and_ignore_start_position() {
     let json = fixture(
         "[{\"id\":1,\"name\":\"alpha\"},{\"id\":2,\"name\":\"beta\",\"late\":true}]",
