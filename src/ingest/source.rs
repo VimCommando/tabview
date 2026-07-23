@@ -185,15 +185,19 @@ impl StreamingInput {
 }
 
 fn probe_sample_ready(bytes: &[u8]) -> bool {
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
     let first = bytes
-        .strip_prefix(&[0xEF, 0xBB, 0xBF])
-        .unwrap_or(bytes)
         .iter()
         .copied()
         .find(|byte| !byte.is_ascii_whitespace());
+    let last_index = bytes.iter().rposition(|byte| !byte.is_ascii_whitespace());
+    let last = last_index.map(|index| bytes[index]);
+    let trailing_has_newline = last_index
+        .map(|index| bytes[index + 1..].contains(&b'\n'))
+        .unwrap_or(false);
     first == Some(b'[')
         || bytes.iter().filter(|byte| **byte == b'\n').count() >= 2
-        || (!bytes.ends_with(b"\n") && serde_json::from_slice::<serde_json::Value>(bytes).is_ok())
+        || (first == Some(b'{') && last == Some(b'}') && !trailing_has_newline)
 }
 
 pub fn stream_stdin_for_interactive() -> InputSource {
@@ -300,6 +304,12 @@ mod tests {
     #[test]
     fn automatic_probe_accepts_a_complete_single_json_value_without_a_newline() {
         assert!(probe_sample_ready(br#"{"a":1}"#));
+        assert!(probe_sample_ready(b"\xEF\xBB\xBF  {\"a\":1} \t"));
+    }
+
+    #[test]
+    fn automatic_probe_waits_for_an_incomplete_json_object() {
+        assert!(!probe_sample_ready(br#"{"a":1"#));
     }
 
     #[test]
