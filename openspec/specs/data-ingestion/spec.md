@@ -48,16 +48,16 @@ The system SHALL normalize parsed rows to a rectangular table by padding shorter
 - **THEN** all parsed rows expose the same column count and missing cells are empty strings
 
 ### Requirement: Large-file groundwork
-The rewrite SHALL include explicit groundwork for future lazy or streaming-backed table access without requiring the first Rust replacement to route the interactive TUI through that lazy path.
+The system SHALL use the previously introduced lazy threshold and store abstractions in the live format-aware table-opening path rather than leaving them as an unused prototype.
 
 #### Scenario: Lazy threshold is centralized
-- **WHEN** the code needs to decide whether a file is large enough for future lazy handling
-- **THEN** the default threshold is available as a named configurable constant set to 100 MiB
+- **WHEN** a size-based format adapter decides whether a seekable file requires incremental handling
+- **THEN** the default lazy threshold is available as a named configurable constant set to 100 MiB
 
-#### Scenario: Prototype store exists
-- **WHEN** developers work on follow-on lazy loading support
-- **THEN** the codebase exposes table-store abstractions and prototype lazy file access that can be evolved into the TUI-backed implementation
+#### Scenario: Live viewer uses table store
+- **WHEN** any supported source is opened for the interactive viewer
+- **THEN** row access is routed through the selected in-memory or incremental table store
 
-#### Scenario: First replacement may materialize input
-- **WHEN** a user opens a file with the first Rust replacement
-- **THEN** the viewer may materialize the file into memory while preserving compatible CLI, parsing, table, and TUI behavior
+#### Scenario: Existing delimited compatibility remains
+- **WHEN** an existing CSV-like input is opened with encoding, delimiter, quote, or quoting options
+- **THEN** format-aware opening preserves the established decoding, parsing, normalization, and header-classification behavior
