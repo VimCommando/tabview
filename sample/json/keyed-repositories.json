@@ -1,0 +1,5 @@
+{
+  "repo-fs": {"type": "fs", "uuid": "r1", "settings": {"location": "/backup"}},
+  "repo-s3": {"type": "s3", "uuid": "r2", "settings": {"bucket": "snapshots"}},
+  "repo-gcs": {"type": "gcs", "settings": {"bucket": "archives"}}
+}

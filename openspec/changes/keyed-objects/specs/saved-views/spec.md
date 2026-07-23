@@ -19,9 +19,13 @@ A saved view SHALL accept top-level `object_mode: auto|record|entries` as a form
 - **WHEN** a saved view combines explicit `record` or `entries` mode with a row-stream format that has no selected object/map, such as delimited input or NDJSON
 - **THEN** source-option validation records a clear warning and does not apply the incompatible combination
 
-#### Scenario: Saved option incompatible with selected shape
-- **WHEN** a saved view supplies explicit `record` or `entries` but the structured adapter selects an array or scalar
-- **THEN** source-option validation records a clear warning and does not apply the incompatible value
+#### Scenario: Saved option incompatible with selected array
+- **WHEN** a saved view supplies explicit `record` or `entries` but the structured adapter selects an array
+- **THEN** source-option validation records a clear warning, does not apply the incompatible value, and preserves array-table behavior
+
+#### Scenario: Saved option incompatible with selected scalar
+- **WHEN** a saved view supplies explicit `record` or `entries` but the JSON adapter selects a scalar
+- **THEN** the source-opening diagnostic identifies the saved mode as ignored before reporting the existing non-tabular selected-value error
 
 #### Scenario: Serialize resolved automatic mode
 - **WHEN** a saved view is written for a selected object/map whose requested mode is `auto`

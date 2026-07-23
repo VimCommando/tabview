@@ -1,0 +1,5 @@
+{
+  "node-a": {"name": "alpha", "roles": ["master"], "attributes": {"zone": "a"}},
+  "node-b": {"name": "beta", "roles": ["data"], "attributes": {"zone": "b"}},
+  "node-c": {"name": "gamma", "roles": ["ingest"], "attributes": {"zone": "a"}}
+}

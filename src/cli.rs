@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use clap::{ArgAction, Parser};
 
-use crate::ingest::{InputFormat, JsonPointer, Quoting, SchemaScan, SourceOptionOverrides};
+use crate::ingest::{
+    InputFormat, JsonPointer, ObjectMode, Quoting, SchemaScan, SourceOptionOverrides,
+};
 use crate::view::ColumnWidthMode;
 
 #[derive(Debug, Clone, PartialEq, Eq, Parser)]
@@ -50,6 +52,10 @@ pub struct Args {
     /// RFC 6901 JSON Pointer selecting the table within each JSON document.
     #[arg(long = "json-path", value_parser = parse_json_pointer)]
     pub json_path: Option<JsonPointer>,
+
+    /// Interpret a selected structured object as auto-detected, one record, or keyed entries.
+    #[arg(long = "object-mode", value_parser = parse_object_mode)]
+    pub object_mode: Option<ObjectMode>,
 
     /// JSON schema discovery policy.
     #[arg(long = "schema-scan", value_parser = parse_schema_scan)]
@@ -116,6 +122,18 @@ impl Config {
                 option: "--json-path",
             });
         }
+        if matches!(
+            explicit_format,
+            Some(InputFormat::Delimited | InputFormat::Ndjson)
+        ) && matches!(
+            args.object_mode,
+            Some(ObjectMode::Record | ObjectMode::Entries)
+        ) {
+            return Err(CliError::IncompatibleOptions {
+                format: explicit_format.expect("checked format"),
+                option: "--object-mode",
+            });
+        }
         let resolved_cli_format = match explicit_format {
             Some(InputFormat::Auto) | None if delimited_option_selected => {
                 Some(InputFormat::Delimited)
@@ -134,6 +152,7 @@ impl Config {
             source_options: SourceOptionOverrides {
                 format: resolved_cli_format,
                 json_path: args.json_path,
+                object_mode: args.object_mode,
                 schema_scan: args.schema_scan,
             },
             #[cfg(feature = "saved-views")]
@@ -201,6 +220,12 @@ fn parse_json_pointer(value: &str) -> Result<JsonPointer, String> {
 fn parse_schema_scan(value: &str) -> Result<SchemaScan, String> {
     value
         .parse::<SchemaScan>()
+        .map_err(|error| error.to_string())
+}
+
+fn parse_object_mode(value: &str) -> Result<ObjectMode, String> {
+    value
+        .parse::<ObjectMode>()
         .map_err(|error| error.to_string())
 }
 
@@ -327,6 +352,7 @@ fn parse_char(value: &str, what: &'static str) -> Result<char, CliError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     fn parse(args: &[&str]) -> Config {
         let args = Args::try_parse_from(args).expect("parse args");
@@ -444,6 +470,8 @@ mod tests {
             "/hits/hits",
             "--schema-scan",
             "full",
+            "--object-mode",
+            "entries",
             "response.data",
         ]);
         assert_eq!(config.source_options.format, Some(InputFormat::Json));
@@ -457,6 +485,45 @@ mod tests {
             ["hits", "hits"]
         );
         assert_eq!(config.source_options.schema_scan, Some(SchemaScan::Full));
+        assert_eq!(config.source_options.object_mode, Some(ObjectMode::Entries));
+    }
+
+    #[test]
+    fn validates_object_mode_values_and_explicit_row_stream_conflicts() {
+        assert!(
+            Args::try_parse_from(["tabview", "--object-mode", "rows", "response.json"]).is_err()
+        );
+        for format in ["delimited", "ndjson"] {
+            assert_eq!(
+                parse_config_error(&[
+                    "tabview",
+                    "--format",
+                    format,
+                    "--object-mode",
+                    "entries",
+                    "data"
+                ]),
+                CliError::IncompatibleOptions {
+                    format: format.parse().expect("format"),
+                    option: "--object-mode",
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn help_documents_format_neutral_object_mode_values() {
+        let help = Args::command().render_long_help().to_string();
+        assert!(help.contains("--object-mode <OBJECT_MODE>"));
+        assert!(help.contains("selected structured object"));
+    }
+
+    #[test]
+    fn object_mode_does_not_imply_a_format_for_stdin() {
+        let config = parse(&["tabview", "--object-mode", "entries", "-"]);
+        assert_eq!(config.filename, PathBuf::from("-"));
+        assert_eq!(config.source_options.format, None);
+        assert_eq!(config.source_options.object_mode, Some(ObjectMode::Entries));
     }
 
     #[test]
@@ -487,7 +554,9 @@ mod tests {
             .columns
             .iter()
             .filter_map(|column| match &column.source_identity {
-                crate::table::ColumnSourceIdentity::JsonPointer(pointer) => Some(pointer.as_str()),
+                crate::table::ColumnSourceIdentity::StructuredPath(pointer) => {
+                    Some(pointer.as_str())
+                }
                 _ => None,
             })
             .collect::<Vec<_>>();

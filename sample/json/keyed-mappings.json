@@ -1,0 +1,5 @@
+{
+  "logs": {"mappings": {"properties": {"message": {"type": "text"}}}},
+  "metrics": {"mappings": {"properties": {"value": {"type": "double"}}}},
+  "traces": {"mappings": {"properties": {"duration": {"type": "long"}}}}
+}

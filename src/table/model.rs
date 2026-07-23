@@ -1,7 +1,7 @@
 use std::borrow::Cow;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use crate::ingest::JsonPointer;
+use crate::ingest::StructuredPath;
 
 static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
 
@@ -141,8 +141,19 @@ pub enum ColumnSourceIdentity {
         ordinal: usize,
         name: Option<String>,
     },
-    JsonPointer(JsonPointer),
+    StructuredPath(StructuredPath),
+    ObjectKey,
     Positional(usize),
+}
+
+impl ColumnSourceIdentity {
+    pub fn canonical_key(&self) -> Option<&str> {
+        match self {
+            Self::StructuredPath(path) => Some(path.as_str()),
+            Self::ObjectKey => Some("@key"),
+            Self::Delimited { .. } | Self::Positional(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

@@ -11,8 +11,10 @@ pub use adapter::{
 pub use delimited::DelimitedAdapter;
 pub use json::JsonAdapter;
 pub use options::{
-    InputFormat, JsonPointer, OpenOptions, SchemaScan, SourceOptionError, SourceOptionOverrides,
-    DEFAULT_SCHEMA_SCAN_BYTES,
+    resolve_selected_shape, InputFormat, JsonPointer, ObjectMode, ObjectModeOrigin,
+    ObjectModeResolution, OpenOptions, ResolvedObjectMode, SchemaScan, SelectedShapeResolution,
+    SelectedTableShape, SelectedValueShape, SourceOptionError, SourceOptionOverrides,
+    StructuredPath, DEFAULT_SCHEMA_SCAN_BYTES,
 };
 
 use std::borrow::Cow;

@@ -5,10 +5,34 @@ use serde_json::value::RawValue;
 
 use super::JsonPointer;
 
-pub(crate) fn select_json_rows(
+#[derive(Debug)]
+pub(crate) enum SelectedJsonValue {
+    ArrayRows(Vec<Box<RawValue>>),
+    Object(Vec<RawObjectEntry>),
+    Scalar,
+}
+
+#[derive(Debug)]
+pub(crate) struct RawObjectEntry {
+    pub key: String,
+    pub value: Box<RawValue>,
+}
+
+impl RawObjectEntry {
+    pub fn encoded_len(&self) -> u64 {
+        let key_len = serde_json::to_vec(&self.key)
+            .map(|key| key.len() as u64)
+            .unwrap_or(self.key.len() as u64 + 2);
+        key_len
+            .saturating_add(1)
+            .saturating_add(self.value.get().len() as u64)
+    }
+}
+
+pub(crate) fn select_json_table(
     bytes: &[u8],
     pointer: Option<&JsonPointer>,
-) -> anyhow::Result<Vec<Box<RawValue>>> {
+) -> anyhow::Result<SelectedJsonValue> {
     let mut deserializer = serde_json::Deserializer::from_slice(bytes);
     let segments = pointer.map(JsonPointer::segments).unwrap_or_default();
     let rows = SelectSeed { segments }.deserialize(&mut deserializer)?;
@@ -21,7 +45,7 @@ struct SelectSeed<'a> {
 }
 
 impl<'de> DeserializeSeed<'de> for SelectSeed<'_> {
-    type Value = Vec<Box<RawValue>>;
+    type Value = SelectedJsonValue;
 
     fn deserialize<D>(self, deserializer: D) -> Result<Self::Value, D::Error>
     where
@@ -44,7 +68,7 @@ struct PathVisitor<'a> {
 }
 
 impl<'de> Visitor<'de> for PathVisitor<'_> {
-    type Value = Vec<Box<RawValue>>;
+    type Value = SelectedJsonValue;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("an object or array containing the JSON Pointer segment")
@@ -96,7 +120,7 @@ impl<'de> Visitor<'de> for PathVisitor<'_> {
 struct TableVisitor;
 
 impl<'de> Visitor<'de> for TableVisitor {
-    type Value = Vec<Box<RawValue>>;
+    type Value = SelectedJsonValue;
 
     fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str("a JSON object or array")
@@ -110,85 +134,67 @@ impl<'de> Visitor<'de> for TableVisitor {
         while let Some(row) = sequence.next_element::<Box<RawValue>>()? {
             rows.push(row);
         }
-        Ok(rows)
+        Ok(SelectedJsonValue::ArrayRows(rows))
     }
 
     fn visit_map<A>(self, mut map: A) -> Result<Self::Value, A::Error>
     where
         A: MapAccess<'de>,
     {
-        let mut object = serde_json::Map::new();
-        while let Some((key, value)) = map.next_entry::<String, serde_json::Value>()? {
-            object.insert(key, value);
+        let mut entries = Vec::new();
+        while let Some((key, value)) = map.next_entry::<String, Box<RawValue>>()? {
+            entries.push(RawObjectEntry { key, value });
         }
-        let raw = RawValue::from_string(
-            serde_json::to_string(&serde_json::Value::Object(object)).map_err(A::Error::custom)?,
-        )
-        .map_err(A::Error::custom)?;
-        Ok(vec![raw])
+        Ok(SelectedJsonValue::Object(entries))
     }
 
     fn visit_bool<E>(self, _value: bool) -> Result<Self::Value, E>
     where
         E: Error,
     {
-        Err(E::custom(
-            "JSON starting path does not identify an object or array",
-        ))
+        Ok(SelectedJsonValue::Scalar)
     }
 
     fn visit_i64<E>(self, _value: i64) -> Result<Self::Value, E>
     where
         E: Error,
     {
-        Err(E::custom(
-            "JSON starting path does not identify an object or array",
-        ))
+        Ok(SelectedJsonValue::Scalar)
     }
 
     fn visit_u64<E>(self, _value: u64) -> Result<Self::Value, E>
     where
         E: Error,
     {
-        Err(E::custom(
-            "JSON starting path does not identify an object or array",
-        ))
+        Ok(SelectedJsonValue::Scalar)
     }
 
     fn visit_f64<E>(self, _value: f64) -> Result<Self::Value, E>
     where
         E: Error,
     {
-        Err(E::custom(
-            "JSON starting path does not identify an object or array",
-        ))
+        Ok(SelectedJsonValue::Scalar)
     }
 
     fn visit_str<E>(self, _value: &str) -> Result<Self::Value, E>
     where
         E: Error,
     {
-        Err(E::custom(
-            "JSON starting path does not identify an object or array",
-        ))
+        Ok(SelectedJsonValue::Scalar)
     }
 
     fn visit_none<E>(self) -> Result<Self::Value, E>
     where
         E: Error,
     {
-        Err(E::custom(
-            "JSON starting path does not identify an object or array",
-        ))
+        Ok(SelectedJsonValue::Scalar)
     }
 
     fn visit_unit<E>(self) -> Result<Self::Value, E>
     where
         E: Error,
     {
-        Err(E::custom(
-            "JSON starting path does not identify an object or array",
-        ))
+        Ok(SelectedJsonValue::Scalar)
     }
 }
 
@@ -198,11 +204,14 @@ mod tests {
 
     #[test]
     fn streams_selected_array_and_skips_surrounding_metadata() {
-        let rows = select_json_rows(
+        let rows = select_json_table(
             br#"{"large_metadata":{"ignored":[1,2,3]},"hits":{"hits":[{"a":1},{"a":2}]},"tail":true}"#,
             Some(&"/hits/hits".parse().unwrap()),
         )
         .expect("rows");
+        let SelectedJsonValue::ArrayRows(rows) = rows else {
+            panic!("array rows");
+        };
         assert_eq!(rows.len(), 2);
         assert_eq!(rows[0].get(), "{\"a\":1}");
         assert_eq!(rows[1].get(), "{\"a\":2}");
@@ -210,11 +219,14 @@ mod tests {
 
     #[test]
     fn resolves_escaped_pointer_segments_with_seeded_visitors() {
-        let rows = select_json_rows(
+        let rows = select_json_table(
             br#"{"a/b":{"~rows":[[1,2]]}}"#,
             Some(&"/a~1b/~0rows".parse().unwrap()),
         )
         .expect("rows");
+        let SelectedJsonValue::ArrayRows(rows) = rows else {
+            panic!("array rows");
+        };
         assert_eq!(rows[0].get(), "[1,2]");
     }
 
@@ -228,5 +240,31 @@ mod tests {
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].get(), "{\"a\":1}");
+    }
+
+    #[test]
+    fn preserves_object_member_order_and_duplicates() {
+        let selected = select_json_table(br#"{"a":{"v":1},"a":{"v":2}}"#, None).expect("object");
+        let SelectedJsonValue::Object(entries) = selected else {
+            panic!("object entries");
+        };
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].key, "a");
+        assert_eq!(entries[1].value.get(), "{\"v\":2}");
+    }
+
+    #[test]
+    fn classifies_selected_scalars_without_assigning_table_shape() {
+        for input in [br#"true"#.as_slice(), br#"1"#, br#"null"#, br#""text""#] {
+            assert!(matches!(
+                select_json_table(input, None).expect("scalar"),
+                SelectedJsonValue::Scalar
+            ));
+        }
+        assert!(matches!(
+            select_json_table(br#"{"value":1}"#, Some(&"/value".parse().unwrap()))
+                .expect("selected scalar"),
+            SelectedJsonValue::Scalar
+        ));
     }
 }

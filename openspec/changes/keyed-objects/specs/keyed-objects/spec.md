@@ -29,7 +29,7 @@ The shared source option SHALL represent object interpretation as `auto`, `recor
 
 #### Scenario: Automatic mode bypasses non-object values
 - **WHEN** `auto` receives a selected array or scalar
-- **THEN** the adapter preserves that value's existing table interpretation without resolving an object mode
+- **THEN** the adapter preserves that value's existing interpretation without resolving an object mode, including the existing non-tabular error for a selected scalar
 
 #### Scenario: Explicit mode rejects non-object values
 - **WHEN** `record` or `entries` receives a selected array or scalar

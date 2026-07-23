@@ -756,8 +756,27 @@ impl App {
             crate::table::RowCount::AtLeast(count) => format!("{count}+"),
             crate::table::RowCount::Unknown => "unknown".to_owned(),
         };
+        let object_mode = self
+            .view
+            .object_mode_resolution()
+            .map(|mode| {
+                if mode.requested == ingest::ObjectMode::Auto {
+                    format!(
+                        "\nObject mode: auto → {}{}",
+                        mode.resolved,
+                        if mode.resolved == ingest::ResolvedObjectMode::Entries {
+                            " (use --object-mode record for one row)"
+                        } else {
+                            ""
+                        }
+                    )
+                } else {
+                    format!("\nObject mode: {}", mode.resolved)
+                }
+            })
+            .unwrap_or_default();
         format!(
-            "Rows: {}\nColumns: {}\nPosition: {},{}\nWidth mode: {:?}\nColumn gap: {}\nMark: {}",
+            "Rows: {}\nColumns: {}\nPosition: {},{}\nWidth mode: {:?}\nColumn gap: {}\nMark: {}{}",
             rows,
             self.view.column_count(),
             self.view.cursor().row + 1,
@@ -767,7 +786,8 @@ impl App {
             self.view
                 .mark()
                 .map(|position| format!("{},{}", position.row + 1, position.column + 1))
-                .unwrap_or_else(|| "none".to_owned())
+                .unwrap_or_else(|| "none".to_owned()),
+            object_mode
         )
     }
 }
@@ -1249,12 +1269,10 @@ fn apply_saved_view(
     let header = header.to_vec();
     view.set_view_null_placement(selected.view.view.nulls);
     let structured_definition = view.table_definition().filter(|definition| {
-        definition.columns.iter().any(|column| {
-            matches!(
-                &column.source_identity,
-                crate::table::ColumnSourceIdentity::JsonPointer(_)
-            )
-        })
+        definition
+            .columns
+            .iter()
+            .any(|column| column.source_identity.canonical_key().is_some())
     });
     let structured_schema_provisional = structured_definition.is_some_and(|definition| {
         definition.schema_state == crate::table::SchemaState::Provisional
@@ -1276,12 +1294,10 @@ fn apply_saved_view(
             let column = view
                 .table_definition()
                 .filter(|definition| {
-                    definition.columns.iter().any(|column| {
-                        matches!(
-                            &column.source_identity,
-                            crate::table::ColumnSourceIdentity::JsonPointer(_)
-                        )
-                    })
+                    definition
+                        .columns
+                        .iter()
+                        .any(|column| column.source_identity.canonical_key().is_some())
                 })
                 .and_then(|definition| {
                     saved_views::resolve_structured_column_reference(definition, &sort.column)
@@ -1312,12 +1328,10 @@ fn apply_saved_view(
         let column = view
             .table_definition()
             .filter(|definition| {
-                definition.columns.iter().any(|column| {
-                    matches!(
-                        &column.source_identity,
-                        crate::table::ColumnSourceIdentity::JsonPointer(_)
-                    )
-                })
+                definition
+                    .columns
+                    .iter()
+                    .any(|column| column.source_identity.canonical_key().is_some())
             })
             .and_then(|definition| {
                 saved_views::resolve_structured_column_reference(definition, &filter.column)
@@ -1691,6 +1705,95 @@ mod tests {
             #[cfg(feature = "saved-views")]
             view_modal: None,
         }
+    }
+
+    fn app_for_source(path: std::path::PathBuf, options: ingest::OpenOptions) -> App {
+        let opened = ingest::open_source(ingest::source::InputSource::Path(path.clone()), &options)
+            .expect("open")
+            .into_implicit_table()
+            .expect("table");
+        let mut app = app_with_rows(rows(&[&["placeholder"], &["value"]]));
+        app.source = ingest::source::InputSource::Path(path);
+        app.open_options = options;
+        app.view =
+            view::TableView::from_opened_table(opened, view::Viewport::new(8, 80)).expect("view");
+        app
+    }
+
+    #[test]
+    fn source_info_reports_auto_entries_and_record_override_hint() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("repositories.json");
+        std::fs::write(
+            &path,
+            r#"{"a":{"type":"fs"},"b":{"type":"s3"},"c":{"type":"gcs"}}"#,
+        )
+        .expect("write");
+        let options = ingest::OpenOptions {
+            format: ingest::InputFormat::Json,
+            ..ingest::OpenOptions::default()
+        };
+        let app = app_for_source(path, options);
+
+        let info = app.info_text();
+        assert!(info.contains("Object mode: auto → entries"));
+        assert!(info.contains("--object-mode record"));
+    }
+
+    #[test]
+    fn reload_preserves_explicit_mode_and_redetects_effective_auto() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("objects.json");
+        std::fs::write(
+            &path,
+            r#"{"a":{"type":"fs"},"b":{"type":"s3"},"c":{"type":"gcs"}}"#,
+        )
+        .expect("write keyed");
+
+        let auto_options = ingest::OpenOptions {
+            format: ingest::InputFormat::Json,
+            ..ingest::OpenOptions::default()
+        };
+        let mut automatic = app_for_source(path.clone(), auto_options);
+        assert_eq!(
+            automatic.view.object_mode_resolution().unwrap().resolved,
+            ingest::ResolvedObjectMode::Entries
+        );
+        std::fs::write(
+            &path,
+            r#"{"name":"cluster","enabled":true,"settings":{"x":1}}"#,
+        )
+        .expect("write record");
+        automatic.reload().expect("reload auto");
+        let auto_resolution = automatic.view.object_mode_resolution().unwrap();
+        assert_eq!(auto_resolution.requested, ingest::ObjectMode::Auto);
+        assert_eq!(auto_resolution.resolved, ingest::ResolvedObjectMode::Record);
+
+        let explicit_options = ingest::OpenOptions {
+            format: ingest::InputFormat::Json,
+            object_mode: ingest::ObjectMode::Entries,
+            object_mode_origin: ingest::ObjectModeOrigin::Cli,
+            ..ingest::OpenOptions::default()
+        };
+        let mut explicit = app_for_source(path.clone(), explicit_options);
+        assert_eq!(
+            explicit.view.row_count_state(),
+            crate::table::RowCount::Exact(3)
+        );
+        assert!(explicit.info_text().contains("Object mode: entries"));
+        assert!(!explicit.info_text().contains("auto →"));
+        std::fs::write(&path, r#"{"first":1,"second":2}"#).expect("replace explicit");
+        explicit.reload().expect("reload explicit");
+        let explicit_resolution = explicit.view.object_mode_resolution().unwrap();
+        assert_eq!(explicit_resolution.requested, ingest::ObjectMode::Entries);
+        assert_eq!(
+            explicit_resolution.resolved,
+            ingest::ResolvedObjectMode::Entries
+        );
+        assert_eq!(
+            explicit.view.row_count_state(),
+            crate::table::RowCount::Exact(2)
+        );
     }
 
     fn key(code: KeyCode) -> KeyEvent {

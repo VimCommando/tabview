@@ -286,6 +286,7 @@ pub struct TableView {
     committed_filters: Vec<ActiveFilter>,
     committed_sort_keys: Vec<ActiveSortKey>,
     row_ids: Vec<crate::table::RowId>,
+    object_mode: Option<crate::ingest::ObjectModeResolution>,
     source_status: Option<String>,
     header: Option<Vec<String>>,
     header_visible: bool,
@@ -386,6 +387,7 @@ impl TableView {
             committed_filters: Vec::new(),
             committed_sort_keys: Vec::new(),
             row_ids: Vec::new(),
+            object_mode: None,
             source_status: None,
             header_visible: header.is_some(),
             header,
@@ -428,6 +430,8 @@ impl TableView {
     pub fn from_opened_table(mut opened: OpenedTable, viewport: Viewport) -> anyhow::Result<Self> {
         let header_visible = opened.definition.relation.header_visible;
         let generation = opened.definition.generation;
+        let object_mode = opened.object_mode;
+        let source_status = (!opened.warnings.is_empty()).then(|| opened.warnings.join("; "));
         let initial_target = viewport.height.saturating_sub(1);
         let progress = opened
             .store
@@ -467,7 +471,8 @@ impl TableView {
             committed_filters: Vec::new(),
             committed_sort_keys: Vec::new(),
             row_ids,
-            source_status: None,
+            object_mode,
+            source_status,
             header_visible,
             header,
             rows,
@@ -514,6 +519,10 @@ impl TableView {
 
     pub fn table_definition(&self) -> Option<&TableDefinition> {
         self.table_definition.as_ref()
+    }
+
+    pub fn object_mode_resolution(&self) -> Option<crate::ingest::ObjectModeResolution> {
+        self.object_mode
     }
 
     pub fn set_view_null_placement(&mut self, nulls: Option<NullPlacement>) {
@@ -846,11 +855,11 @@ impl TableView {
                     .table_definition
                     .as_ref()
                     .and_then(|definition| definition.columns.get(index))
-                    .and_then(|column| match &column.source_identity {
-                        crate::table::ColumnSourceIdentity::JsonPointer(pointer) => {
-                            Some(pointer.as_str().to_owned())
-                        }
-                        _ => None,
+                    .and_then(|column| {
+                        column
+                            .source_identity
+                            .canonical_key()
+                            .map(ToOwned::to_owned)
                     });
                 let Some(key) = key else { continue };
                 if let Some(column_view) = self.pending_saved_columns.remove(&key) {
@@ -2046,11 +2055,11 @@ impl TableView {
                 .table_definition
                 .as_ref()
                 .and_then(|definition| definition.columns.get(source_column))
-                .and_then(|column| match &column.source_identity {
-                    crate::table::ColumnSourceIdentity::JsonPointer(pointer) => {
-                        Some(pointer.as_str().to_owned())
-                    }
-                    _ => None,
+                .and_then(|column| {
+                    column
+                        .source_identity
+                        .canonical_key()
+                        .map(ToOwned::to_owned)
                 }),
             source_type: self
                 .table_definition
@@ -2658,6 +2667,9 @@ impl TableView {
         if let Some(locale) = locale {
             yaml.push_str(&format!("locale: {}\n", yaml_scalar(locale)));
         }
+        if let Some(object_mode) = self.object_mode {
+            yaml.push_str(&format!("object_mode: {}\n", object_mode.resolved));
+        }
         if let Some(nulls) = self.view_nulls {
             yaml.push_str(&format!(
                 "nulls: {}\n",
@@ -2811,13 +2823,13 @@ impl TableView {
     }
 
     fn source_column_name(&self, source_column: usize) -> String {
-        if let Some(crate::table::ColumnSourceIdentity::JsonPointer(pointer)) = self
+        if let Some(key) = self
             .table_definition
             .as_ref()
             .and_then(|definition| definition.columns.get(source_column))
-            .map(|column| &column.source_identity)
+            .and_then(|column| column.source_identity.canonical_key())
         {
-            return pointer.as_str().to_owned();
+            return key.to_owned();
         }
         self.header
             .as_ref()
@@ -3764,6 +3776,8 @@ mod tests {
                 fail_query,
                 fail_materialize,
             }),
+            object_mode: None,
+            warnings: Vec::new(),
         }
     }
 
@@ -4021,7 +4035,10 @@ mod tests {
 
         std::fs::write(&path, r#"[{"b":2,"a":1}]"#).expect("replacement source");
         let opened = crate::ingest::JsonAdapter::json()
-            .open(crate::ingest::source::InputSource::Path(path), &options)
+            .open(
+                crate::ingest::source::InputSource::Path(path.clone()),
+                &options,
+            )
             .expect("open replacement")
             .into_implicit_table()
             .expect("table");
@@ -4670,6 +4687,83 @@ columns:
 
     #[cfg(feature = "saved-views")]
     #[test]
+    fn keyed_object_view_fills_the_first_viewport_and_saves_resolved_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("repositories.json");
+        let entries = (0..80)
+            .map(|index| format!(r#""repo-{index}":{{"type":"fs","ordinal":{index}}}"#))
+            .collect::<Vec<_>>()
+            .join(",");
+        std::fs::write(&path, format!("{{{entries}}}")).expect("write");
+        let options = crate::ingest::OpenOptions {
+            format: crate::ingest::InputFormat::Json,
+            lazy_threshold_bytes: 1,
+            schema_scan_bytes: 1,
+            ..crate::ingest::OpenOptions::default()
+        };
+        let opened = crate::ingest::JsonAdapter::json()
+            .open(
+                crate::ingest::source::InputSource::Path(path.clone()),
+                &options,
+            )
+            .expect("open")
+            .into_implicit_table()
+            .expect("table");
+        let view = TableView::from_opened_table(opened, Viewport::new(8, 80)).expect("view");
+
+        assert_eq!(view.visible_rows_vec().len(), 8);
+        assert_eq!(
+            view.current_column_info()
+                .unwrap()
+                .canonical_source
+                .as_deref(),
+            Some("@key")
+        );
+        let yaml = view.to_saved_view_yaml("repositories", "repositories.json", None);
+        assert!(yaml.contains("object_mode: entries\n"));
+
+        let record_options = crate::ingest::OpenOptions {
+            format: crate::ingest::InputFormat::Json,
+            object_mode: crate::ingest::ObjectMode::Record,
+            object_mode_origin: crate::ingest::ObjectModeOrigin::Cli,
+            ..crate::ingest::OpenOptions::default()
+        };
+        let record = crate::ingest::JsonAdapter::json()
+            .open(
+                crate::ingest::source::InputSource::Path(path),
+                &record_options,
+            )
+            .expect("record open")
+            .into_implicit_table()
+            .expect("record table");
+        let record_view =
+            TableView::from_opened_table(record, Viewport::new(8, 80)).expect("record view");
+        assert!(record_view
+            .to_saved_view_yaml("record", "repositories.json", None)
+            .contains("object_mode: record\n"));
+
+        let array_path = dir.path().join("array.json");
+        std::fs::write(&array_path, r#"[{"name":"one"}]"#).expect("array write");
+        let array = crate::ingest::JsonAdapter::json()
+            .open(
+                crate::ingest::source::InputSource::Path(array_path),
+                &crate::ingest::OpenOptions {
+                    format: crate::ingest::InputFormat::Json,
+                    ..crate::ingest::OpenOptions::default()
+                },
+            )
+            .expect("array open")
+            .into_implicit_table()
+            .expect("array table");
+        let array_view =
+            TableView::from_opened_table(array, Viewport::new(8, 80)).expect("array view");
+        assert!(!array_view
+            .to_saved_view_yaml("array", "array.json", None)
+            .contains("object_mode:"));
+    }
+
+    #[cfg(feature = "saved-views")]
+    #[test]
     fn column_info_updates_rebuild_identifier_color_metadata() {
         let mut view = TableView::classify(rows(&[&["Name"], &["alpha"]]), Viewport::new(10, 1));
         let parsed = crate::saved_views::parse_saved_view_yaml(
@@ -5011,7 +5105,7 @@ columns:
         assert_eq!(view.resolved_null_placement(1), NullPlacement::First);
         assert!(matches!(
             &view.table_definition().unwrap().columns[1].source_identity,
-            crate::table::ColumnSourceIdentity::JsonPointer(pointer) if pointer.as_str() == "/late"
+            crate::table::ColumnSourceIdentity::StructuredPath(pointer) if pointer.as_str() == "/late"
         ));
     }
 

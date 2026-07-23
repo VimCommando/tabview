@@ -38,10 +38,11 @@ Applicability is explicit:
 | Selected input shape | `auto` | Explicit `record` or `entries` | Saved-view write |
 |---|---|---|---|
 | Object/map | Run detection | Force the requested shape | Write the resolved explicit mode |
-| Array or scalar | Preserve existing behavior | Report an incompatible option | Omit `object_mode` |
+| Array | Preserve existing behavior | Report an incompatible option | Omit `object_mode` |
+| Scalar | Preserve the existing non-tabular error | Report the incompatible mode before the non-tabular error | No view can be written |
 | Row stream such as delimited or NDJSON | No-op | Report an incompatible option | Omit `object_mode` |
 
-Because format `auto` is unresolved while source options are merged, adapter compatibility validation occurs after format resolution and, where necessary, after selection reveals the input shape. An incompatible CLI option is an opening error. An incompatible saved-view value produces the normal non-fatal saved-view warning and is not applied. This change does not make `--object-mode` imply a format or alter stdin buffering; stdin behavior is owned by `non-interactive-output`.
+Because format `auto` is unresolved while source options are merged, adapter compatibility validation occurs after format resolution and, where necessary, after selection reveals the input shape. An incompatible CLI option is an opening error. For an otherwise tabular source, an incompatible saved-view value produces the normal non-fatal saved-view warning and is not applied. A selected scalar remains non-tabular under the prerequisite JSON contract, so its diagnostic first identifies an incompatible saved mode as ignored and then reports the existing non-tabular source-opening error. This change does not make `--object-mode` imply a format or alter stdin buffering; stdin behavior is owned by `non-interactive-output`.
 
 `Record` is the compatibility path. `Entries` forces direct object members into rows and supports object or scalar member values. `Auto` chooses between them using bounded evidence. Arrays bypass object interpretation, and NDJSON retains its one-row-per-document contract; explicit incompatible format combinations fail validation.
 

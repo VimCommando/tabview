@@ -6,8 +6,12 @@ use regex::Regex;
 use serde::Deserialize;
 use yaml_serde::{Mapping, Value};
 
-use crate::ingest::{InputFormat, JsonPointer, OpenOptions, SchemaScan, SourceOptionOverrides};
-use crate::table::{ColumnSourceIdentity, NullPlacement, SchemaState, TableDefinition};
+use crate::ingest::{
+    InputFormat, JsonPointer, ObjectMode, OpenOptions, SchemaScan, SourceOptionOverrides,
+};
+#[cfg(test)]
+use crate::table::ColumnSourceIdentity;
+use crate::table::{NullPlacement, SchemaState, TableDefinition};
 use crate::theme::{
     ConditionalColorRule, ConditionalValue, GradientStop, IdentifierColors, MatchEntry, RangeEntry,
 };
@@ -22,6 +26,7 @@ pub struct SavedView {
     pub filenames: Vec<FilenamePattern>,
     pub format: Option<InputFormat>,
     pub json_path: Option<JsonPointer>,
+    pub object_mode: Option<ObjectMode>,
     pub schema_scan: Option<SchemaScan>,
     pub nulls: Option<NullPlacement>,
     pub columns: BTreeMap<String, ColumnView>,
@@ -225,6 +230,7 @@ struct RawSavedView {
     filenames: Vec<String>,
     format: Option<String>,
     json_path: Option<String>,
+    object_mode: Option<String>,
     schema_scan: Option<String>,
     nulls: Option<String>,
     #[serde(default)]
@@ -528,10 +534,7 @@ pub fn resolve_structured_columns(
     }
 
     for (index, column) in definition.columns.iter().enumerate() {
-        let canonical = match &column.source_identity {
-            ColumnSourceIdentity::JsonPointer(pointer) => Some(pointer.as_str()),
-            _ => None,
-        };
+        let canonical = column.source_identity.canonical_key();
         if let Some((key, column_view)) =
             canonical.and_then(|canonical| view.columns.get_key_value(canonical))
         {
@@ -612,12 +615,7 @@ pub fn resolve_structured_column_reference(
     definition
         .columns
         .iter()
-        .position(|column| {
-            matches!(
-                &column.source_identity,
-                ColumnSourceIdentity::JsonPointer(pointer) if pointer.as_str() == key
-            )
-        })
+        .position(|column| column.source_identity.canonical_key() == Some(key))
         .or_else(|| {
             let matches = definition
                 .columns
@@ -649,6 +647,25 @@ fn validate_raw_view(raw: RawSavedView) -> ValidatedSavedView {
             None
         }
     });
+    let mut object_mode = raw.object_mode.and_then(|value| match value.parse() {
+        Ok(value) => Some(value),
+        Err(_) => {
+            warnings.push(warning(
+                "object_mode",
+                format!("unknown object mode '{value}'"),
+            ));
+            None
+        }
+    });
+    if matches!(format, Some(InputFormat::Delimited | InputFormat::Ndjson))
+        && matches!(object_mode, Some(ObjectMode::Record | ObjectMode::Entries))
+    {
+        warnings.push(warning(
+            "object_mode",
+            "object mode is incompatible with the selected row-stream format",
+        ));
+        object_mode = None;
+    }
     let schema_scan = raw.schema_scan.and_then(|value| match value.parse() {
         Ok(value) => Some(value),
         Err(_) => {
@@ -715,6 +732,7 @@ fn validate_raw_view(raw: RawSavedView) -> ValidatedSavedView {
             filenames,
             format,
             json_path,
+            object_mode,
             schema_scan,
             nulls,
             columns,
@@ -1508,6 +1526,7 @@ impl SavedView {
         SourceOptionOverrides {
             format: self.format,
             json_path: self.json_path.clone(),
+            object_mode: self.object_mode,
             schema_scan: self.schema_scan,
         }
     }
@@ -1667,6 +1686,124 @@ columns:
         );
         assert_eq!(merged.format, InputFormat::Json);
         assert_eq!(merged.schema_scan, SchemaScan::Default);
+    }
+
+    #[test]
+    fn object_mode_validates_merges_and_warns_for_row_streams() {
+        let parsed = parse_saved_view_yaml(
+            r#"
+name: keyed
+filenames: [repositories.json]
+format: json
+object_mode: record
+"#,
+        )
+        .expect("parse");
+        assert!(parsed.warnings.is_empty());
+        assert_eq!(parsed.view.object_mode, Some(ObjectMode::Record));
+        let merged = parsed.view.merged_open_options(
+            OpenOptions::default(),
+            &SourceOptionOverrides {
+                object_mode: Some(ObjectMode::Entries),
+                ..SourceOptionOverrides::default()
+            },
+        );
+        assert_eq!(merged.object_mode, ObjectMode::Entries);
+        assert_eq!(
+            merged.object_mode_origin,
+            crate::ingest::ObjectModeOrigin::Cli
+        );
+
+        let invalid = parse_saved_view_yaml("name: bad\nfilenames: [data]\nobject_mode: rows\n")
+            .expect("parse invalid");
+        assert_eq!(invalid.view.object_mode, None);
+        assert!(invalid
+            .warnings
+            .iter()
+            .any(|warning| warning.field == "object_mode"));
+
+        let row_stream = parse_saved_view_yaml(
+            "name: stream\nfilenames: [rows.ndjson]\nformat: ndjson\nobject_mode: entries\n",
+        )
+        .expect("parse stream");
+        assert_eq!(row_stream.view.object_mode, None);
+        assert!(row_stream
+            .warnings
+            .iter()
+            .any(|warning| warning.message.contains("row-stream")));
+    }
+
+    #[test]
+    fn saved_entries_and_record_modes_apply_before_table_construction() {
+        use crate::ingest::SourceAdapter;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("objects.json");
+        std::fs::write(&path, r#"{"first":{"value":1},"second":{"value":2}}"#).expect("write");
+
+        for (mode, expected_rows) in [
+            (ObjectMode::Entries, crate::table::RowCount::Exact(2)),
+            (ObjectMode::Record, crate::table::RowCount::Exact(1)),
+        ] {
+            let parsed = parse_saved_view_yaml(&format!(
+                "name: objects\nfilenames: [objects.json]\nformat: json\nobject_mode: {mode}\n"
+            ))
+            .expect("saved view");
+            let options = parsed
+                .view
+                .merged_open_options(OpenOptions::default(), &SourceOptionOverrides::default());
+            assert_eq!(
+                options.object_mode_origin,
+                crate::ingest::ObjectModeOrigin::SavedView
+            );
+            let table = crate::ingest::JsonAdapter::json()
+                .open(
+                    crate::ingest::source::InputSource::Path(path.clone()),
+                    &options,
+                )
+                .expect("open")
+                .into_implicit_table()
+                .expect("table");
+            assert_eq!(table.store.row_count(), expected_rows);
+            assert_eq!(table.object_mode.unwrap().requested, mode);
+        }
+    }
+
+    #[test]
+    fn structured_saved_columns_resolve_the_object_key_identity() {
+        let parsed = parse_saved_view_yaml(
+            r#"
+name: keyed
+filenames: [repositories.json]
+columns:
+  "@key":
+    label: Repository
+"#,
+        )
+        .expect("parse");
+        let generation = crate::table::SourceGeneration::new();
+        let definition = TableDefinition {
+            generation,
+            columns: vec![crate::table::ColumnDefinition {
+                id: crate::table::ColumnId {
+                    generation,
+                    ordinal: 0,
+                },
+                source_identity: ColumnSourceIdentity::ObjectKey,
+                display_name: "name".to_owned(),
+                source_type: crate::table::LogicalType::Text,
+                type_origin: crate::table::TypeOrigin::Declared,
+            }],
+            schema_state: SchemaState::Complete,
+            relation: crate::table::RelationMetadata::implicit("data", true),
+        };
+        let resolved = resolve_structured_columns(&parsed.view, &definition);
+        assert_eq!(
+            resolved.columns[0]
+                .as_ref()
+                .and_then(|column| column.view.label.as_deref()),
+            Some("Repository")
+        );
     }
 
     #[test]
@@ -1842,6 +1979,7 @@ sort:
                 filenames: Vec::new(),
                 format: None,
                 json_path: None,
+                object_mode: None,
                 schema_scan: None,
                 nulls: None,
                 columns: BTreeMap::new(),
@@ -1963,7 +2101,7 @@ columns:
                         generation,
                         ordinal: 0,
                     },
-                    source_identity: ColumnSourceIdentity::JsonPointer(
+                    source_identity: ColumnSourceIdentity::StructuredPath(
                         "/customer/email".parse().unwrap(),
                     ),
                     display_name: "email".to_owned(),
@@ -1975,7 +2113,7 @@ columns:
                         generation,
                         ordinal: 1,
                     },
-                    source_identity: ColumnSourceIdentity::JsonPointer(
+                    source_identity: ColumnSourceIdentity::StructuredPath(
                         "/billing/email".parse().unwrap(),
                     ),
                     display_name: "email".to_owned(),
@@ -2042,7 +2180,7 @@ columns:
             .position(|column| {
                 matches!(
                     &column.source_identity,
-                    ColumnSourceIdentity::JsonPointer(pointer)
+                    ColumnSourceIdentity::StructuredPath(pointer)
                         if pointer.as_str() == "/_source/user/id"
                 )
             })
@@ -2056,7 +2194,7 @@ columns:
         assert!(!table.definition.columns.iter().any(|column| {
             matches!(
                 &column.source_identity,
-                ColumnSourceIdentity::JsonPointer(pointer)
+                ColumnSourceIdentity::StructuredPath(pointer)
                     if pointer.as_str().contains("took") || pointer.as_str().contains("total")
             )
         }));

@@ -5,7 +5,7 @@ use crate::table::{RelationMetadata, SourceGeneration, TableDefinition, TableSto
 
 use super::source::InputSource;
 use super::{DelimitedAdapter, JsonAdapter};
-use super::{InputFormat, OpenOptions};
+use super::{InputFormat, ObjectMode, ObjectModeOrigin, ObjectModeResolution, OpenOptions};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ProbeResult {
@@ -18,6 +18,8 @@ pub struct OpenedTable {
     pub generation: SourceGeneration,
     pub definition: TableDefinition,
     pub store: Box<dyn TableStore>,
+    pub object_mode: Option<ObjectModeResolution>,
+    pub warnings: Vec<String>,
 }
 
 pub struct OpenedSource {
@@ -96,12 +98,36 @@ pub fn open_source(source: InputSource, options: &OpenOptions) -> anyhow::Result
     // either honored or produces a parse error instead of being silently
     // ignored by the delimited adapter.
     let resolved = resolve_structured_options(detected, options);
-    match resolved {
-        InputFormat::Delimited => DelimitedAdapter.open(source, options),
-        InputFormat::Json => JsonAdapter::json().open(source, options),
-        InputFormat::Ndjson => JsonAdapter::ndjson().open(source, options),
+    let incompatible_object_mode = options.object_mode != ObjectMode::Auto
+        && matches!(resolved, InputFormat::Delimited | InputFormat::Ndjson);
+    let mut effective_options = options.clone();
+    let warning =
+        if incompatible_object_mode && options.object_mode_origin == ObjectModeOrigin::SavedView {
+            effective_options.object_mode = ObjectMode::Auto;
+            Some(format!(
+                "saved object_mode '{}' is incompatible with {resolved} input and was ignored",
+                options.object_mode
+            ))
+        } else if incompatible_object_mode {
+            anyhow::bail!(
+                "object mode '{}' is incompatible with {resolved} input",
+                options.object_mode
+            );
+        } else {
+            None
+        };
+    let mut opened = match resolved {
+        InputFormat::Delimited => DelimitedAdapter.open(source, &effective_options),
+        InputFormat::Json => JsonAdapter::json().open(source, &effective_options),
+        InputFormat::Ndjson => JsonAdapter::ndjson().open(source, &effective_options),
         InputFormat::Auto => unreachable!("auto format must be resolved"),
+    }?;
+    if let Some(warning) = warning {
+        for table in &mut opened.tables {
+            table.warnings.push(warning.clone());
+        }
     }
+    Ok(opened)
 }
 
 fn resolve_structured_options(detected: InputFormat, options: &OpenOptions) -> InputFormat {
