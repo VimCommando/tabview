@@ -163,7 +163,10 @@ impl StreamingDelimitedTable {
         } else {
             match self.parse_chunk(&snapshot.bytes[parse_start..parse_len]) {
                 Ok(rows) => rows,
-                Err(_) if !snapshot.complete => return Ok(SchemaDelta::default()),
+                Err(_) if !snapshot.complete => {
+                    self.last_bytes = snapshot.bytes.len();
+                    return Ok(SchemaDelta::default());
+                }
                 Err(error) => return Err(error.into()),
             }
         };
