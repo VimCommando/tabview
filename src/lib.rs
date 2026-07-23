@@ -2,6 +2,7 @@ pub mod cli;
 pub mod command;
 pub mod ingest;
 pub mod ops;
+pub mod output;
 #[cfg(feature = "saved-views")]
 pub mod saved_views;
 pub mod table;
@@ -9,25 +10,99 @@ pub mod theme;
 pub mod ui;
 pub mod view;
 
-use crossterm::event::{read, Event, KeyCode, KeyEvent, KeyModifiers};
+use crossterm::event::{poll, read, Event, KeyCode, KeyEvent, KeyModifiers};
 use ops::filter::{FilterKind, FilterMode};
+use std::io::IsTerminal;
 #[cfg(feature = "saved-views")]
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 pub fn run(args: cli::Args) -> anyhow::Result<()> {
     let config = cli::Config::from_args(args)?;
+    let execution = output::resolve_execution_mode(
+        config.interactive,
+        config.output,
+        std::io::stdout().is_terminal(),
+    );
     let theme_load = theme::load_active_theme(None)?;
     let source = ingest::source::InputSource::from_cli_value(&config.filename.to_string_lossy());
-    let mut terminal = ui::terminal::TerminalSession::enter()?;
-    let loading_message = format!("Loading {}", source.display_name());
-    terminal.terminal_mut().draw(|frame| {
-        ui::render_footer_with_theme(
-            Some(&loading_message),
-            frame.area(),
-            frame.buffer_mut(),
-            &theme_load.theme,
-        );
-    })?;
+    match execution {
+        output::ExecutionMode::Batch(format) => {
+            let mut app = prepare_app(&config, theme_load, source, |_| Ok(()))?;
+            emit_diagnostics(&app.diagnostics);
+            output::write_view_to_stdout(format, config.color, &mut app.view, &app.theme)
+        }
+        output::ExecutionMode::Interactive { emit_on_exit } => {
+            ui::terminal::TerminalSession::ensure_available()?;
+            let source_is_stdin = source == ingest::source::InputSource::Stdin;
+            let mut terminal = ui::terminal::TerminalSession::enter(source_is_stdin)?;
+            let source = if source == ingest::source::InputSource::Stdin {
+                #[cfg(windows)]
+                {
+                    ingest::source::stream_reader_for_interactive(
+                        terminal.take_data_stdin_reader()?,
+                    )
+                }
+                #[cfg(not(windows))]
+                {
+                    ingest::source::stream_stdin_for_interactive()
+                }
+            } else {
+                source
+            };
+            let theme = theme_load.theme.clone();
+            let mut app = prepare_app(&config, theme_load, source, |message| {
+                terminal.terminal_mut().draw(|frame| {
+                    ui::render_footer_with_theme(
+                        Some(message),
+                        frame.area(),
+                        frame.buffer_mut(),
+                        &theme,
+                    );
+                })?;
+                Ok(())
+            })?;
+            run_interactive(&mut app, &mut terminal)?;
+            restore_before_export(
+                || terminal.restore(),
+                || {
+                    emit_diagnostics(&app.diagnostics);
+                    if let Some(format) = emit_on_exit {
+                        output::write_view_to_stdout(
+                            format,
+                            config.color,
+                            &mut app.view,
+                            &app.theme,
+                        )?;
+                    }
+                    Ok(())
+                },
+            )
+        }
+    }
+}
+
+fn restore_before_export(
+    restore: impl FnOnce() -> std::io::Result<()>,
+    export: impl FnOnce() -> anyhow::Result<()>,
+) -> anyhow::Result<()> {
+    restore()?;
+    export()
+}
+
+fn emit_diagnostics(diagnostics: &[String]) {
+    for diagnostic in diagnostics {
+        eprintln!("{diagnostic}");
+    }
+}
+
+fn prepare_app(
+    config: &cli::Config,
+    theme_load: theme::ThemeLoad,
+    source: ingest::source::InputSource,
+    mut report_status: impl FnMut(&str) -> anyhow::Result<()>,
+) -> anyhow::Result<App> {
+    report_status(&format!("Loading {}", source.display_name()))?;
     let parse_options = ingest::ParseOptions {
         encoding: config.encoding.clone(),
         delimiter: config.delimiter,
@@ -35,7 +110,7 @@ pub fn run(args: cli::Args) -> anyhow::Result<()> {
         quote_char: config.quote_char,
     };
     #[cfg(feature = "saved-views")]
-    let saved_source_options = selected_saved_view_source_options(&config)?;
+    let saved_source_options = selected_saved_view_source_options(config)?;
     #[cfg(not(feature = "saved-views"))]
     let saved_source_options = ingest::SourceOptionOverrides::default();
     let mut open_options = ingest::OpenOptions::merge(
@@ -46,38 +121,33 @@ pub fn run(args: cli::Args) -> anyhow::Result<()> {
     open_options.delimited = parse_options.clone();
     open_options.validate()?;
     if let Some(schema_status) = full_schema_scan_status(&source, &open_options) {
-        terminal.terminal_mut().draw(|frame| {
-            ui::render_footer_with_theme(
-                Some(&schema_status),
-                frame.area(),
-                frame.buffer_mut(),
-                &theme_load.theme,
-            );
-        })?;
+        report_status(&schema_status)?;
     }
     let opened = ingest::open_source(source.clone(), &open_options)?.into_implicit_table()?;
     let mut view = view::TableView::from_opened_table(opened, view::Viewport::new(20, 8))?
         .with_column_width_mode(config.width);
     #[cfg(feature = "saved-views")]
-    let saved_view = apply_saved_view(&config, &mut view)?;
-    #[cfg(not(feature = "saved-views"))]
-    let saved_view_message = None::<String>;
+    let saved_view = apply_saved_view(config, &mut view)?;
     #[cfg(feature = "saved-views")]
-    let saved_view_message = saved_view
+    let mut diagnostics = saved_view
         .as_ref()
-        .and_then(|saved_view| saved_view.messages.first().cloned());
-    let message = saved_view_message.or_else(|| {
+        .map(|saved_view| saved_view.messages.clone())
+        .unwrap_or_default();
+    #[cfg(not(feature = "saved-views"))]
+    let mut diagnostics = Vec::new();
+    diagnostics.extend(
         theme_load
             .warnings
-            .first()
-            .map(|warning| format!("theme warning: {}: {}", warning.field, warning.message))
-    });
+            .iter()
+            .map(|warning| format!("theme warning: {}: {}", warning.field, warning.message)),
+    );
+    let message = diagnostics.first().cloned();
     view.goto_user_row(config.start_position.row.max(1));
     if let Some(column) = config.start_position.column {
         view.goto_user_column(column.max(1));
     }
 
-    let mut app = App {
+    Ok(App {
         source,
         open_options,
         view,
@@ -87,12 +157,19 @@ pub fn run(args: cli::Args) -> anyhow::Result<()> {
         search_query: String::new(),
         keys: command::KeyInterpreter::default(),
         message,
+        diagnostics,
         theme: theme_load.theme,
         #[cfg(feature = "saved-views")]
         saved_view,
         #[cfg(feature = "saved-views")]
         view_modal: None,
-    };
+    })
+}
+
+fn run_interactive(
+    app: &mut App,
+    terminal: &mut ui::terminal::TerminalSession,
+) -> anyhow::Result<()> {
     loop {
         terminal.terminal_mut().draw(|frame| {
             let area = frame.area();
@@ -182,9 +259,18 @@ pub fn run(args: cli::Args) -> anyhow::Result<()> {
             }
         })?;
 
-        if let Event::Key(event) = read()? {
-            if app.handle_key(event)? {
-                break;
+        let input_ready = if app.source.is_streaming()
+            && !matches!(app.view.row_count_state(), crate::table::RowCount::Exact(_))
+        {
+            poll(Duration::from_millis(100))?
+        } else {
+            true
+        };
+        if input_ready {
+            if let Event::Key(event) = read()? {
+                if app.handle_key(event)? {
+                    break;
+                }
             }
         }
     }
@@ -253,6 +339,7 @@ struct App {
     search_query: String,
     keys: command::KeyInterpreter,
     message: Option<String>,
+    diagnostics: Vec<String>,
     theme: theme::ResolvedTheme,
     #[cfg(feature = "saved-views")]
     saved_view: Option<SavedViewRuntime>,
@@ -729,12 +816,14 @@ impl App {
                 .and_then(|name| name.to_str())
                 .unwrap_or("input")
                 .to_owned(),
-            ingest::source::InputSource::Stdin => "-".to_owned(),
+            ingest::source::InputSource::Stdin | ingest::source::InputSource::StreamingStdin(_) => {
+                "-".to_owned()
+            }
         }
     }
 
     fn reload(&mut self) -> anyhow::Result<()> {
-        if self.source == ingest::source::InputSource::Stdin {
+        if self.source.is_stdin() {
             return Ok(());
         }
 
@@ -1245,7 +1334,6 @@ fn apply_saved_view(
         if let CliSavedViewSelection::Force(name) = &config.saved_view {
             anyhow::bail!("saved view '{name}' was requested but was not found");
         }
-        log_saved_view_messages(&messages);
         return Ok(Some(SavedViewRuntime {
             source_path: None,
             target_path,
@@ -1257,7 +1345,6 @@ fn apply_saved_view(
     messages.extend(selected.view.warnings.iter().map(format_saved_view_warning));
     messages.extend(selected.warnings.iter().map(format_saved_view_warning));
     let Some(header) = view.header() else {
-        log_saved_view_messages(&messages);
         return Ok(Some(SavedViewRuntime {
             source_path: Some(selected.view.path.clone()),
             target_path: Some(selected.view.path.clone()),
@@ -1357,7 +1444,6 @@ fn apply_saved_view(
     if structured_schema_provisional {
         view.retain_pending_saved_operations(selected.view.view.sort.clone(), unresolved_filters);
     }
-    log_saved_view_messages(&messages);
     Ok(Some(SavedViewRuntime {
         source_path: Some(selected.view.path.clone()),
         target_path: Some(selected.view.path.clone()),
@@ -1382,13 +1468,6 @@ fn placeholder_saved_view_path(input: &Path) -> Option<PathBuf> {
 #[cfg(feature = "saved-views")]
 fn format_saved_view_warning(warning: &saved_views::SavedViewWarning) -> String {
     format!("saved view: {}: {}", warning.field, warning.message)
-}
-
-#[cfg(feature = "saved-views")]
-fn log_saved_view_messages(messages: &[String]) {
-    for message in messages {
-        eprintln!("{message}");
-    }
 }
 
 #[cfg(feature = "saved-views")]
@@ -1645,6 +1724,7 @@ fn help_popup_area(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
 mod tests {
     use super::*;
     use crossterm::event::KeyModifiers;
+    use std::cell::Cell;
     use std::io::{Seek, Write};
 
     fn rows(values: &[&[&str]]) -> Vec<Vec<String>> {
@@ -1652,6 +1732,21 @@ mod tests {
             .iter()
             .map(|row| row.iter().map(|cell| (*cell).to_owned()).collect())
             .collect()
+    }
+
+    #[test]
+    fn restoration_failure_prevents_final_export() {
+        let exported = Cell::new(false);
+        let error = restore_before_export(
+            || Err(std::io::Error::other("restore failed")),
+            || {
+                exported.set(true);
+                Ok(())
+            },
+        )
+        .expect_err("restoration must fail");
+        assert!(error.to_string().contains("restore failed"));
+        assert!(!exported.get());
     }
 
     #[test]
@@ -1699,6 +1794,7 @@ mod tests {
             search_query: String::new(),
             keys: command::KeyInterpreter::default(),
             message: None,
+            diagnostics: Vec::new(),
             theme: theme::default_theme(),
             #[cfg(feature = "saved-views")]
             saved_view: None,
@@ -1812,6 +1908,7 @@ mod tests {
             search_query: String::new(),
             keys: command::KeyInterpreter::default(),
             message: None,
+            diagnostics: Vec::new(),
             theme: theme::default_theme(),
             saved_view: Some(SavedViewRuntime {
                 source_path: None,
@@ -1954,6 +2051,7 @@ mod tests {
             search_query: String::new(),
             keys: command::KeyInterpreter::default(),
             message: None,
+            diagnostics: Vec::new(),
             theme: theme::default_theme(),
             #[cfg(feature = "saved-views")]
             saved_view: None,

@@ -1,11 +1,12 @@
 use crate::table::{
-    ColumnDefinition, ColumnId, ColumnSourceIdentity, InMemoryTable, LazyFileTable, LogicalType,
-    OffsetTableStore, RelationMetadata, RowIndex, SchemaState, SourceGeneration, TableDefinition,
-    TableStore, TypeOrigin,
+    ColumnDefinition, ColumnId, ColumnSourceIdentity, InMemoryTable, IndexProgress, LazyFileTable,
+    LogicalType, OffsetTableStore, RelationMetadata, Row, RowCount, RowIndex, RowVisitor,
+    ScanDirection, ScanProgress, ScanRequest, SchemaDelta, SchemaState, SourceGeneration,
+    TableDefinition, TableStore, TypeOrigin,
 };
 
 use super::adapter::{OpenedSource, OpenedTable, ProbeResult, SourceAdapter};
-use super::source::{read_source, InputSource};
+use super::source::{read_source, InputSource, StreamingInput};
 use super::{parse_rows, InputFormat, OpenOptions};
 
 #[derive(Debug, Default)]
@@ -29,6 +30,9 @@ impl SourceAdapter for DelimitedAdapter {
 
     fn open(&self, source: InputSource, options: &OpenOptions) -> anyhow::Result<OpenedSource> {
         options.validate()?;
+        if let InputSource::StreamingStdin(input) = &source {
+            return open_streaming_delimited(input.clone(), source.display_name(), options);
+        }
         if let InputSource::Path(path) = &source {
             if std::fs::metadata(path)?.len() >= options.lazy_threshold_bytes
                 && LazyFileTable::supports_options(&options.delimited)
@@ -64,6 +68,186 @@ impl SourceAdapter for DelimitedAdapter {
             rows,
             display_name,
         )))
+    }
+}
+
+fn open_streaming_delimited(
+    input: StreamingInput,
+    display_name: String,
+    options: &OpenOptions,
+) -> anyhow::Result<OpenedSource> {
+    input.wait_for_delimited_sample()?;
+    let generation = SourceGeneration::new();
+    let mut store = StreamingDelimitedTable {
+        generation,
+        input,
+        options: options.delimited.clone(),
+        display_name,
+        rows: Vec::new(),
+        columns: Vec::new(),
+        header_rows: None,
+        last_bytes: usize::MAX,
+        complete: false,
+    };
+    store.refresh(false)?;
+    let definition = TableDefinition {
+        generation,
+        columns: store.columns.clone(),
+        schema_state: if store.complete {
+            SchemaState::Complete
+        } else {
+            SchemaState::Provisional
+        },
+        relation: RelationMetadata::implicit(
+            store.display_name.clone(),
+            store.header_rows == Some(1),
+        ),
+    };
+    Ok(OpenedSource::implicit(OpenedTable {
+        generation,
+        definition,
+        store: Box::new(store),
+        object_mode: None,
+        warnings: Vec::new(),
+    }))
+}
+
+struct StreamingDelimitedTable {
+    generation: SourceGeneration,
+    input: StreamingInput,
+    options: crate::ingest::ParseOptions,
+    display_name: String,
+    rows: Vec<Row>,
+    columns: Vec<ColumnDefinition>,
+    header_rows: Option<usize>,
+    last_bytes: usize,
+    complete: bool,
+}
+
+impl StreamingDelimitedTable {
+    fn refresh(&mut self, wait_for_completion: bool) -> anyhow::Result<SchemaDelta> {
+        let snapshot = self.input.snapshot(wait_for_completion)?;
+        if snapshot.bytes.len() == self.last_bytes && snapshot.complete == self.complete {
+            return Ok(SchemaDelta::default());
+        }
+        let parse_len = if snapshot.complete {
+            snapshot.bytes.len()
+        } else {
+            snapshot
+                .bytes
+                .iter()
+                .rposition(|byte| *byte == b'\n')
+                .map_or(0, |index| index + 1)
+        };
+        let parsed = if parse_len == 0 {
+            Vec::new()
+        } else {
+            match parse_rows(&snapshot.bytes[..parse_len], &self.options) {
+                Ok(rows) => rows,
+                Err(_) if !snapshot.complete => return Ok(SchemaDelta::default()),
+                Err(error) => return Err(error.into()),
+            }
+        };
+
+        let (candidate, detected_header_rows) =
+            delimited_definition(self.generation, &parsed, self.display_name.clone());
+        let header_rows = *self.header_rows.get_or_insert(detected_header_rows);
+        let previous_columns = self.columns.len();
+        if candidate.columns.len() > self.columns.len() {
+            self.columns
+                .extend(candidate.columns[self.columns.len()..].iter().cloned());
+        }
+        self.rows = parsed
+            .into_iter()
+            .skip(header_rows)
+            .enumerate()
+            .map(|(index, cells)| Row::from_text(self.generation, index, cells))
+            .collect();
+        self.last_bytes = snapshot.bytes.len();
+        let became_complete = snapshot.complete && !self.complete;
+        self.complete = snapshot.complete;
+        Ok(SchemaDelta {
+            added_columns: self.columns[previous_columns..].to_vec(),
+            widened_types: Vec::new(),
+            completed: became_complete,
+        })
+    }
+}
+
+impl TableStore for StreamingDelimitedTable {
+    fn generation(&self) -> SourceGeneration {
+        self.generation
+    }
+
+    fn row_count(&self) -> RowCount {
+        if self.complete {
+            RowCount::Exact(self.rows.len())
+        } else if self.rows.is_empty() {
+            RowCount::Unknown
+        } else {
+            RowCount::AtLeast(self.rows.len())
+        }
+    }
+
+    fn column_count(&self) -> usize {
+        self.columns.len()
+    }
+
+    fn row(&mut self, index: RowIndex) -> anyhow::Result<Option<Row>> {
+        Ok(self.rows.get(index.0).cloned())
+    }
+
+    fn ensure_indexed_through(&mut self, index: RowIndex) -> anyhow::Result<IndexProgress> {
+        let delta = self.refresh(index.0 == usize::MAX)?;
+        Ok(IndexProgress {
+            row_count: self.row_count(),
+            schema_delta: delta,
+            bytes_scanned: self.last_bytes as u64,
+        })
+    }
+
+    fn scan_rows(
+        &mut self,
+        request: ScanRequest,
+        visitor: &mut dyn RowVisitor,
+    ) -> anyhow::Result<ScanProgress> {
+        self.refresh(false)?;
+        let mut current = request.start.0;
+        let mut visited = 0;
+        while visited < request.max_rows {
+            let Some(row) = self.rows.get(current) else {
+                break;
+            };
+            visited += 1;
+            if visitor.visit(RowIndex(current), row).is_break() {
+                return Ok(ScanProgress {
+                    visited,
+                    next: None,
+                    reached_end: false,
+                });
+            }
+            match request.direction {
+                ScanDirection::Forward => current += 1,
+                ScanDirection::Reverse if current > 0 => current -= 1,
+                ScanDirection::Reverse => {
+                    return Ok(ScanProgress {
+                        visited,
+                        next: None,
+                        reached_end: true,
+                    });
+                }
+            }
+        }
+        let reached_end = current >= self.rows.len();
+        Ok(ScanProgress {
+            visited,
+            next: (!reached_end).then_some(RowIndex(current)),
+            reached_end,
+        })
+    }
+
+    fn materialize(&mut self) -> anyhow::Result<InMemoryTable> {
+        InMemoryTable::from_rows(self.generation, self.rows.clone())
     }
 }
 
@@ -245,5 +429,66 @@ mod tests {
             .expect("open");
         let table = source.into_implicit_table().expect("table");
         assert_eq!(table.store.row_count(), RowCount::Exact(1));
+    }
+
+    #[test]
+    fn streaming_stdin_exposes_rows_before_eof_and_completes_on_demand() {
+        let input = StreamingInput::pending_for_test();
+        input.append_for_test(b"name,value\na,1\n");
+        let source = DelimitedAdapter
+            .open(
+                InputSource::StreamingStdin(input.clone()),
+                &OpenOptions::default(),
+            )
+            .expect("open streaming input");
+        let mut table = source.into_implicit_table().expect("table");
+        assert_eq!(table.store.row_count(), RowCount::AtLeast(1));
+        assert_eq!(
+            table
+                .store
+                .row(RowIndex(0))
+                .unwrap()
+                .unwrap()
+                .display_cells(),
+            ["a", "1"]
+        );
+
+        input.append_for_test(b"b,2\n");
+        let progress = table
+            .store
+            .ensure_indexed_through(RowIndex(1))
+            .expect("refresh available rows");
+        assert_eq!(progress.row_count, RowCount::AtLeast(2));
+        input.finish_for_test();
+        let progress = table
+            .store
+            .ensure_indexed_through(RowIndex(usize::MAX))
+            .expect("finish stream");
+        assert_eq!(progress.row_count, RowCount::Exact(2));
+        assert!(progress.schema_delta.completed);
+    }
+
+    #[test]
+    fn streaming_view_appends_available_rows_without_navigation() {
+        let input = StreamingInput::pending_for_test();
+        input.append_for_test(b"name,value\na,1\n");
+        let opened = DelimitedAdapter
+            .open(
+                InputSource::StreamingStdin(input.clone()),
+                &OpenOptions::default(),
+            )
+            .expect("open streaming input")
+            .into_implicit_table()
+            .expect("table");
+        let mut view =
+            crate::view::TableView::from_opened_table(opened, crate::view::Viewport::new(1, 10))
+                .expect("view");
+        assert_eq!(view.row_count(), 1);
+
+        input.append_for_test(b"b,2\n");
+        view.resize_viewport(1, 10);
+        assert_eq!(view.row_count(), 2);
+        assert_eq!(view.visible_raw_rows_vec()[1], ["b", "2"]);
+        input.finish_for_test();
     }
 }

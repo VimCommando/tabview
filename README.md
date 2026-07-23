@@ -90,6 +90,9 @@ tabview repositories.json --object-mode entries
 tabview settings.json --object-mode record
 tabview records.ndjson --format ndjson
 tabview response.data --format json --schema-scan full
+tabview data.csv --output table
+tabview --interactive data.csv
+tabview --interactive --output table data.csv > edited.txt
 ```
 
 Read from standard input:
@@ -97,7 +100,32 @@ Read from standard input:
 ```sh
 cat data.csv | tabview -
 cat records.ndjson | tabview --format ndjson -
+cat data.csv | tabview --output table - > table.txt
+cat data.csv | tabview --interactive --output table - > edited.txt
 ```
+
+Runtime and serialization are separate. `--interactive`/`-i` forces the TUI;
+`--output table`/`-o table` selects fixed-width text output. Combining them runs
+the TUI and writes the final live view after a normal quit. Hiding columns,
+formatting, filtering, and sorting in that session affect the emitted result.
+Using `-i` without `-o` is view-only and writes no final table.
+
+With neither option, terminal stdout selects the TUI and redirected or piped
+stdout selects plain table output automatically. Table output never uses raw
+mode or the alternate screen. It emits every configured row and visible column,
+uses no aggregate terminal-width limit, and leaves wrapping, paging, or
+truncation to downstream tools. `--color auto` and `--color never` produce plain
+bytes; `--color always` opts into theme-derived ANSI styling.
+
+When stdin supplies table data during interactive operation, Tabview uses the
+controlling terminal for UI input and drawing. It continues draining finite
+stdin in the background while the TUI is active, and an explicit final export
+waits for EOF so late rows and columns are included. Redirect output to a
+different path from the input: shells truncate redirection targets before Tabview starts.
+The current `table` format is fixed-width text and does not preserve CSV or JSON
+syntax, so write it to a text destination rather than replacing the source.
+Future serializers such as CSV and Markdown can be added as new `--output`
+values without changing `--interactive`.
 
 `--format auto|delimited|json|ndjson` defaults to `auto`. Filename extensions
 are considered before bounded content probing; an explicit format always wins.
