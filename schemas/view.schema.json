@@ -35,6 +35,11 @@
       "pattern": "^(?:/(?:[^~]|~[01])*)*$",
       "description": "RFC 6901 JSON Pointer selecting the table node."
     },
+    "object_mode": {
+      "type": "string",
+      "enum": ["auto", "record", "entries"],
+      "description": "Interpret a selected structured object automatically, as one record, or as keyed entry rows."
+    },
     "schema_scan": {
       "type": "string",
       "enum": ["default", "full"]

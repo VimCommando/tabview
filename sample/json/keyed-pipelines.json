@@ -1,0 +1,5 @@
+{
+  "logs-default": {"description": "default logs", "processors": [{"set": {"field": "ecs.version", "value": "8.0.0"}}]},
+  "metrics-default": {"description": "default metrics", "processors": [{"rename": {"field": "host", "target_field": "host.name"}}]},
+  "traces-default": {"description": "default traces", "processors": []}
+}

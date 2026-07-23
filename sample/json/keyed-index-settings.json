@@ -1,0 +1,5 @@
+{
+  "logs-000001": {"settings": {"index": {"number_of_shards": "1"}}},
+  "metrics-000001": {"settings": {"index": {"number_of_shards": "2"}}},
+  "traces-000001": {"settings": {"index": {"number_of_shards": "1"}}}
+}

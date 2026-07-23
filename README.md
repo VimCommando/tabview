@@ -86,6 +86,8 @@ tabview <filename> --width 20
 tabview <filename> --view cat-shards
 tabview <filename> --no-view
 tabview response.json --json-path /hits/hits
+tabview repositories.json --object-mode entries
+tabview settings.json --object-mode record
 tabview records.ndjson --format ndjson
 tabview response.data --format json --schema-scan full
 ```
@@ -102,12 +104,26 @@ are considered before bounded content probing; an explicit format always wins.
 Delimited-only options such as `--delimiter` imply delimited input under
 `auto` and are rejected with an explicitly selected JSON format.
 
-For regular JSON, the selected root object becomes one row and the elements of
-a selected root array become rows. `--json-path` uses RFC 6901 JSON Pointer,
-not JSONPath. For example, `--json-path /hits/hits` selects Elasticsearch search
-hits while ignoring response metadata. For NDJSON the pointer is resolved in
-each complete document and the selected object or array remains that document's
-single row.
+For structured formats, `--object-mode auto|record|entries` controls how a
+selected object becomes rows. `record` keeps compatibility behavior and opens
+the object as one row. `entries` opens each direct member as a row, preserving
+source order; the member name is a synthetic first text column with canonical
+identity `@key`. The same option is format-neutral so future structured input
+adapters can use it too. It is not valid for arrays, scalars, delimited input,
+or NDJSON row streams.
+
+`auto`, the default, detects entries only when the bounded sample has at least
+three members, every sampled value is an object, and at least 75 percent share
+a direct child field with the same value kind. Detection examines at most 64
+entries or 1 MiB, finishing the entry that crosses the byte bound. Use explicit
+`record` or `entries` for reproducible scripts and saved views. Improvements to
+future default detection do not override an explicit mode.
+
+`--json-path` uses RFC 6901 JSON Pointer, not JSONPath, and selection happens
+before object-mode resolution. For example, `--json-path /hits/hits` selects
+Elasticsearch search hits while ignoring response metadata. Selected arrays
+remain rows. For NDJSON the pointer is resolved in each complete document and
+the selected object or array remains that document's single row.
 
 Nested objects are flattened to canonical row-relative pointers. Nested arrays
 remain atomic JSON cells. Native null, boolean, integer, floating-point, and
@@ -277,6 +293,19 @@ filters:
     condition: ">0"
 ```
 
+A keyed-object view can pin its row shape and address the synthetic key column
+independently of its display label:
+
+```yaml
+name: repositories
+filenames: [repositories.json]
+format: json
+object_mode: entries
+columns:
+  "@key":
+    label: Repository
+```
+
 Column keys match headers case-insensitively. Exact keys win over wildcard
 keys; wildcard ties use the most literal characters, then lexical order.
 Supported type aliases are `string`, `text`, `date`, `ip`, `number`, `float`,
@@ -289,14 +318,19 @@ ascending sort, `▼` for descending sort, `+` for filter-in, `-` for filter-out
 and `±` for multiple filters. Truncation applies after those prefix markers.
 
 Source options are selected before the table opens. Saved views accept
-`format`, `json_path`, and `schema_scan`; precedence is explicit CLI options,
-then the selected saved view, then defaults. Supplying `--schema-scan default`
-therefore overrides a saved `schema_scan: full` for one invocation.
+`format`, `json_path`, `object_mode`, and `schema_scan`; precedence is explicit
+CLI options, then the selected saved view, then defaults. Supplying
+`--schema-scan default` therefore overrides a saved `schema_scan: full` for one
+invocation. When a view is written for an object table, tabview saves the
+resolved explicit `object_mode` (`record` or `entries`) so later detector
+improvements do not change that view's shape. Non-object tables omit it.
 
 Structured column configuration should use exact, case-sensitive canonical
-JSON Pointers such as `/_source/user/email`. An unambiguous compact display
-label is accepted as a fallback. A column can set `label` without changing its
-canonical identity or raw data. Top-level and per-column `nulls: first|last`
+JSON Pointers such as `/_source/user/email`; keyed-object member names use
+`@key`, regardless of whether its display label is `name` or `_key`. An
+unambiguous compact display label is accepted as a fallback. A column can set
+`label` without changing its canonical identity or raw data. Top-level and
+per-column `nulls: first|last`
 control direction-independent sort placement, with the column policy winning
 over the view policy and `last` as the built-in default.
 

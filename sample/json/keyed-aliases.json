@@ -1,0 +1,5 @@
+{
+  "logs-000001": {"aliases": {"logs": {"is_write_index": true}}},
+  "logs-000002": {"aliases": {"logs": {"is_write_index": false}}},
+  "metrics-000001": {"aliases": {"metrics": {"is_write_index": true}}}
+}

@@ -52,6 +52,8 @@ impl SourceAdapter for DelimitedAdapter {
                     generation,
                     definition,
                     store,
+                    object_mode: None,
+                    warnings: Vec::new(),
                 }));
             }
         }
@@ -73,6 +75,8 @@ pub fn open_delimited_rows(rows: Vec<Vec<String>>, display_name: String) -> Open
         generation,
         definition,
         store: Box::new(InMemoryTable::from_text_rows(generation, data_rows)),
+        object_mode: None,
+        warnings: Vec::new(),
     }
 }
 

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
@@ -16,7 +16,11 @@ use crate::table::{
 
 use super::adapter::{OpenedSource, OpenedTable, ProbeResult, SourceAdapter};
 use super::source::{read_source, InputSource};
-use super::{InputFormat, JsonPointer, OpenOptions, SchemaScan};
+use super::streaming_json::{RawObjectEntry, SelectedJsonValue};
+use super::{
+    resolve_selected_shape, InputFormat, JsonPointer, ObjectMode, ObjectModeResolution,
+    OpenOptions, SchemaScan, SelectedTableShape, SelectedValueShape, SourceOptionError,
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct JsonAdapter {
@@ -64,6 +68,12 @@ impl SourceAdapter for JsonAdapter {
 
     fn open(&self, source: InputSource, options: &OpenOptions) -> anyhow::Result<OpenedSource> {
         options.validate()?;
+        if self.format == InputFormat::Ndjson && options.object_mode != ObjectMode::Auto {
+            return Err(SourceOptionError::ObjectModeRequiresObject {
+                mode: options.object_mode,
+            }
+            .into());
+        }
         if let InputSource::Path(path) = &source {
             if std::fs::metadata(path)?.len() >= options.lazy_threshold_bytes {
                 match self.format {
@@ -78,12 +88,25 @@ impl SourceAdapter for JsonAdapter {
             }
         }
         let bytes = read_source(&source)?;
-        let rows = match self.format {
-            InputFormat::Json => parse_json_rows(&bytes, options.json_path.as_ref())?,
-            InputFormat::Ndjson => parse_ndjson_rows(&bytes, options.json_path.as_ref())?,
+        match self.format {
+            InputFormat::Json => {
+                let parsed =
+                    parse_json_rows_with_options(&bytes, options.json_path.as_ref(), options)?;
+                open_json_rows_with_metadata(
+                    parsed.rows,
+                    source.display_name(),
+                    options,
+                    parsed.object_mode,
+                    parsed.warnings,
+                )
+            }
+            InputFormat::Ndjson => open_json_rows(
+                parse_ndjson_rows(&bytes, options.json_path.as_ref())?,
+                source.display_name(),
+                options,
+            ),
             _ => anyhow::bail!("JSON adapter requires json or ndjson format"),
-        };
-        open_json_rows(rows, source.display_name(), options)
+        }
     }
 }
 
@@ -123,12 +146,184 @@ struct FlatRow {
     source_bytes: u64,
 }
 
+struct ParsedJsonRows {
+    rows: Vec<FlatRow>,
+    object_mode: Option<ObjectModeResolution>,
+    warnings: Vec<String>,
+}
+
+#[cfg(test)]
 fn parse_json_rows(bytes: &[u8], pointer: Option<&JsonPointer>) -> anyhow::Result<Vec<FlatRow>> {
-    super::streaming_json::select_json_rows(bytes, pointer)?
+    Ok(parse_json_rows_with_options(bytes, pointer, &OpenOptions::default())?.rows)
+}
+
+fn parse_json_rows_with_options(
+    bytes: &[u8],
+    pointer: Option<&JsonPointer>,
+    options: &OpenOptions,
+) -> anyhow::Result<ParsedJsonRows> {
+    match super::streaming_json::select_json_table(bytes, pointer)? {
+        SelectedJsonValue::ArrayRows(rows) => {
+            let resolution = resolve_selected_shape(
+                SelectedValueShape::Array,
+                options.object_mode,
+                options.object_mode_origin,
+                false,
+            )?;
+            Ok(ParsedJsonRows {
+                rows: rows
+                    .iter()
+                    .map(|raw| serde_json::from_str::<Value>(raw.get()).map_err(Into::into))
+                    .map(|value| value.and_then(|value| flatten_row(&value)))
+                    .collect::<anyhow::Result<Vec<_>>>()?,
+                object_mode: None,
+                warnings: resolution.warning.into_iter().collect(),
+            })
+        }
+        SelectedJsonValue::Object(entries) => {
+            ensure_unique_object_entries(&entries)?;
+            let resolution = resolve_selected_shape(
+                SelectedValueShape::Object,
+                options.object_mode,
+                options.object_mode_origin,
+                options.object_mode == ObjectMode::Auto && detect_keyed_object(&entries)?,
+            )?;
+            let rows = match resolution.table_shape.expect("object table shape") {
+                SelectedTableShape::ObjectRecord => vec![flatten_object_record(&entries)?],
+                SelectedTableShape::ObjectEntries => project_object_entries(&entries)?,
+                SelectedTableShape::ArrayRows => unreachable!("object resolved as array"),
+            };
+            Ok(ParsedJsonRows {
+                rows,
+                object_mode: resolution.object_mode,
+                warnings: resolution.warning.into_iter().collect(),
+            })
+        }
+        SelectedJsonValue::Scalar => {
+            let resolution = resolve_selected_shape(
+                SelectedValueShape::Scalar,
+                options.object_mode,
+                options.object_mode_origin,
+                false,
+            )?;
+            let message = "JSON starting path does not identify a tabular object or array";
+            if let Some(warning) = resolution.warning {
+                anyhow::bail!("{warning}; {message}");
+            }
+            anyhow::bail!(message);
+        }
+    }
+}
+
+const OBJECT_DETECTION_MAX_ENTRIES: usize = 64;
+const OBJECT_DETECTION_MAX_BYTES: u64 = 1024 * 1024;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum JsonValueKind {
+    Null,
+    Boolean,
+    Number,
+    String,
+    Array,
+    Object,
+}
+
+fn json_value_kind(value: &Value) -> JsonValueKind {
+    match value {
+        Value::Null => JsonValueKind::Null,
+        Value::Bool(_) => JsonValueKind::Boolean,
+        Value::Number(_) => JsonValueKind::Number,
+        Value::String(_) => JsonValueKind::String,
+        Value::Array(_) => JsonValueKind::Array,
+        Value::Object(_) => JsonValueKind::Object,
+    }
+}
+
+fn detection_sample(entries: &[RawObjectEntry]) -> anyhow::Result<Vec<Value>> {
+    let mut sampled = Vec::new();
+    let mut bytes = 0_u64;
+    for entry in entries.iter().take(OBJECT_DETECTION_MAX_ENTRIES) {
+        sampled.push(serde_json::from_str(entry.value.get())?);
+        bytes = bytes.saturating_add(entry.encoded_len());
+        if bytes >= OBJECT_DETECTION_MAX_BYTES {
+            break;
+        }
+    }
+    Ok(sampled)
+}
+
+fn values_are_keyed_object(sampled: &[Value]) -> bool {
+    if sampled.len() < 3 || !sampled.iter().all(Value::is_object) {
+        return false;
+    }
+    let mut counts = HashMap::<(String, JsonValueKind), usize>::new();
+    for value in sampled {
+        let Value::Object(object) = value else {
+            return false;
+        };
+        for (key, value) in object {
+            *counts
+                .entry((key.clone(), json_value_kind(value)))
+                .or_default() += 1;
+        }
+    }
+    let threshold = sampled.len().saturating_mul(3).div_ceil(4);
+    counts.values().any(|count| *count >= threshold)
+}
+
+fn detect_keyed_object(entries: &[RawObjectEntry]) -> anyhow::Result<bool> {
+    Ok(values_are_keyed_object(&detection_sample(entries)?))
+}
+
+fn flatten_object_record(entries: &[RawObjectEntry]) -> anyhow::Result<FlatRow> {
+    let mut object = serde_json::Map::new();
+    for entry in entries {
+        object.insert(entry.key.clone(), serde_json::from_str(entry.value.get())?);
+    }
+    flatten_row(&Value::Object(object))
+}
+
+fn ensure_unique_object_entries(entries: &[RawObjectEntry]) -> anyhow::Result<()> {
+    let mut seen = HashSet::with_capacity(entries.len());
+    for entry in entries {
+        if !seen.insert(entry.key.as_str()) {
+            anyhow::bail!("duplicate object member key '{}'", entry.key);
+        }
+    }
+    Ok(())
+}
+
+fn project_object_entries(entries: &[RawObjectEntry]) -> anyhow::Result<Vec<FlatRow>> {
+    entries
         .iter()
-        .map(|raw| serde_json::from_str::<Value>(raw.get()).map_err(Into::into))
-        .map(|value| value.and_then(|value| flatten_row(&value)))
+        .map(|entry| {
+            let value = serde_json::from_str(entry.value.get())?;
+            flatten_keyed_entry(&entry.key, &value, entry.encoded_len())
+        })
         .collect()
+}
+
+fn flatten_keyed_entry(key: &str, value: &Value, source_bytes: u64) -> anyhow::Result<FlatRow> {
+    let mut cells = vec![(
+        "@key".to_owned(),
+        CellValue::Text(key.to_owned()),
+        ColumnSourceIdentity::ObjectKey,
+    )];
+    match value {
+        Value::Object(object) => flatten_object(object, "", &mut cells)?,
+        value => {
+            let path = "/value".to_owned();
+            cells.push((
+                path.clone(),
+                cell_from_value(value)?,
+                ColumnSourceIdentity::StructuredPath(path.parse()?),
+            ));
+        }
+    }
+    Ok(FlatRow {
+        cells,
+        source_bytes,
+    })
 }
 
 fn parse_ndjson_rows(bytes: &[u8], pointer: Option<&JsonPointer>) -> anyhow::Result<Vec<FlatRow>> {
@@ -209,7 +404,7 @@ fn flatten_object(
                 cells.push((
                     path,
                     CellValue::Json("{}".to_owned()),
-                    ColumnSourceIdentity::JsonPointer(pointer),
+                    ColumnSourceIdentity::StructuredPath(pointer),
                 ));
             } else {
                 flatten_object(nested, &path, cells)?;
@@ -219,7 +414,7 @@ fn flatten_object(
             cells.push((
                 path,
                 cell_from_value(value)?,
-                ColumnSourceIdentity::JsonPointer(pointer),
+                ColumnSourceIdentity::StructuredPath(pointer),
             ));
         }
     }
@@ -244,6 +439,16 @@ fn open_json_rows(
     rows: Vec<FlatRow>,
     display_name: String,
     options: &OpenOptions,
+) -> anyhow::Result<OpenedSource> {
+    open_json_rows_with_metadata(rows, display_name, options, None, Vec::new())
+}
+
+fn open_json_rows_with_metadata(
+    rows: Vec<FlatRow>,
+    display_name: String,
+    options: &OpenOptions,
+    object_mode: Option<ObjectModeResolution>,
+    warnings: Vec<String>,
 ) -> anyhow::Result<OpenedSource> {
     let generation = SourceGeneration::new();
     let mut schema = JsonSchema::new(generation);
@@ -293,6 +498,8 @@ fn open_json_rows(
         generation,
         definition,
         store: Box::new(store),
+        object_mode,
+        warnings,
     }))
 }
 
@@ -355,25 +562,41 @@ impl JsonSchema {
     }
 
     fn assign_initial_labels(&mut self) {
-        let paths = self.indices.keys().cloned().collect::<Vec<_>>();
+        let paths = self
+            .columns
+            .iter()
+            .filter_map(|column| match &column.source_identity {
+                ColumnSourceIdentity::StructuredPath(path) => Some(path.as_str().to_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let mut child_uses_name = false;
         for column in &mut self.columns {
             column.display_name = match &column.source_identity {
                 ColumnSourceIdentity::Positional(index) => format!("Column {}", index + 1),
-                _ => shortest_unique_label(
-                    source_path(&column.source_identity),
-                    paths.iter().map(String::as_str),
-                ),
+                ColumnSourceIdentity::ObjectKey => continue,
+                ColumnSourceIdentity::StructuredPath(path) => {
+                    let label =
+                        shortest_unique_label(path.as_str(), paths.iter().map(String::as_str));
+                    child_uses_name |= label == "name";
+                    label
+                }
+                ColumnSourceIdentity::Delimited { .. } => String::new(),
             };
+        }
+        if let Some(key) = self
+            .columns
+            .iter_mut()
+            .find(|column| column.source_identity == ColumnSourceIdentity::ObjectKey)
+        {
+            key.display_name = if child_uses_name { "_key" } else { "name" }.to_owned();
         }
         self.labels_assigned = true;
     }
 }
 
 fn source_path(identity: &ColumnSourceIdentity) -> &str {
-    match identity {
-        ColumnSourceIdentity::JsonPointer(pointer) => pointer.as_str(),
-        ColumnSourceIdentity::Positional(_) | ColumnSourceIdentity::Delimited { .. } => "",
-    }
+    identity.canonical_key().unwrap_or("")
 }
 
 fn shortest_unique_label<'a>(path: &str, all: impl Iterator<Item = &'a str>) -> String {
@@ -458,14 +681,27 @@ fn open_lazy_json(
     let selected_kind = read_non_whitespace(&mut file)?
         .ok_or_else(|| anyhow::anyhow!("JSON starting path was not found"))?;
     if selected_kind == b'{' {
-        file.seek(SeekFrom::Start(selected_offset))?;
-        let mut deserializer = serde_json::Deserializer::from_reader(file);
-        let value = Value::deserialize(&mut deserializer)?;
-        return open_json_rows(vec![flatten_row(&value)?], display_name, options);
+        return open_lazy_json_object(path, display_name, options, selected_offset);
     }
-    if selected_kind != b'[' {
-        anyhow::bail!("JSON starting path does not identify an object or array");
+    let selected_shape = if selected_kind == b'[' {
+        SelectedValueShape::Array
+    } else {
+        SelectedValueShape::Scalar
+    };
+    let resolution = resolve_selected_shape(
+        selected_shape,
+        options.object_mode,
+        options.object_mode_origin,
+        false,
+    )?;
+    if selected_shape == SelectedValueShape::Scalar {
+        let message = "JSON starting path does not identify a tabular object or array";
+        if let Some(warning) = resolution.warning {
+            anyhow::bail!("{warning}; {message}");
+        }
+        anyhow::bail!(message);
     }
+    let warnings = resolution.warning.into_iter().collect();
 
     let generation = SourceGeneration::new();
     let mut store = LazyJsonArrayTable {
@@ -501,6 +737,79 @@ fn open_lazy_json(
         generation,
         definition,
         store: Box::new(store),
+        object_mode: None,
+        warnings,
+    }))
+}
+
+fn open_lazy_json_object(
+    path: &Path,
+    display_name: String,
+    options: &OpenOptions,
+    selected_offset: u64,
+) -> anyhow::Result<OpenedSource> {
+    let generation = SourceGeneration::new();
+    let mut store = LazyJsonObjectTable {
+        generation,
+        path: path.to_path_buf(),
+        entries: Vec::new(),
+        seen_keys: HashSet::new(),
+        schema: JsonSchema::new(generation),
+        scan_offset: selected_offset.saturating_add(1),
+        bytes_scanned: 0,
+        eof: false,
+        fingerprint: json_source_fingerprint(path)?,
+    };
+
+    let auto_entries = if options.object_mode == ObjectMode::Auto {
+        let sample = store.index_detection_sample()?;
+        values_are_keyed_object(&sample)
+    } else {
+        false
+    };
+    let resolution = resolve_selected_shape(
+        SelectedValueShape::Object,
+        options.object_mode,
+        options.object_mode_origin,
+        auto_entries,
+    )?;
+    if resolution.table_shape == Some(SelectedTableShape::ObjectRecord) {
+        store.index_until(None, Some(u64::MAX))?;
+        let row = store.flattened_object_record()?;
+        return open_json_rows_with_metadata(
+            vec![row],
+            display_name,
+            options,
+            resolution.object_mode,
+            Vec::new(),
+        );
+    };
+
+    match options.schema_scan {
+        SchemaScan::Full => {
+            store.index_until(None, Some(u64::MAX))?;
+        }
+        SchemaScan::Default => {
+            store.index_until(None, Some(options.schema_scan_bytes))?;
+        }
+    }
+    store.schema.assign_initial_labels();
+    let definition = TableDefinition {
+        generation,
+        columns: store.schema.columns.clone(),
+        schema_state: if store.eof {
+            SchemaState::Complete
+        } else {
+            SchemaState::Provisional
+        },
+        relation: RelationMetadata::implicit(display_name, true),
+    };
+    Ok(OpenedSource::implicit(OpenedTable {
+        generation,
+        definition,
+        store: Box::new(store),
+        object_mode: resolution.object_mode,
+        warnings: Vec::new(),
     }))
 }
 
@@ -690,6 +999,254 @@ fn skip_json_value(file: &mut File) -> anyhow::Result<(u64, u64)> {
         },
     }
     Ok((start, file.stream_position()?))
+}
+
+#[derive(Debug, Clone)]
+struct KeyedObjectOffset {
+    key: String,
+    value_start: u64,
+    value_end: u64,
+    source_bytes: u64,
+}
+
+#[derive(Debug, Clone)]
+struct LazyJsonObjectTable {
+    generation: SourceGeneration,
+    path: PathBuf,
+    entries: Vec<KeyedObjectOffset>,
+    seen_keys: HashSet<String>,
+    schema: JsonSchema,
+    scan_offset: u64,
+    bytes_scanned: u64,
+    eof: bool,
+    fingerprint: JsonSourceFingerprint,
+}
+
+impl LazyJsonObjectTable {
+    fn ensure_source_unchanged(&self) -> anyhow::Result<()> {
+        if json_source_fingerprint(&self.path)? != self.fingerprint {
+            anyhow::bail!("source changed during incremental access; reload is required");
+        }
+        Ok(())
+    }
+
+    fn read_value(&self, entry: &KeyedObjectOffset) -> anyhow::Result<Value> {
+        self.ensure_source_unchanged()?;
+        let mut file = File::open(&self.path)?;
+        file.seek(SeekFrom::Start(entry.value_start))?;
+        let mut bytes = vec![0_u8; entry.value_end.saturating_sub(entry.value_start) as usize];
+        file.read_exact(&mut bytes)?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    fn read_flat_row(&self, index: usize) -> anyhow::Result<Option<FlatRow>> {
+        let Some(entry) = self.entries.get(index) else {
+            return Ok(None);
+        };
+        let value = self.read_value(entry)?;
+        Ok(Some(flatten_keyed_entry(
+            &entry.key,
+            &value,
+            entry.source_bytes,
+        )?))
+    }
+
+    fn typed_row(&self, index: usize) -> anyhow::Result<Option<Row>> {
+        Ok(self
+            .read_flat_row(index)?
+            .map(|flat| typed_row_from_flat(self.generation, index, &flat, &self.schema)))
+    }
+
+    fn flattened_object_record(&self) -> anyhow::Result<FlatRow> {
+        self.ensure_source_unchanged()?;
+        let mut object = serde_json::Map::new();
+        for entry in &self.entries {
+            object.insert(entry.key.clone(), self.read_value(entry)?);
+        }
+        flatten_row(&Value::Object(object))
+    }
+
+    fn index_next(&mut self) -> anyhow::Result<(Option<Value>, SchemaDelta)> {
+        if self.eof {
+            return Ok((None, SchemaDelta::default()));
+        }
+        self.ensure_source_unchanged()?;
+        let mut file = File::open(&self.path)?;
+        file.seek(SeekFrom::Start(self.scan_offset))?;
+        let entry_start = skip_whitespace(&mut file)?
+            .ok_or_else(|| anyhow::anyhow!("unterminated selected JSON object"))?;
+        file.seek(SeekFrom::Start(entry_start))?;
+        if read_byte(&mut file)? == Some(b'}') {
+            self.ensure_source_unchanged()?;
+            self.scan_offset = file.stream_position()?;
+            self.eof = true;
+            return Ok((
+                None,
+                SchemaDelta {
+                    completed: true,
+                    ..SchemaDelta::default()
+                },
+            ));
+        }
+
+        file.seek(SeekFrom::Start(entry_start))?;
+        let key = read_json_string(&mut file)?;
+        if self.seen_keys.contains(&key) {
+            anyhow::bail!("duplicate object member key '{key}'");
+        }
+        expect_json_byte(&mut file, b':')?;
+        let (value_start, value_end) = skip_json_value(&mut file)?;
+        file.seek(SeekFrom::Start(value_start))?;
+        let mut deserializer = serde_json::Deserializer::from_reader(&mut file);
+        let value = Value::deserialize(&mut deserializer)?;
+        let source_bytes = value_end.saturating_sub(entry_start);
+        let flat = flatten_keyed_entry(&key, &value, source_bytes)?;
+
+        file.seek(SeekFrom::Start(value_end))?;
+        let separator = read_non_whitespace(&mut file)?;
+        let next_scan_offset = file.stream_position()?;
+        let next_eof = match separator {
+            Some(b',') => false,
+            Some(b'}') => true,
+            _ => anyhow::bail!("invalid selected JSON object separator"),
+        };
+        self.ensure_source_unchanged()?;
+
+        let mut next_schema = self.schema.clone();
+        let mut delta = next_schema.observe(&flat);
+        if next_eof {
+            delta.completed = true;
+        }
+        self.schema = next_schema;
+        self.seen_keys.insert(key.clone());
+        self.entries.push(KeyedObjectOffset {
+            key,
+            value_start,
+            value_end,
+            source_bytes,
+        });
+        self.scan_offset = next_scan_offset;
+        self.bytes_scanned = self.bytes_scanned.saturating_add(source_bytes);
+        self.eof = next_eof;
+        Ok((Some(value), delta))
+    }
+
+    fn index_detection_sample(&mut self) -> anyhow::Result<Vec<Value>> {
+        let mut values = Vec::new();
+        while values.len() < OBJECT_DETECTION_MAX_ENTRIES
+            && self.bytes_scanned < OBJECT_DETECTION_MAX_BYTES
+            && !self.eof
+        {
+            if let (Some(value), _) = self.index_next()? {
+                values.push(value);
+            }
+        }
+        Ok(values)
+    }
+
+    fn index_until(
+        &mut self,
+        target: Option<usize>,
+        byte_limit: Option<u64>,
+    ) -> anyhow::Result<SchemaDelta> {
+        let mut delta = SchemaDelta::default();
+        while !self.eof
+            && target.is_none_or(|target| self.entries.len() <= target)
+            && byte_limit.is_none_or(|limit| self.bytes_scanned < limit)
+        {
+            let (_, observed) = self.index_next()?;
+            delta.added_columns.extend(observed.added_columns);
+            delta.widened_types.extend(observed.widened_types);
+            delta.completed |= observed.completed;
+        }
+        Ok(delta)
+    }
+}
+
+impl TableStore for LazyJsonObjectTable {
+    fn generation(&self) -> SourceGeneration {
+        self.generation
+    }
+
+    fn row_count(&self) -> RowCount {
+        if self.eof {
+            RowCount::Exact(self.entries.len())
+        } else if self.entries.is_empty() {
+            RowCount::Unknown
+        } else {
+            RowCount::AtLeast(self.entries.len())
+        }
+    }
+
+    fn column_count(&self) -> usize {
+        self.schema.columns.len()
+    }
+
+    fn row(&mut self, index: RowIndex) -> anyhow::Result<Option<Row>> {
+        self.index_until(Some(index.0), None)?;
+        self.typed_row(index.0)
+    }
+
+    fn ensure_indexed_through(&mut self, index: RowIndex) -> anyhow::Result<IndexProgress> {
+        let delta = self.index_until(Some(index.0), None)?;
+        Ok(IndexProgress {
+            row_count: self.row_count(),
+            schema_delta: delta,
+            bytes_scanned: self.bytes_scanned,
+        })
+    }
+
+    fn scan_rows(
+        &mut self,
+        request: ScanRequest,
+        visitor: &mut dyn RowVisitor,
+    ) -> anyhow::Result<ScanProgress> {
+        let mut current = request.start.0;
+        let mut visited = 0;
+        while visited < request.max_rows {
+            let Some(row) = self.row(RowIndex(current))? else {
+                break;
+            };
+            visited += 1;
+            if visitor.visit(RowIndex(current), &row).is_break() {
+                return Ok(ScanProgress {
+                    visited,
+                    next: None,
+                    reached_end: false,
+                });
+            }
+            match request.direction {
+                ScanDirection::Forward => current += 1,
+                ScanDirection::Reverse if current > 0 => current -= 1,
+                ScanDirection::Reverse => {
+                    return Ok(ScanProgress {
+                        visited,
+                        next: None,
+                        reached_end: true,
+                    });
+                }
+            }
+        }
+        let reached_end = self.eof && current >= self.entries.len();
+        Ok(ScanProgress {
+            visited,
+            next: (!reached_end).then_some(RowIndex(current)),
+            reached_end,
+        })
+    }
+
+    fn materialize(&mut self) -> anyhow::Result<InMemoryTable> {
+        self.index_until(None, Some(u64::MAX))?;
+        InMemoryTable::from_rows(
+            self.generation,
+            (0..self.entries.len())
+                .map(|index| {
+                    self.typed_row(index)?
+                        .ok_or_else(|| anyhow::anyhow!("indexed keyed-object row is unavailable"))
+                })
+                .collect::<anyhow::Result<Vec<_>>>()?,
+        )
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -917,6 +1474,8 @@ fn open_lazy_ndjson(
         generation,
         definition,
         store: Box::new(store),
+        object_mode: None,
+        warnings: Vec::new(),
     }))
 }
 
@@ -1259,7 +1818,50 @@ impl TableStore for JsonTableStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ingest::{ObjectModeOrigin, ResolvedObjectMode};
     use crate::table::LogicalType;
+
+    fn object_options(mode: ObjectMode, scan_bytes: u64) -> OpenOptions {
+        OpenOptions {
+            format: InputFormat::Json,
+            object_mode: mode,
+            object_mode_origin: if mode == ObjectMode::Auto {
+                ObjectModeOrigin::Default
+            } else {
+                ObjectModeOrigin::Cli
+            },
+            schema_scan_bytes: scan_bytes,
+            ..OpenOptions::default()
+        }
+    }
+
+    fn open_object(
+        input: &str,
+        path: Option<&str>,
+        mode: ObjectMode,
+        scan_bytes: u64,
+    ) -> anyhow::Result<OpenedTable> {
+        let pointer = path.map(|path| path.parse::<JsonPointer>()).transpose()?;
+        let options = object_options(mode, scan_bytes);
+        let parsed = parse_json_rows_with_options(input.as_bytes(), pointer.as_ref(), &options)?;
+        open_json_rows_with_metadata(
+            parsed.rows,
+            "data".to_owned(),
+            &options,
+            parsed.object_mode,
+            parsed.warnings,
+        )?
+        .into_implicit_table()
+    }
+
+    fn canonical_keys(table: &OpenedTable) -> Vec<&str> {
+        table
+            .definition
+            .columns
+            .iter()
+            .filter_map(|column| column.source_identity.canonical_key())
+            .collect()
+    }
 
     fn open(input: &str, format: InputFormat, path: Option<&str>, scan_bytes: u64) -> OpenedTable {
         let pointer = path.map(|path| path.parse::<JsonPointer>().unwrap());
@@ -1681,5 +2283,527 @@ mod tests {
             .expect_err("source change");
         assert!(error.to_string().contains("reload is required"));
         assert_eq!(table.store.row_count(), prior_count);
+    }
+
+    #[test]
+    fn auto_detector_recognizes_representative_keyed_maps() {
+        for input in [
+            r#"{"repo-a":{"type":"fs","settings":{}},"repo-b":{"type":"s3","settings":{}},"repo-c":{"type":"gcs","settings":{}}}"#,
+            r#"{"pipe-a":{"processors":[]},"pipe-b":{"processors":[]},"pipe-c":{"processors":[]}}"#,
+            r#"{"index-a":{"settings":{}},"index-b":{"settings":{}},"index-c":{"settings":{}}}"#,
+            r#"{"index-a":{"aliases":{}},"index-b":{"aliases":{}},"index-c":{"aliases":{}}}"#,
+        ] {
+            let table = open_object(input, None, ObjectMode::Auto, u64::MAX).expect("keyed map");
+            assert_eq!(
+                table.object_mode.expect("resolution").resolved,
+                ResolvedObjectMode::Entries
+            );
+            assert_eq!(table.store.row_count(), RowCount::Exact(3));
+            assert_eq!(canonical_keys(&table)[0], "@key");
+        }
+    }
+
+    #[test]
+    fn representative_keyed_object_fixtures_auto_detect_as_entries() {
+        for name in [
+            "keyed-repositories.json",
+            "keyed-pipelines.json",
+            "keyed-index-settings.json",
+            "keyed-aliases.json",
+            "keyed-mappings.json",
+            "keyed-nodes.json",
+        ] {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("sample/json")
+                .join(name);
+            let options = OpenOptions {
+                format: InputFormat::Json,
+                ..OpenOptions::default()
+            };
+            let table = JsonAdapter::json()
+                .open(InputSource::Path(path), &options)
+                .unwrap_or_else(|error| panic!("open {name}: {error}"))
+                .into_implicit_table()
+                .expect("table");
+            assert_eq!(
+                table.object_mode.expect("resolution").resolved,
+                ResolvedObjectMode::Entries,
+                "fixture {name}"
+            );
+            assert_eq!(canonical_keys(&table)[0], "@key", "fixture {name}");
+        }
+    }
+
+    #[test]
+    fn auto_detector_keeps_records_for_scalar_small_and_heterogeneous_objects() {
+        for input in [
+            r#"{"name":"cluster","settings":{"a":1},"enabled":true}"#,
+            r#"{"persistent":{"enabled":true},"transient":{"enabled":false}}"#,
+            r#"{"one":{"a":1},"two":{"b":2},"three":{"c":3}}"#,
+        ] {
+            let table = open_object(input, None, ObjectMode::Auto, u64::MAX).expect("record");
+            assert_eq!(
+                table.object_mode.expect("resolution").resolved,
+                ResolvedObjectMode::Record
+            );
+            assert_eq!(table.store.row_count(), RowCount::Exact(1));
+        }
+    }
+
+    #[test]
+    fn explicit_null_counts_as_present_but_absence_does_not() {
+        assert!(values_are_keyed_object(&[
+            serde_json::json!({"shared": null}),
+            serde_json::json!({"shared": null}),
+            serde_json::json!({"shared": null}),
+            serde_json::json!({"other": 1}),
+        ]));
+        assert!(!values_are_keyed_object(&[
+            serde_json::json!({"shared": null}),
+            serde_json::json!({"shared": null}),
+            serde_json::json!({"other": 1}),
+            serde_json::json!({"another": 2}),
+        ]));
+    }
+
+    #[test]
+    fn detector_finishes_crossing_entry_and_caps_sample_at_64() {
+        let huge = "x".repeat(OBJECT_DETECTION_MAX_BYTES as usize);
+        let input = serde_json::json!({
+            "first": {"shared": huge},
+            "second": {"shared": 2},
+            "third": {"shared": 3}
+        })
+        .to_string();
+        let table = open_object(&input, None, ObjectMode::Auto, u64::MAX).expect("huge record");
+        assert_eq!(
+            table.object_mode.expect("resolution").resolved,
+            ResolvedObjectMode::Record
+        );
+
+        let mut entries = (0..OBJECT_DETECTION_MAX_ENTRIES)
+            .map(|index| format!(r#""k{index}":{{"shared":{index}}}"#))
+            .collect::<Vec<_>>();
+        entries.push(r#""late":0"#.to_owned());
+        let input = format!("{{{}}}", entries.join(","));
+        let table = open_object(&input, None, ObjectMode::Auto, u64::MAX).expect("entry cap");
+        assert_eq!(
+            table.object_mode.expect("resolution").resolved,
+            ResolvedObjectMode::Entries
+        );
+        assert!(canonical_keys(&table).contains(&"/value"));
+    }
+
+    #[test]
+    fn forced_modes_pointer_order_and_non_object_validation_are_consistent() {
+        let input = r#"{"outer":{"a":{"v":1},"b":{"v":2},"c":{"v":3}}}"#;
+        let entries =
+            open_object(input, Some("/outer"), ObjectMode::Entries, u64::MAX).expect("entries");
+        assert_eq!(entries.store.row_count(), RowCount::Exact(3));
+        assert_eq!(canonical_keys(&entries), ["@key", "/v"]);
+
+        let record =
+            open_object(input, Some("/outer"), ObjectMode::Record, u64::MAX).expect("record");
+        assert_eq!(record.store.row_count(), RowCount::Exact(1));
+        assert!(canonical_keys(&record).contains(&"/a/v"));
+
+        let options = object_options(ObjectMode::Entries, u64::MAX);
+        assert!(parse_json_rows_with_options(br#"[{"a":1}]"#, None, &options).is_err());
+
+        let mut saved_options = options;
+        saved_options.object_mode_origin = ObjectModeOrigin::SavedView;
+        let array = parse_json_rows_with_options(br#"[{"a":1}]"#, None, &saved_options)
+            .expect("saved array falls back");
+        assert_eq!(array.object_mode, None);
+        assert!(array.warnings[0].contains("selected array"));
+
+        let scalar = br#"{"value":1}"#;
+        let pointer: JsonPointer = "/value".parse().unwrap();
+        let cli_error = parse_json_rows_with_options(
+            scalar,
+            Some(&pointer),
+            &object_options(ObjectMode::Entries, u64::MAX),
+        )
+        .err()
+        .expect("CLI scalar mode");
+        assert!(cli_error
+            .to_string()
+            .contains("object mode 'entries' requires an input with a selected object/map"));
+
+        let mut saved_scalar = object_options(ObjectMode::Record, u64::MAX);
+        saved_scalar.object_mode_origin = ObjectModeOrigin::SavedView;
+        let saved_error = parse_json_rows_with_options(scalar, Some(&pointer), &saved_scalar)
+            .err()
+            .expect("saved scalar mode");
+        let message = saved_error.to_string();
+        assert!(message.contains("saved object_mode 'record'"));
+        assert!(message.contains("was ignored"));
+        assert!(message.contains("does not identify a tabular object or array"));
+    }
+
+    #[test]
+    fn explicit_saved_mode_is_stable_when_auto_would_choose_another_shape() {
+        let input = r#"{"first":{"value":1},"second":{"value":2}}"#;
+        let automatic = open_object(input, None, ObjectMode::Auto, u64::MAX).expect("auto");
+        assert_eq!(
+            automatic.object_mode.unwrap().resolved,
+            ResolvedObjectMode::Record
+        );
+
+        let pointer = None;
+        let options = OpenOptions {
+            format: InputFormat::Json,
+            object_mode: ObjectMode::Entries,
+            object_mode_origin: ObjectModeOrigin::SavedView,
+            ..OpenOptions::default()
+        };
+        for _ in 0..2 {
+            let parsed = parse_json_rows_with_options(input.as_bytes(), pointer, &options)
+                .expect("saved entries");
+            assert_eq!(
+                parsed.object_mode.unwrap().resolved,
+                ResolvedObjectMode::Entries
+            );
+            assert_eq!(parsed.rows.len(), 2);
+        }
+    }
+
+    #[test]
+    fn keyed_projection_preserves_order_types_paths_and_optional_fields() {
+        let mut table = open_object(
+            r#"{"a/b":{"id":1,"nested":{"flag":true},"tags":["x"]},"two":{"id":2,"nested":{"flag":false}},"three":{"nested":{"flag":null}}}"#,
+            None,
+            ObjectMode::Entries,
+            u64::MAX,
+        )
+        .expect("entries");
+        assert_eq!(
+            canonical_keys(&table),
+            ["@key", "/id", "/nested/flag", "/tags"]
+        );
+        let first = table.store.row(RowIndex(0)).unwrap().unwrap();
+        assert_eq!(first.cells[0], CellValue::Text("a/b".to_owned()));
+        assert_eq!(first.cells[1], CellValue::Integer(1));
+        assert_eq!(first.cells[2], CellValue::Boolean(true));
+        assert_eq!(first.cells[3], CellValue::Json("[\"x\"]".to_owned()));
+        let third = table.store.row(RowIndex(2)).unwrap().unwrap();
+        assert_eq!(third.cells[1], CellValue::Null);
+        assert_eq!(third.cells[2], CellValue::Null);
+    }
+
+    #[test]
+    fn forced_scalar_null_and_array_entries_use_typed_value_column() {
+        let mut table = open_object(
+            r#"{"number":1,"none":null,"items":[1,2]}"#,
+            None,
+            ObjectMode::Entries,
+            u64::MAX,
+        )
+        .expect("scalar entries");
+        assert_eq!(canonical_keys(&table), ["@key", "/value"]);
+        assert_eq!(
+            table.store.row(RowIndex(0)).unwrap().unwrap().cells[1],
+            CellValue::Integer(1)
+        );
+        assert_eq!(
+            table.store.row(RowIndex(1)).unwrap().unwrap().cells[1],
+            CellValue::Null
+        );
+        assert_eq!(
+            table.store.row(RowIndex(2)).unwrap().unwrap().cells[1],
+            CellValue::Json("[1,2]".to_owned())
+        );
+    }
+
+    #[test]
+    fn key_label_handles_initial_and_late_name_collisions_without_renaming() {
+        let initial = open_object(
+            r#"{"a":{"name":"A"},"b":{"name":"B"}}"#,
+            None,
+            ObjectMode::Entries,
+            u64::MAX,
+        )
+        .expect("initial name");
+        assert_eq!(initial.definition.columns[0].display_name, "_key");
+        assert_eq!(initial.definition.columns[1].display_name, "name");
+
+        let mut late = open_object(
+            r#"{"a":{"id":1},"b":{"name":"B"}}"#,
+            None,
+            ObjectMode::Entries,
+            1,
+        )
+        .expect("late name");
+        assert_eq!(late.definition.columns[0].display_name, "name");
+        let delta = late
+            .store
+            .ensure_indexed_through(RowIndex(1))
+            .unwrap()
+            .schema_delta;
+        late.definition.apply_delta(delta).unwrap();
+        assert_eq!(late.definition.columns[0].display_name, "name");
+        assert_ne!(late.definition.columns[2].display_name, "name");
+    }
+
+    #[test]
+    fn materialized_objects_reject_duplicate_keys_before_interpretation() {
+        for mode in [ObjectMode::Auto, ObjectMode::Record, ObjectMode::Entries] {
+            let error =
+                match open_object(r#"{"same":{"v":1},"same":{"v":2}}"#, None, mode, u64::MAX) {
+                    Ok(_) => panic!("duplicate key accepted in {mode}"),
+                    Err(error) => error,
+                };
+            assert!(error
+                .to_string()
+                .contains("duplicate object member key 'same'"));
+        }
+    }
+
+    fn large_keyed_json(count: usize, duplicate_first_at_end: bool) -> String {
+        let mut entries = (0..count)
+            .map(|index| {
+                if index == 70 {
+                    format!(r#""k{index}":{{"shared":{index},"late":true}}"#)
+                } else {
+                    format!(r#""k{index}":{{"shared":{index}}}"#)
+                }
+            })
+            .collect::<Vec<_>>();
+        if duplicate_first_at_end {
+            entries.push(r#""k0":{"shared":999}"#.to_owned());
+        }
+        format!("{{{}}}", entries.join(","))
+    }
+
+    #[test]
+    fn large_keyed_object_is_bounded_navigable_and_materializable() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("repositories.json");
+        std::fs::write(&path, large_keyed_json(80, false)).expect("write");
+        let options = OpenOptions {
+            format: InputFormat::Json,
+            lazy_threshold_bytes: 1,
+            schema_scan_bytes: 1,
+            ..OpenOptions::default()
+        };
+        let mut table = JsonAdapter::json()
+            .open(InputSource::Path(path), &options)
+            .expect("open")
+            .into_implicit_table()
+            .expect("table");
+        assert_eq!(
+            table.object_mode.expect("resolution").resolved,
+            ResolvedObjectMode::Entries
+        );
+        assert!(matches!(table.store.row_count(), RowCount::AtLeast(64)));
+        assert_eq!(table.definition.schema_state, SchemaState::Provisional);
+        let progress = table
+            .store
+            .ensure_indexed_through(RowIndex(70))
+            .expect("navigate");
+        table.definition.apply_delta(progress.schema_delta).unwrap();
+        assert_eq!(
+            table.store.row(RowIndex(70)).unwrap().unwrap().cells[0],
+            CellValue::Text("k70".to_owned())
+        );
+        assert!(canonical_keys(&table).contains(&"/late"));
+        let materialized = table.store.materialize().expect("materialize");
+        assert_eq!(TableStore::row_count(&materialized), RowCount::Exact(80));
+        assert_eq!(table.store.row_count(), RowCount::Exact(80));
+    }
+
+    #[test]
+    fn full_schema_scan_for_keyed_object_reaches_end_and_widens_types() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("full.json");
+        std::fs::write(
+            &path,
+            r#"{"a":{"shared":1},"b":{"shared":2.5},"c":{"shared":3,"late":true}}"#,
+        )
+        .expect("write");
+        let options = OpenOptions {
+            format: InputFormat::Json,
+            object_mode: ObjectMode::Entries,
+            object_mode_origin: ObjectModeOrigin::Cli,
+            schema_scan: SchemaScan::Full,
+            lazy_threshold_bytes: 1,
+            schema_scan_bytes: 1,
+            ..OpenOptions::default()
+        };
+        let mut table = JsonAdapter::json()
+            .open(InputSource::Path(path), &options)
+            .expect("open")
+            .into_implicit_table()
+            .expect("table");
+
+        assert_eq!(table.definition.schema_state, SchemaState::Complete);
+        assert_eq!(table.store.row_count(), RowCount::Exact(3));
+        let shared = table
+            .definition
+            .columns
+            .iter()
+            .position(|column| column.source_identity.canonical_key() == Some("/shared"))
+            .expect("shared");
+        assert_eq!(
+            table.definition.columns[shared].source_type,
+            LogicalType::Float
+        );
+        assert!(canonical_keys(&table).contains(&"/late"));
+        assert_eq!(
+            table.store.row(RowIndex(0)).unwrap().unwrap().cells[2],
+            CellValue::Null
+        );
+    }
+
+    #[test]
+    fn lazy_auto_and_record_reject_the_same_duplicate_record_as_materialized() {
+        for mode in [ObjectMode::Auto, ObjectMode::Record] {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("duplicate-record.json");
+            std::fs::write(&path, r#"{"same":{"value":1},"same":{"value":2}}"#).expect("write");
+            let options = OpenOptions {
+                format: InputFormat::Json,
+                object_mode: mode,
+                object_mode_origin: if mode == ObjectMode::Auto {
+                    ObjectModeOrigin::Default
+                } else {
+                    ObjectModeOrigin::Cli
+                },
+                lazy_threshold_bytes: 1,
+                schema_scan_bytes: 1,
+                ..OpenOptions::default()
+            };
+            let error = JsonAdapter::json()
+                .open(InputSource::Path(path), &options)
+                .err()
+                .expect("duplicate rejected");
+            assert!(error
+                .to_string()
+                .contains("duplicate object member key 'same'"));
+        }
+    }
+
+    #[test]
+    fn lazy_scalar_reports_cli_incompatibility_and_ignored_saved_mode() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("scalar.json");
+        std::fs::write(&path, "1").expect("write");
+
+        let cli_options = OpenOptions {
+            format: InputFormat::Json,
+            object_mode: ObjectMode::Entries,
+            object_mode_origin: ObjectModeOrigin::Cli,
+            lazy_threshold_bytes: 1,
+            ..OpenOptions::default()
+        };
+        let cli_error = JsonAdapter::json()
+            .open(InputSource::Path(path.clone()), &cli_options)
+            .err()
+            .expect("CLI scalar rejected");
+        assert!(cli_error
+            .to_string()
+            .contains("object mode 'entries' requires an input with a selected object/map"));
+
+        let saved_options = OpenOptions {
+            object_mode: ObjectMode::Record,
+            object_mode_origin: ObjectModeOrigin::SavedView,
+            ..cli_options
+        };
+        let saved_error = JsonAdapter::json()
+            .open(InputSource::Path(path), &saved_options)
+            .err()
+            .expect("saved scalar rejected");
+        let message = saved_error.to_string();
+        assert!(message.contains("saved object_mode 'record'"));
+        assert!(message.contains("was ignored"));
+        assert!(message.contains("does not identify a tabular object or array"));
+    }
+
+    #[test]
+    fn lazy_keyed_offsets_handle_whitespace_escaped_keys_and_nested_values() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("nested.json");
+        std::fs::write(
+            &path,
+            "{ \n \"a\\/b\" : {\"shared\":1,\"nested\":[1,{\"x\":2}]},\n\"quote\\\"key\":{\"shared\":2},\"third\":{\"shared\":3} }",
+        )
+        .expect("write");
+        let options = OpenOptions {
+            format: InputFormat::Json,
+            object_mode: ObjectMode::Entries,
+            object_mode_origin: ObjectModeOrigin::Cli,
+            lazy_threshold_bytes: 1,
+            schema_scan_bytes: 1,
+            ..OpenOptions::default()
+        };
+        let mut table = JsonAdapter::json()
+            .open(InputSource::Path(path), &options)
+            .expect("open")
+            .into_implicit_table()
+            .unwrap();
+        assert_eq!(
+            table.store.row(RowIndex(0)).unwrap().unwrap().cells[0],
+            CellValue::Text("a/b".to_owned())
+        );
+        assert_eq!(
+            table.store.row(RowIndex(1)).unwrap().unwrap().cells[0],
+            CellValue::Text("quote\"key".to_owned())
+        );
+        table
+            .store
+            .ensure_indexed_through(RowIndex(usize::MAX))
+            .unwrap();
+        assert_eq!(table.store.row_count(), RowCount::Exact(3));
+    }
+
+    #[test]
+    fn lazy_keyed_object_rejects_late_duplicates_without_advancing_state() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("duplicate.json");
+        std::fs::write(&path, large_keyed_json(65, true)).expect("write");
+        let options = OpenOptions {
+            format: InputFormat::Json,
+            lazy_threshold_bytes: 1,
+            schema_scan_bytes: 1,
+            ..OpenOptions::default()
+        };
+        let mut table = JsonAdapter::json()
+            .open(InputSource::Path(path), &options)
+            .expect("open")
+            .into_implicit_table()
+            .unwrap();
+        let prior = table.store.row_count();
+        let error = table
+            .store
+            .ensure_indexed_through(RowIndex(usize::MAX))
+            .expect_err("duplicate");
+        assert!(error
+            .to_string()
+            .contains("duplicate object member key 'k0'"));
+        assert_ne!(table.store.row_count(), RowCount::Exact(66));
+        assert!(matches!(prior, RowCount::AtLeast(_)));
+    }
+
+    #[test]
+    fn lazy_keyed_object_detects_mid_generation_replacement() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("replace.json");
+        std::fs::write(&path, large_keyed_json(80, false)).expect("write");
+        let options = OpenOptions {
+            format: InputFormat::Json,
+            lazy_threshold_bytes: 1,
+            schema_scan_bytes: 1,
+            ..OpenOptions::default()
+        };
+        let mut table = JsonAdapter::json()
+            .open(InputSource::Path(path.clone()), &options)
+            .expect("open")
+            .into_implicit_table()
+            .unwrap();
+        let prior = table.store.row_count();
+        std::fs::write(&path, r#"{"replacement":{"shared":1}}"#).expect("replace");
+        let error = table.store.row(RowIndex(70)).expect_err("source change");
+        assert!(error.to_string().contains("reload is required"));
+        assert_eq!(table.store.row_count(), prior);
     }
 }
