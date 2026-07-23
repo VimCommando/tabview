@@ -232,11 +232,14 @@ mod tests {
 
     #[test]
     fn array_pointer_drains_elements_after_the_selected_index() {
-        let rows = select_json_rows(
+        let selected = select_json_table(
             br#"[[{"a":1}],[{"a":2}],[{"a":3}]]"#,
             Some(&"/0".parse().unwrap()),
         )
         .expect("rows");
+        let SelectedJsonValue::ArrayRows(rows) = selected else {
+            panic!("array rows");
+        };
 
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].get(), "{\"a\":1}");
