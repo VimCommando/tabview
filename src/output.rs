@@ -55,7 +55,7 @@ pub struct OutputRequirements {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PreparedColumn {
     pub alignment: ColumnAlignment,
-    pub width_cap: Option<usize>,
+    pub width_override: Option<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -207,10 +207,10 @@ fn prepare<'a>(
         })
         .collect::<Vec<_>>();
     let columns = (0..view.column_count())
-        .zip(view.output_column_width_caps())
-        .map(|(column, width_cap)| PreparedColumn {
+        .zip(view.output_column_width_overrides())
+        .map(|(column, width_override)| PreparedColumn {
             alignment: view.column_alignment(column),
-            width_cap,
+            width_override,
         })
         .collect();
     Ok(PreparedOutput {
@@ -281,8 +281,8 @@ fn resolved_widths(header: &[PreparedCell], prepared: &PreparedOutput<'_>) -> Ve
         }
     }
     for (width, column) in widths.iter_mut().zip(&prepared.columns) {
-        if let Some(cap) = column.width_cap {
-            *width = (*width).min(cap.max(1));
+        if let Some(override_width) = column.width_override {
+            *width = override_width.max(1);
         }
     }
     widths
@@ -605,6 +605,16 @@ mod tests {
         assert!(colored.contains("\x1b["));
         assert!(colored.contains("\x1b[0m  "));
         assert!(colored.ends_with("\x1b[0m\n"));
+    }
+
+    #[test]
+    fn explicit_width_pads_narrow_cells_to_match_the_live_view() {
+        let mut view = TableView::classify(rows(&[&["A", "B"], &["x", "y"]]), Viewport::new(10, 4));
+        view.set_all_column_widths(5);
+        assert_eq!(
+            render(&mut view, ColorOutput::Never),
+            "A      B\nx      y\n"
+        );
     }
 
     #[cfg(feature = "saved-views")]

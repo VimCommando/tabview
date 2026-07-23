@@ -2005,9 +2005,9 @@ impl TableView {
             .collect()
     }
 
-    /// Explicit per-column caps for document output. Automatic widths are
-    /// intentionally uncapped and are measured by the selected adapter.
-    pub fn output_column_width_caps(&self) -> Vec<Option<usize>> {
+    /// Explicit per-column widths for document output. Automatic widths are
+    /// intentionally unspecified and are measured by the selected adapter.
+    pub fn output_column_width_overrides(&self) -> Vec<Option<usize>> {
         match self.column_width_mode {
             ColumnWidthMode::Fixed(width) => {
                 vec![Some(width as usize); self.column_count()]
