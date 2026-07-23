@@ -1,0 +1,23 @@
+{
+  "took": 3,
+  "timed_out": false,
+  "_shards": {"total": 1, "successful": 1, "skipped": 0, "failed": 0},
+  "hits": {
+    "total": {"value": 2, "relation": "eq"},
+    "max_score": 1.0,
+    "hits": [
+      {
+        "_index": "users",
+        "_id": "1",
+        "_score": 1.0,
+        "_source": {"user": {"id": 1, "email": "a@example.test"}}
+      },
+      {
+        "_index": "users",
+        "_id": "2",
+        "_score": 0.8,
+        "_source": {"user": {"id": 2, "email": "b@example.test"}}
+      }
+    ]
+  }
+}

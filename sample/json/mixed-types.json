@@ -1,0 +1,7 @@
+[
+  {"value": null, "text": ""},
+  {"value": 1, "text": "1"},
+  {"value": 2.5, "text": "two"},
+  {"value": true, "text": "true"},
+  {"value": {"nested": "object"}, "text": "object"}
+]

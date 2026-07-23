@@ -333,7 +333,7 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
         KeyBinding {
             keys: ",/.",
             command: Command::CurrentColumnNarrower,
-            description: "Resize current column",
+            description: "Resize current column by 20%",
         },
         KeyBinding {
             keys: "-/+",

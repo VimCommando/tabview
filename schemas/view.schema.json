@@ -25,6 +25,23 @@
         "minLength": 1
       }
     },
+    "format": {
+      "type": "string",
+      "enum": ["auto", "delimited", "json", "ndjson"],
+      "description": "Source format selected before the table is opened."
+    },
+    "json_path": {
+      "type": "string",
+      "pattern": "^(?:/(?:[^~]|~[01])*)*$",
+      "description": "RFC 6901 JSON Pointer selecting the table node."
+    },
+    "schema_scan": {
+      "type": "string",
+      "enum": ["default", "full"]
+    },
+    "nulls": {
+      "$ref": "#/$defs/nullPlacement"
+    },
     "columns": {
       "type": "object",
       "default": {},
@@ -55,6 +72,13 @@
       "type": "object",
       "additionalProperties": false,
       "properties": {
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "nulls": {
+          "$ref": "#/$defs/nullPlacement"
+        },
         "type": {
           "$ref": "#/$defs/columnType"
         },
@@ -268,6 +292,10 @@
         "bit",
         "word"
       ]
+    },
+    "nullPlacement": {
+      "type": "string",
+      "enum": ["first", "last"]
     },
     "format": {
       "type": "string",

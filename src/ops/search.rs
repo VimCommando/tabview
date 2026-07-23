@@ -119,9 +119,7 @@ pub fn find_match(
         return None;
     }
     let query = CaseInsensitiveQuery::new(query)?;
-    let Some(mut position) = start_or_virtual_wrap_position(rows, start, direction) else {
-        return None;
-    };
+    let mut position = start_or_virtual_wrap_position(rows, start, direction)?;
 
     for _ in 0..cell_count(rows) {
         position = next_position(rows, position, direction)?;
