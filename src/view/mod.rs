@@ -607,6 +607,31 @@ impl TableView {
                 return Err(error);
             }
         };
+        if appended.is_empty() && row < previous_len {
+            let available = match progress.row_count {
+                RowCount::Exact(count) | RowCount::AtLeast(count) => count,
+                RowCount::Unknown => 0,
+            };
+            let max_rows = available.saturating_sub(previous_len).min(256);
+            if max_rows > 0 {
+                let mut collect_row = |_: RowIndex, source_row: &crate::table::Row| {
+                    appended.push(source_row.clone());
+                    std::ops::ControlFlow::Continue(())
+                };
+                if let Err(error) = store.scan_rows(
+                    crate::table::ScanRequest {
+                        start: RowIndex(previous_len),
+                        direction: crate::table::ScanDirection::Forward,
+                        max_rows,
+                    },
+                    &mut collect_row,
+                ) {
+                    drop(store);
+                    self.source_status = Some(format!("Indexing failed: {error}"));
+                    return Err(error);
+                }
+            }
+        }
         drop(store);
         self.apply_source_schema_delta(progress.schema_delta)?;
         if self.query_is_active() && !loading_query_result {
@@ -816,7 +841,9 @@ impl TableView {
         if delta.is_empty() {
             return Ok(());
         }
+        #[cfg(feature = "saved-views")]
         let completed = delta.completed;
+        #[cfg(feature = "saved-views")]
         let old_count = self.source_column_count();
         let Some(definition) = self.table_definition.as_mut() else {
             return Ok(());
@@ -901,6 +928,18 @@ impl TableView {
 
     pub fn rendered_header(&self) -> Option<Vec<String>> {
         self.rendered_source_header().map(|header| {
+            header
+                .iter()
+                .enumerate()
+                .filter(|(source_column, _)| self.source_column_visible(*source_column))
+                .map(|(_, cell)| cell.clone())
+                .collect()
+        })
+    }
+
+    /// Header labels for document output, excluding TUI sort/filter glyphs.
+    pub fn output_header(&self) -> Option<Vec<String>> {
+        self.header.as_ref().map(|header| {
             header
                 .iter()
                 .enumerate()
@@ -1043,7 +1082,7 @@ impl TableView {
         self.search_matches_cell(raw, &rendered, Some(&query))
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "saved-views"))]
     fn visible_cell_matches_search_query(
         &self,
         row: usize,
@@ -1063,7 +1102,7 @@ impl TableView {
             .search_match
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, feature = "saved-views"))]
     fn visible_cell_style_context(
         &self,
         row: usize,
@@ -1120,12 +1159,7 @@ impl TableView {
         }
     }
 
-    #[cfg(test)]
-    fn conditional_color_for_visible_cell(
-        &self,
-        row: usize,
-        visible_column: usize,
-    ) -> Option<String> {
+    pub fn output_conditional_color(&self, row: usize, visible_column: usize) -> Option<String> {
         let source_column = self.source_column_for_visible(visible_column)?;
         let source_row = self.source_row_for_visible_row(row)?;
         let raw = self
@@ -1136,6 +1170,15 @@ impl TableView {
         let rendered = self.render_source_cell(source_column, Some(raw));
         self.conditional_color_for_source_cell(source_column, raw, &rendered)
             .map(Cow::into_owned)
+    }
+
+    #[cfg(all(test, feature = "saved-views"))]
+    fn conditional_color_for_visible_cell(
+        &self,
+        row: usize,
+        visible_column: usize,
+    ) -> Option<String> {
+        self.output_conditional_color(row, visible_column)
     }
 
     fn conditional_color_for_source_cell<'a>(
@@ -1960,6 +2003,78 @@ impl TableView {
         self.visible_source_columns_iter()
             .map(|source_column| source_widths.get(source_column).copied().unwrap_or(1))
             .collect()
+    }
+
+    /// Explicit per-column widths for document output. Automatic widths are
+    /// intentionally unspecified and are measured by the selected adapter.
+    pub fn output_column_width_overrides(&self) -> Vec<Option<usize>> {
+        match self.column_width_mode {
+            ColumnWidthMode::Fixed(width) => {
+                vec![Some(width as usize); self.column_count()]
+            }
+            ColumnWidthMode::Mode | ColumnWidthMode::Max => self
+                .visible_source_columns_iter()
+                .map(|source_column| {
+                    self.column_width_modified
+                        .contains(&source_column)
+                        .then(|| self.column_widths.get(source_column).copied())
+                        .flatten()
+                })
+                .collect(),
+        }
+    }
+
+    /// Finish indexing/query execution and load the complete logical result
+    /// without consulting the viewport. This is the preparation boundary used
+    /// by output adapters and by post-interactive serialization.
+    pub fn complete_for_output(&mut self) -> anyhow::Result<()> {
+        if let Some(shared) = self.incremental_store.clone() {
+            let progress = shared
+                .0
+                .borrow_mut()
+                .ensure_indexed_through(RowIndex(usize::MAX))?;
+            self.apply_source_schema_delta(progress.schema_delta)?;
+        }
+
+        if self.query_is_active() {
+            match self.refresh_query_result() {
+                QueryRefresh::Applied | QueryRefresh::NotStoreBacked => {}
+                QueryRefresh::Failed => {
+                    anyhow::bail!(
+                        "{}",
+                        self.source_status
+                            .clone()
+                            .unwrap_or_else(|| "query preparation failed".to_owned())
+                    );
+                }
+            }
+        }
+
+        let selected_store = if self.query_is_active() {
+            self.query_store.clone()
+        } else {
+            self.incremental_store.clone()
+        };
+        if let Some(shared) = selected_store {
+            let materialized = shared.0.borrow_mut().materialize()?;
+            self.rows = materialized
+                .rows()
+                .iter()
+                .map(crate::table::Row::display_cells)
+                .collect();
+            self.row_ids = materialized.rows().iter().map(|row| row.id).collect();
+            self.visible_rows = (0..self.rows.len()).collect();
+            if !self.query_is_active() {
+                self.source_store = Some(materialized);
+            }
+        }
+
+        self.columns = Columns::infer(self.header.as_deref(), &self.rows);
+        self.sampled_column_widths.clear();
+        self.computed_column_widths_cache.clear();
+        self.rebuild_column_color_metadata();
+        self.keep_cursor_visible();
+        Ok(())
     }
 
     pub fn column_alignment_override(&self, column: usize) -> Option<ColumnAlignment> {
@@ -2822,6 +2937,7 @@ impl TableView {
         yaml
     }
 
+    #[cfg(feature = "saved-views")]
     fn source_column_name(&self, source_column: usize) -> String {
         if let Some(key) = self
             .table_definition

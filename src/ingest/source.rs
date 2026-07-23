@@ -1,10 +1,12 @@
 use std::io::{self, Read};
 use std::path::PathBuf;
+use std::sync::{Arc, Condvar, Mutex};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum InputSource {
     Path(PathBuf),
     Stdin,
+    StreamingStdin(StreamingInput),
 }
 
 impl InputSource {
@@ -22,58 +24,231 @@ impl InputSource {
                 .and_then(|name| name.to_str())
                 .unwrap_or_else(|| path.to_str().unwrap_or("input"))
                 .to_owned(),
-            Self::Stdin => "stdin".to_owned(),
+            Self::Stdin | Self::StreamingStdin(_) => "stdin".to_owned(),
         }
     }
 
     pub fn is_seekable(&self) -> bool {
         matches!(self, Self::Path(_))
     }
-}
 
-pub fn read_stdin_then_restore_tty() -> io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    let read_result = io::stdin().read_to_end(&mut bytes).map(|_| bytes);
-    restore_after_read(read_result, restore_stdin_from_tty())
-}
-
-fn restore_after_read(
-    read_result: io::Result<Vec<u8>>,
-    restore_result: io::Result<()>,
-) -> io::Result<Vec<u8>> {
-    match (read_result, restore_result) {
-        (Ok(bytes), Ok(())) => Ok(bytes),
-        (Ok(_), Err(error)) => Err(error),
-        (Err(error), _) => Err(error),
+    pub fn is_stdin(&self) -> bool {
+        matches!(self, Self::Stdin | Self::StreamingStdin(_))
     }
+
+    pub fn is_streaming(&self) -> bool {
+        matches!(self, Self::StreamingStdin(_))
+    }
+}
+
+pub fn read_stdin() -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    io::stdin().read_to_end(&mut bytes)?;
+    Ok(bytes)
 }
 
 pub fn read_source(source: &InputSource) -> io::Result<Vec<u8>> {
     match source {
         InputSource::Path(path) => std::fs::read(path),
-        InputSource::Stdin => read_stdin_then_restore_tty(),
+        InputSource::Stdin => read_stdin(),
+        InputSource::StreamingStdin(input) => input.snapshot(true).map(|snapshot| snapshot.bytes),
     }
 }
 
-#[cfg(unix)]
-fn restore_stdin_from_tty() -> io::Result<()> {
-    use std::fs::File;
-    use std::os::fd::AsRawFd;
+#[derive(Debug, Clone)]
+pub struct StreamSnapshot {
+    pub bytes: Vec<u8>,
+    pub complete: bool,
+}
 
-    let tty = File::open("/dev/tty")?;
-    // SAFETY: dup2 is called with a valid file descriptor opened from /dev/tty
-    // and the standard stdin descriptor. On success fd 0 refers to the tty.
-    let result = unsafe { libc::dup2(tty.as_raw_fd(), libc::STDIN_FILENO) };
-    if result == -1 {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(())
+#[derive(Debug, Default)]
+struct StreamingState {
+    bytes: Vec<u8>,
+    complete: bool,
+    error: Option<(io::ErrorKind, String)>,
+}
+
+#[derive(Debug, Default)]
+struct StreamingInner {
+    state: Mutex<StreamingState>,
+    changed: Condvar,
+}
+
+#[derive(Debug, Clone)]
+pub struct StreamingInput {
+    inner: Arc<StreamingInner>,
+}
+
+impl PartialEq for StreamingInput {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.inner, &other.inner)
     }
 }
 
-#[cfg(not(unix))]
-fn restore_stdin_from_tty() -> io::Result<()> {
-    Ok(())
+impl Eq for StreamingInput {}
+
+impl StreamingInput {
+    pub fn snapshot(&self, wait_for_completion: bool) -> io::Result<StreamSnapshot> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !state.complete && (wait_for_completion || state.bytes.is_empty()) {
+            state = self
+                .inner
+                .changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        if let Some((kind, message)) = &state.error {
+            return Err(io::Error::new(*kind, message.clone()));
+        }
+        Ok(StreamSnapshot {
+            bytes: state.bytes.clone(),
+            complete: state.complete,
+        })
+    }
+
+    pub fn wait_for_delimited_sample(&self) -> io::Result<()> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !state.complete
+            && state.bytes.len() < 64 * 1024
+            && state.bytes.iter().filter(|byte| **byte == b'\n').count() < 2
+        {
+            state = self
+                .inner
+                .changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        if let Some((kind, message)) = &state.error {
+            Err(io::Error::new(*kind, message.clone()))
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn wait_for_probe_sample(&self) -> io::Result<()> {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        while !state.complete && state.bytes.len() < 64 * 1024 && !probe_sample_ready(&state.bytes)
+        {
+            state = self
+                .inner
+                .changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        if let Some((kind, message)) = &state.error {
+            Err(io::Error::new(*kind, message.clone()))
+        } else {
+            Ok(())
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn pending_for_test() -> Self {
+        Self {
+            inner: Arc::new(StreamingInner::default()),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn append_for_test(&self, bytes: &[u8]) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.bytes.extend_from_slice(bytes);
+        self.inner.changed.notify_all();
+    }
+
+    #[cfg(test)]
+    pub(crate) fn finish_for_test(&self) {
+        let mut state = self
+            .inner
+            .state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        state.complete = true;
+        self.inner.changed.notify_all();
+    }
+}
+
+fn probe_sample_ready(bytes: &[u8]) -> bool {
+    let bytes = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]).unwrap_or(bytes);
+    let first = bytes
+        .iter()
+        .copied()
+        .find(|byte| !byte.is_ascii_whitespace());
+    let last_index = bytes.iter().rposition(|byte| !byte.is_ascii_whitespace());
+    let last = last_index.map(|index| bytes[index]);
+    let trailing_has_newline = last_index
+        .map(|index| bytes[index + 1..].contains(&b'\n'))
+        .unwrap_or(false);
+    first == Some(b'[')
+        || bytes.iter().filter(|byte| **byte == b'\n').count() >= 2
+        || (first == Some(b'{') && last == Some(b'}') && !trailing_has_newline)
+}
+
+pub fn stream_stdin_for_interactive() -> InputSource {
+    stream_reader_for_interactive(Box::new(io::stdin()))
+}
+
+pub fn stream_reader_for_interactive(mut reader: Box<dyn Read + Send>) -> InputSource {
+    let input = StreamingInput {
+        inner: Arc::new(StreamingInner::default()),
+    };
+    let worker_input = input.clone();
+    std::thread::spawn(move || {
+        let mut chunk = vec![0_u8; 64 * 1024];
+        loop {
+            match reader.read(&mut chunk) {
+                Ok(0) => {
+                    let mut state = worker_input
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state.complete = true;
+                    worker_input.inner.changed.notify_all();
+                    break;
+                }
+                Ok(count) => {
+                    let mut state = worker_input
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state.bytes.extend_from_slice(&chunk[..count]);
+                    worker_input.inner.changed.notify_all();
+                }
+                Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+                Err(error) => {
+                    let mut state = worker_input
+                        .inner
+                        .state
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    state.error = Some((error.kind(), error.to_string()));
+                    state.complete = true;
+                    worker_input.inner.changed.notify_all();
+                    break;
+                }
+            }
+        }
+    });
+
+    InputSource::StreamingStdin(input)
 }
 
 fn parse_path(value: &str) -> PathBuf {
@@ -108,19 +283,38 @@ mod tests {
     }
 
     #[test]
-    fn restore_after_read_preserves_read_error_precedence() {
-        let error = restore_after_read(
-            Err(io::Error::new(io::ErrorKind::BrokenPipe, "read failed")),
-            Ok(()),
-        )
-        .expect_err("read error");
-        assert_eq!(error.kind(), io::ErrorKind::BrokenPipe);
+    fn streaming_sources_compare_by_identity() {
+        let input = StreamingInput {
+            inner: Arc::new(StreamingInner::default()),
+        };
+        assert_eq!(input, input.clone());
+        assert_ne!(
+            input,
+            StreamingInput {
+                inner: Arc::new(StreamingInner::default())
+            }
+        );
+    }
 
-        let error = restore_after_read(
-            Ok(Vec::new()),
-            Err(io::Error::new(io::ErrorKind::NotFound, "restore failed")),
-        )
-        .expect_err("restore error");
-        assert_eq!(error.kind(), io::ErrorKind::NotFound);
+    #[test]
+    fn automatic_probe_can_start_json_arrays_before_eof() {
+        assert!(probe_sample_ready(br#"[{"a":1},"#));
+    }
+
+    #[test]
+    fn automatic_probe_accepts_a_complete_single_json_value_without_a_newline() {
+        assert!(probe_sample_ready(br#"{"a":1}"#));
+        assert!(probe_sample_ready(b"\xEF\xBB\xBF  {\"a\":1} \t"));
+    }
+
+    #[test]
+    fn automatic_probe_waits_for_an_incomplete_json_object() {
+        assert!(!probe_sample_ready(br#"{"a":1"#));
+    }
+
+    #[test]
+    fn automatic_probe_waits_long_enough_to_distinguish_ndjson() {
+        assert!(!probe_sample_ready(b"{\"a\":1}\n"));
+        assert!(probe_sample_ready(b"{\"a\":1}\n{\"a\":2}\n"));
     }
 }

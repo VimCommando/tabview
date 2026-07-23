@@ -5,6 +5,7 @@ use clap::{ArgAction, Parser};
 use crate::ingest::{
     InputFormat, JsonPointer, ObjectMode, Quoting, SchemaScan, SourceOptionOverrides,
 };
+use crate::output::{ColorOutput, OutputFormat};
 use crate::view::ColumnWidthMode;
 
 #[derive(Debug, Clone, PartialEq, Eq, Parser)]
@@ -16,6 +17,18 @@ use crate::view::ColumnWidthMode;
 pub struct Args {
     /// File to read. Use '-' to read from standard input.
     pub filename: PathBuf,
+
+    /// Run the interactive viewer. Combine with --output to serialize the final view on quit.
+    #[arg(short = 'i', long = "interactive", action = ArgAction::SetTrue)]
+    pub interactive: bool,
+
+    /// Output serialization format.
+    #[arg(short = 'o', long = "output", value_enum)]
+    pub output: Option<OutputFormat>,
+
+    /// Color policy for serialized output.
+    #[arg(long = "color", value_enum, default_value_t = ColorOutput::Auto)]
+    pub color: ColorOutput,
 
     /// Encoding, if required.
     #[arg(short = 'e', long = "encoding")]
@@ -85,6 +98,9 @@ impl Args {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Config {
     pub filename: PathBuf,
+    pub interactive: bool,
+    pub output: Option<OutputFormat>,
+    pub color: ColorOutput,
     pub encoding: Option<String>,
     pub delimiter: Option<u8>,
     pub quoting: Option<Quoting>,
@@ -142,6 +158,9 @@ impl Config {
         };
         Ok(Self {
             filename: args.filename,
+            interactive: args.interactive,
+            output: args.output,
+            color: args.color,
             encoding: args.encoding,
             delimiter: args.delimiter.as_deref().map(parse_byte_char).transpose()?,
             quoting: args.quoting.as_deref().map(parse_quoting).transpose()?,
@@ -368,6 +387,50 @@ mod tests {
     fn default_width_is_mode() {
         let config = parse(&["tabview", "sample/data_ohlcv.csv"]);
         assert_eq!(config.width, ColumnWidthMode::Mode);
+    }
+
+    #[test]
+    fn parses_composable_runtime_and_output_options() {
+        let automatic = parse(&["tabview", "sample/data_ohlcv.csv"]);
+        assert!(!automatic.interactive);
+        assert_eq!(automatic.output, None);
+        assert_eq!(automatic.color, ColorOutput::Auto);
+
+        let interactive = parse(&["tabview", "-i", "sample/data_ohlcv.csv"]);
+        assert!(interactive.interactive);
+        assert_eq!(interactive.output, None);
+
+        let direct = parse(&["tabview", "-o", "table", "sample/data_ohlcv.csv"]);
+        assert!(!direct.interactive);
+        assert_eq!(direct.output, Some(OutputFormat::Table));
+
+        let composed = parse(&[
+            "tabview",
+            "--interactive",
+            "--output",
+            "table",
+            "--color",
+            "always",
+            "sample/data_ohlcv.csv",
+        ]);
+        assert!(composed.interactive);
+        assert_eq!(composed.output, Some(OutputFormat::Table));
+        assert_eq!(composed.color, ColorOutput::Always);
+    }
+
+    #[test]
+    fn rejects_runtime_names_and_unknown_output_formats() {
+        assert!(
+            Args::try_parse_from(["tabview", "--output", "tui", "sample/data_ohlcv.csv"]).is_err()
+        );
+        assert!(
+            Args::try_parse_from(["tabview", "--output", "markdown", "sample/data_ohlcv.csv"])
+                .is_err()
+        );
+        assert!(
+            Args::try_parse_from(["tabview", "--color", "sometimes", "sample/data_ohlcv.csv"])
+                .is_err()
+        );
     }
 
     #[test]

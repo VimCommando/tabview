@@ -92,6 +92,16 @@ pub fn open_source(source: InputSource, options: &OpenOptions) -> anyhow::Result
                 options.format
             }
         }
+        InputSource::StreamingStdin(input) => {
+            if options.format != InputFormat::Auto {
+                options.format
+            } else {
+                input.wait_for_probe_sample()?;
+                let snapshot = input.snapshot(false)?;
+                let sample_len = snapshot.bytes.len().min(64 * 1024);
+                FormatResolver::resolve(options.format, &source, &snapshot.bytes[..sample_len])
+            }
+        }
     };
     // A JSON Pointer is itself an explicit request for structured parsing. If
     // auto-detection cannot identify JSON/NDJSON, prefer JSON so the option is
@@ -180,6 +190,8 @@ fn probe_content(sample: &[u8]) -> InputFormat {
 mod tests {
     use std::path::PathBuf;
 
+    use crate::table::RowCount;
+
     use super::*;
 
     #[test]
@@ -252,5 +264,19 @@ mod tests {
 
         let resolved = resolve_structured_options(detected, &options);
         assert_eq!(resolved, InputFormat::Json);
+    }
+
+    #[test]
+    fn automatic_streaming_probe_selects_ndjson_without_waiting_for_eof() {
+        let input = crate::ingest::source::StreamingInput::pending_for_test();
+        input.append_for_test(b"{\"a\":1}\n{\"a\":2}\n");
+        let source = open_source(
+            InputSource::StreamingStdin(input.clone()),
+            &OpenOptions::default(),
+        )
+        .expect("open streaming NDJSON");
+        let table = source.into_implicit_table().expect("table");
+        assert_eq!(table.store.row_count(), RowCount::AtLeast(2));
+        input.finish_for_test();
     }
 }

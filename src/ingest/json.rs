@@ -15,7 +15,7 @@ use crate::table::{
 };
 
 use super::adapter::{OpenedSource, OpenedTable, ProbeResult, SourceAdapter};
-use super::source::{read_source, InputSource};
+use super::source::{read_source, InputSource, StreamingInput};
 use super::streaming_json::{RawObjectEntry, SelectedJsonValue};
 use super::{
     resolve_selected_shape, InputFormat, JsonPointer, ObjectMode, ObjectModeResolution,
@@ -73,6 +73,9 @@ impl SourceAdapter for JsonAdapter {
                 mode: options.object_mode,
             }
             .into());
+        }
+        if let InputSource::StreamingStdin(input) = &source {
+            return open_streaming_json(input.clone(), source.display_name(), self.format, options);
         }
         if let InputSource::Path(path) = &source {
             if std::fs::metadata(path)?.len() >= options.lazy_threshold_bytes {
@@ -326,6 +329,17 @@ fn flatten_keyed_entry(key: &str, value: &Value, source_bytes: u64) -> anyhow::R
     })
 }
 
+fn parse_partial_json_rows(
+    bytes: &[u8],
+    pointer: Option<&JsonPointer>,
+) -> anyhow::Result<Vec<FlatRow>> {
+    super::streaming_json::select_partial_json_rows(bytes, pointer)?
+        .iter()
+        .map(|raw| serde_json::from_str::<Value>(raw.get()).map_err(Into::into))
+        .map(|value| value.and_then(|value| flatten_row(&value)))
+        .collect()
+}
+
 fn parse_ndjson_rows(bytes: &[u8], pointer: Option<&JsonPointer>) -> anyhow::Result<Vec<FlatRow>> {
     let stream = serde_json::Deserializer::from_slice(bytes).into_iter::<Value>();
     let mut rows = Vec::new();
@@ -501,6 +515,285 @@ fn open_json_rows_with_metadata(
         object_mode,
         warnings,
     }))
+}
+
+fn open_streaming_json(
+    input: StreamingInput,
+    display_name: String,
+    format: InputFormat,
+    options: &OpenOptions,
+) -> anyhow::Result<OpenedSource> {
+    let generation = SourceGeneration::new();
+    let mut store = StreamingJsonTable {
+        generation,
+        input,
+        format,
+        pointer: options.json_path.clone(),
+        options: options.clone(),
+        rows: Vec::new(),
+        schema: JsonSchema::new(generation),
+        indexed_rows: 0,
+        bytes_scanned: 0,
+        last_bytes: usize::MAX,
+        input_complete: false,
+        schema_complete: false,
+        object_mode: None,
+        warnings: Vec::new(),
+    };
+    store.refresh_rows(options.schema_scan == SchemaScan::Full)?;
+    let initial_target = match options.schema_scan {
+        SchemaScan::Full => store.rows.len(),
+        SchemaScan::Default => {
+            let mut count = 0;
+            let mut bytes = 0_u64;
+            for row in &store.rows {
+                count += 1;
+                bytes = bytes.saturating_add(row.source_bytes);
+                if bytes >= options.schema_scan_bytes {
+                    break;
+                }
+            }
+            count
+        }
+    };
+    while store.indexed_rows < initial_target {
+        let row = &store.rows[store.indexed_rows];
+        store.schema.observe(row);
+        store.bytes_scanned = store.bytes_scanned.saturating_add(row.source_bytes);
+        store.indexed_rows += 1;
+    }
+    store.schema.assign_initial_labels();
+    store.schema_complete = store.input_complete && store.indexed_rows == store.rows.len();
+    let definition = TableDefinition {
+        generation,
+        columns: store.schema.columns.clone(),
+        schema_state: if store.schema_complete {
+            SchemaState::Complete
+        } else {
+            SchemaState::Provisional
+        },
+        relation: RelationMetadata::implicit(display_name, true),
+    };
+    Ok(OpenedSource::implicit(OpenedTable {
+        generation,
+        definition,
+        object_mode: store.object_mode,
+        warnings: store.warnings.clone(),
+        store: Box::new(store),
+    }))
+}
+
+struct StreamingJsonTable {
+    generation: SourceGeneration,
+    input: StreamingInput,
+    format: InputFormat,
+    pointer: Option<JsonPointer>,
+    options: OpenOptions,
+    rows: Vec<FlatRow>,
+    schema: JsonSchema,
+    indexed_rows: usize,
+    bytes_scanned: u64,
+    last_bytes: usize,
+    input_complete: bool,
+    schema_complete: bool,
+    object_mode: Option<ObjectModeResolution>,
+    warnings: Vec<String>,
+}
+
+impl StreamingJsonTable {
+    fn refresh_rows(&mut self, wait_for_completion: bool) -> anyhow::Result<()> {
+        let snapshot = self.input.snapshot(wait_for_completion)?;
+        if snapshot.bytes.len() == self.last_bytes && snapshot.complete == self.input_complete {
+            return Ok(());
+        }
+        let parsed = parse_available_json_rows(
+            &snapshot.bytes,
+            snapshot.complete,
+            self.format,
+            self.pointer.as_ref(),
+            &self.options,
+        )?;
+        if parsed.rows.len() >= self.rows.len() {
+            self.rows = parsed.rows;
+        }
+        if parsed.object_mode.is_some() {
+            self.object_mode = parsed.object_mode;
+        }
+        for warning in parsed.warnings {
+            if !self.warnings.contains(&warning) {
+                self.warnings.push(warning);
+            }
+        }
+        self.last_bytes = snapshot.bytes.len();
+        self.input_complete = snapshot.complete;
+        Ok(())
+    }
+
+    fn typed_row(&self, index: usize) -> Option<Row> {
+        let raw = self.rows.get(index)?;
+        Some(typed_row_from_flat(
+            self.generation,
+            index,
+            raw,
+            &self.schema,
+        ))
+    }
+}
+
+impl TableStore for StreamingJsonTable {
+    fn generation(&self) -> SourceGeneration {
+        self.generation
+    }
+
+    fn row_count(&self) -> RowCount {
+        if self.input_complete {
+            RowCount::Exact(self.rows.len())
+        } else if self.rows.is_empty() {
+            RowCount::Unknown
+        } else {
+            RowCount::AtLeast(self.rows.len())
+        }
+    }
+
+    fn column_count(&self) -> usize {
+        self.schema.columns.len()
+    }
+
+    fn row(&mut self, index: RowIndex) -> anyhow::Result<Option<Row>> {
+        Ok(self.typed_row(index.0))
+    }
+
+    fn ensure_indexed_through(&mut self, index: RowIndex) -> anyhow::Result<IndexProgress> {
+        self.refresh_rows(index.0 == usize::MAX)?;
+        let target = if self.input_complete {
+            index.0.saturating_add(1).min(self.rows.len())
+        } else {
+            self.rows.len()
+        };
+        let mut delta = SchemaDelta::default();
+        while self.indexed_rows < target {
+            let row = &self.rows[self.indexed_rows];
+            let observed = self.schema.observe(row);
+            delta.added_columns.extend(observed.added_columns);
+            delta.widened_types.extend(observed.widened_types);
+            self.bytes_scanned = self.bytes_scanned.saturating_add(row.source_bytes);
+            self.indexed_rows += 1;
+        }
+        if self.input_complete && self.indexed_rows == self.rows.len() && !self.schema_complete {
+            self.schema_complete = true;
+            delta.completed = true;
+        }
+        Ok(IndexProgress {
+            row_count: self.row_count(),
+            schema_delta: delta,
+            bytes_scanned: self.bytes_scanned,
+        })
+    }
+
+    fn scan_rows(
+        &mut self,
+        request: ScanRequest,
+        visitor: &mut dyn RowVisitor,
+    ) -> anyhow::Result<ScanProgress> {
+        self.refresh_rows(false)?;
+        let mut current = request.start.0;
+        let mut visited = 0;
+        while visited < request.max_rows {
+            let Some(row) = self.typed_row(current) else {
+                break;
+            };
+            visited += 1;
+            if visitor.visit(RowIndex(current), &row).is_break() {
+                return Ok(ScanProgress {
+                    visited,
+                    next: None,
+                    reached_end: false,
+                });
+            }
+            match request.direction {
+                ScanDirection::Forward => current += 1,
+                ScanDirection::Reverse if current > 0 => current -= 1,
+                ScanDirection::Reverse => {
+                    return Ok(ScanProgress {
+                        visited,
+                        next: None,
+                        reached_end: true,
+                    });
+                }
+            }
+        }
+        let reached_end = current >= self.rows.len();
+        Ok(ScanProgress {
+            visited,
+            next: (!reached_end).then_some(RowIndex(current)),
+            reached_end,
+        })
+    }
+
+    fn materialize(&mut self) -> anyhow::Result<InMemoryTable> {
+        InMemoryTable::from_rows(
+            self.generation,
+            (0..self.rows.len())
+                .filter_map(|index| self.typed_row(index))
+                .collect(),
+        )
+    }
+
+    fn try_execute_query(&mut self, _query: &TableQuery) -> anyhow::Result<QueryExecution> {
+        Ok(QueryExecution::Unsupported)
+    }
+}
+
+fn parse_available_json_rows(
+    bytes: &[u8],
+    complete: bool,
+    format: InputFormat,
+    pointer: Option<&JsonPointer>,
+    options: &OpenOptions,
+) -> anyhow::Result<ParsedJsonRows> {
+    if complete {
+        return match format {
+            InputFormat::Json => parse_json_rows_with_options(bytes, pointer, options),
+            InputFormat::Ndjson => Ok(ParsedJsonRows {
+                rows: parse_ndjson_rows(bytes, pointer)?,
+                object_mode: None,
+                warnings: Vec::new(),
+            }),
+            _ => anyhow::bail!("JSON adapter requires json or ndjson format"),
+        };
+    }
+    match format {
+        InputFormat::Ndjson => {
+            let Some(end) = bytes.iter().rposition(|byte| *byte == b'\n') else {
+                return Ok(ParsedJsonRows {
+                    rows: Vec::new(),
+                    object_mode: None,
+                    warnings: Vec::new(),
+                });
+            };
+            Ok(ParsedJsonRows {
+                rows: parse_ndjson_rows(&bytes[..=end], pointer)?,
+                object_mode: None,
+                warnings: Vec::new(),
+            })
+        }
+        InputFormat::Json => match parse_json_rows_with_options(bytes, pointer, options) {
+            Ok(parsed) => Ok(parsed),
+            Err(error)
+                if error
+                    .downcast_ref::<serde_json::Error>()
+                    .is_some_and(serde_json::Error::is_eof) =>
+            {
+                Ok(ParsedJsonRows {
+                    rows: parse_partial_json_rows(bytes, pointer)?,
+                    object_mode: None,
+                    warnings: Vec::new(),
+                })
+            }
+            Err(error) => Err(error),
+        },
+        _ => anyhow::bail!("JSON adapter requires json or ndjson format"),
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1951,6 +2244,66 @@ mod tests {
         assert_eq!(labels[1], "billing.email");
         assert!(labels[2].starts_with('['));
         assert!(labels[3].starts_with('['));
+    }
+
+    #[test]
+    fn streaming_json_array_discovers_rows_and_late_columns_before_export() {
+        let input = StreamingInput::pending_for_test();
+        input.append_for_test(b"[\n{\"a\":1},\n");
+        let source = JsonAdapter::json()
+            .open(
+                InputSource::StreamingStdin(input.clone()),
+                &OpenOptions::default(),
+            )
+            .expect("open streaming JSON");
+        let mut table = source.into_implicit_table().expect("table");
+        assert_eq!(table.store.row_count(), RowCount::AtLeast(1));
+        assert_eq!(
+            table.store.row(RowIndex(0)).unwrap().unwrap().cells[0],
+            CellValue::Integer(1)
+        );
+
+        input.append_for_test(b"{\"a\":2,\"late\":3}]\n");
+        input.finish_for_test();
+        let progress = table
+            .store
+            .ensure_indexed_through(RowIndex(usize::MAX))
+            .expect("complete stream");
+        assert_eq!(progress.row_count, RowCount::Exact(2));
+        assert_eq!(progress.schema_delta.added_columns.len(), 1);
+        assert_eq!(progress.schema_delta.added_columns[0].display_name, "late");
+        assert!(progress.schema_delta.completed);
+    }
+
+    #[test]
+    fn streaming_nested_json_array_discovers_rows_before_enclosing_document_finishes() {
+        let input = StreamingInput::pending_for_test();
+        input.append_for_test(b"{\"hits\":{\"hits\":[\n{\"a\":1},\n");
+        let options = OpenOptions {
+            format: InputFormat::Json,
+            json_path: Some("/hits/hits".parse().unwrap()),
+            ..OpenOptions::default()
+        };
+        let source = JsonAdapter::json()
+            .open(InputSource::StreamingStdin(input.clone()), &options)
+            .expect("open streaming JSON");
+        let mut table = source.into_implicit_table().expect("table");
+        assert_eq!(table.store.row_count(), RowCount::AtLeast(1));
+        assert_eq!(
+            table.store.row(RowIndex(0)).unwrap().unwrap().cells[0],
+            CellValue::Integer(1)
+        );
+
+        input.append_for_test(b"{\"a\":2,\"late\":3}]},\"tail\":true}\n");
+        input.finish_for_test();
+        let progress = table
+            .store
+            .ensure_indexed_through(RowIndex(usize::MAX))
+            .expect("complete stream");
+        assert_eq!(progress.row_count, RowCount::Exact(2));
+        assert_eq!(progress.schema_delta.added_columns.len(), 1);
+        assert_eq!(progress.schema_delta.added_columns[0].display_name, "late");
+        assert!(progress.schema_delta.completed);
     }
 
     #[test]
