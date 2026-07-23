@@ -28,25 +28,29 @@ fn run_in_pty(command: &str, keys: &[u8]) -> Output {
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn script");
+    let mut script_stdout = child.stdout.take().expect("script stdout");
+    let stdout_reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        script_stdout
+            .read_to_end(&mut output)
+            .expect("read script stdout");
+        output
+    });
+    let mut script_stderr = child.stderr.take().expect("script stderr");
+    let stderr_reader = std::thread::spawn(move || {
+        let mut output = Vec::new();
+        script_stderr
+            .read_to_end(&mut output)
+            .expect("read script stderr");
+        output
+    });
     std::thread::sleep(Duration::from_millis(300));
     let mut terminal_input = child.stdin.take().expect("script stdin");
     terminal_input.write_all(keys).expect("send keys");
     let status = child.wait().expect("wait for script");
     drop(terminal_input);
-    let mut stdout = Vec::new();
-    child
-        .stdout
-        .take()
-        .expect("script stdout")
-        .read_to_end(&mut stdout)
-        .expect("read script stdout");
-    let mut stderr = Vec::new();
-    child
-        .stderr
-        .take()
-        .expect("script stderr")
-        .read_to_end(&mut stderr)
-        .expect("read script stderr");
+    let stdout = stdout_reader.join().expect("join stdout reader");
+    let stderr = stderr_reader.join().expect("join stderr reader");
     Output {
         status,
         stdout,
