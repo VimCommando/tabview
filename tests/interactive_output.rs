@@ -1,6 +1,6 @@
 #![cfg(unix)]
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
@@ -29,13 +29,29 @@ fn run_in_pty(command: &str, keys: &[u8]) -> Output {
         .spawn()
         .expect("spawn script");
     std::thread::sleep(Duration::from_millis(300));
+    let mut terminal_input = child.stdin.take().expect("script stdin");
+    terminal_input.write_all(keys).expect("send keys");
+    let status = child.wait().expect("wait for script");
+    drop(terminal_input);
+    let mut stdout = Vec::new();
     child
-        .stdin
+        .stdout
         .take()
-        .expect("script stdin")
-        .write_all(keys)
-        .expect("send keys");
-    child.wait_with_output().expect("wait for script")
+        .expect("script stdout")
+        .read_to_end(&mut stdout)
+        .expect("read script stdout");
+    let mut stderr = Vec::new();
+    child
+        .stderr
+        .take()
+        .expect("script stderr")
+        .read_to_end(&mut stderr)
+        .expect("read script stderr");
+    Output {
+        status,
+        stdout,
+        stderr,
+    }
 }
 
 #[test]
@@ -157,6 +173,9 @@ fn terminal_stdout_selects_automatic_view_only_tui() {
 
 #[test]
 fn interactive_mode_without_a_controlling_terminal_fails_without_output() {
+    let _guard = PTY_LOCK
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let dir = tempfile::tempdir().expect("tempdir");
     let input_path = dir.path().join("input.csv");
     std::fs::write(&input_path, "A,B\n1,2\n").expect("input");
