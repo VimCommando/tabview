@@ -275,9 +275,9 @@ fn resolved_widths(header: &[PreparedCell], prepared: &PreparedOutput<'_>) -> Ve
         widths[index] = widths[index].max(display_width(&cell.text));
     }
     for row_index in 0..prepared.rows.len() {
-        let row = normalize_row(prepared.rows.row(row_index));
+        let row = prepared.rows.row(row_index);
         for (index, cell) in row.iter().enumerate().take(widths.len()) {
-            widths[index] = widths[index].max(display_width(&cell.text));
+            widths[index] = widths[index].max(display_width(&normalize_controls(&cell.text)));
         }
     }
     for (width, column) in widths.iter_mut().zip(&prepared.columns) {
