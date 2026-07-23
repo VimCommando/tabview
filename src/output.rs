@@ -161,7 +161,9 @@ pub fn write_view(
     if color == ColorOutput::Always && !adapter.supports_color() {
         anyhow::bail!("output format does not support --color always");
     }
-    let prepared = prepare(view, theme, adapter.requirements())?;
+    let mut requirements = adapter.requirements();
+    requirements.conditional_styles &= color == ColorOutput::Always;
+    let prepared = prepare(view, theme, requirements)?;
     match adapter.write(&prepared, color, writer) {
         Ok(()) => Ok(()),
         Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Ok(()),
