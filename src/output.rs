@@ -124,6 +124,7 @@ impl OutputAdapter for FixedWidthTableAdapter {
             })
             .collect::<Vec<_>>();
         let widths = resolved_widths(&normalized_header, prepared);
+        let gap = vec![b' '; prepared.gap];
 
         if prepared.header_visible && !normalized_header.is_empty() {
             write_line(
@@ -131,20 +132,13 @@ impl OutputAdapter for FixedWidthTableAdapter {
                 &normalized_header,
                 &prepared.columns,
                 &widths,
-                prepared.gap,
+                &gap,
                 color,
             )?;
         }
         for row_index in 0..prepared.rows.len() {
             let row = normalize_row(prepared.rows.row(row_index));
-            write_line(
-                writer,
-                &row,
-                &prepared.columns,
-                &widths,
-                prepared.gap,
-                color,
-            )?;
+            write_line(writer, &row, &prepared.columns, &widths, &gap, color)?;
         }
         Ok(())
     }
@@ -299,22 +293,22 @@ fn write_line(
     cells: &[PreparedCell],
     columns: &[PreparedColumn],
     widths: &[usize],
-    gap: usize,
+    gap: &[u8],
     color: ColorOutput,
 ) -> io::Result<()> {
     let count = columns.len().min(widths.len());
     for index in 0..count {
         if index > 0 {
-            writer.write_all(" ".repeat(gap).as_bytes())?;
+            writer.write_all(gap)?;
         }
-        let cell = cells.get(index).cloned().unwrap_or(PreparedCell {
-            text: String::new(),
-            style: Style::default(),
-        });
+        let (cell, style) = cells
+            .get(index)
+            .map(|cell| (cell.text.as_str(), cell.style))
+            .unwrap_or(("", Style::default()));
         let is_last = index + 1 == count;
-        let text = align_cell(&cell.text, widths[index], columns[index].alignment, is_last);
+        let text = align_cell(cell, widths[index], columns[index].alignment, is_last);
         if color == ColorOutput::Always {
-            let ansi = ansi_start(cell.style);
+            let ansi = ansi_start(style);
             if !ansi.is_empty() {
                 writer.write_all(ansi.as_bytes())?;
                 writer.write_all(text.as_bytes())?;
