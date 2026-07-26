@@ -977,7 +977,8 @@ impl App {
                     return;
                 };
                 if self.view.request_source_query(query.clone()) {
-                    self.open_options.limit = Some(query.limit);
+                    self.open_options.limit =
+                        (query.limit != std::num::NonZeroUsize::MAX).then_some(query.limit);
                     self.open_options.source_filters = source_filters;
                     self.open_options.source_sort = source_sort;
                     self.popup = None;
@@ -2959,6 +2960,31 @@ mod tests {
         assert!(!app.view.source_query_is_pending());
         assert_eq!(app.view.active_source_query(), Some(&active));
         assert_eq!(app.open_options.limit, None);
+    }
+
+    #[test]
+    fn applying_an_unbounded_source_draft_does_not_persist_the_limit_sentinel() {
+        let file = tempfile::NamedTempFile::new().expect("csv fixture");
+        std::fs::write(file.path(), "name\nalpha\nbeta\n").expect("csv");
+        let mut app = app_for_source(file.path().to_path_buf(), ingest::OpenOptions::default());
+        app.open_source_config_modal();
+        let column = app.view.table_definition().expect("definition").columns[0].id;
+        app.source_modal
+            .as_mut()
+            .expect("source modal")
+            .draft
+            .filters
+            .push(crate::table::SourceFilter {
+                scope: crate::table::SourceFilterScope::Column(column),
+                operator: crate::table::SourceFilterOperator::Equal,
+                operand: Some(crate::table::SourceOperand::Text("alpha".to_owned())),
+            });
+
+        app.handle_key(key(KeyCode::Enter)).expect("apply draft");
+        app.view.await_latest_source_query().expect("source result");
+
+        assert_eq!(app.open_options.limit, None);
+        assert_eq!(app.open_options.source_filters.len(), 1);
     }
 
     #[test]
