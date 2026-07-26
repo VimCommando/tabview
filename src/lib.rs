@@ -252,9 +252,7 @@ fn run_interactive(
 ) -> anyhow::Result<()> {
     loop {
         app.view.poll_source_query();
-        if let Some(status) = app.view.take_source_status() {
-            app.message = Some(status);
-        }
+        let source_status = app.view.take_source_status();
         terminal.terminal_mut().draw(|frame| {
             let area = frame.area();
             let table_area = table_area(area);
@@ -267,7 +265,11 @@ fn run_interactive(
                 Some(&app.search_query),
             );
             ui::render_footer_with_theme(
-                Some(app.message.as_deref().unwrap_or(&count_status)),
+                Some(footer_status(
+                    source_status.as_deref(),
+                    app.message.as_deref(),
+                    &count_status,
+                )),
                 area,
                 frame.buffer_mut(),
                 &app.theme,
@@ -740,9 +742,6 @@ impl App {
             }
             Command::ShowInfo => self.popup = Some(ui::Popup::Info),
             Command::Redraw => {}
-        }
-        if let Some(status) = self.view.take_source_status() {
-            self.message = Some(status);
         }
         Ok(())
     }
@@ -2243,6 +2242,14 @@ fn popup_area(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
     ratatui::layout::Rect::new(x, y, width, height)
 }
 
+fn footer_status<'a>(
+    source_status: Option<&'a str>,
+    message: Option<&'a str>,
+    count_status: &'a str,
+) -> &'a str {
+    source_status.or(message).unwrap_or(count_status)
+}
+
 fn table_area(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
     ratatui::layout::Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1))
 }
@@ -2288,6 +2295,15 @@ mod tests {
         .expect_err("restoration must fail");
         assert!(error.to_string().contains("restore failed"));
         assert!(!exported.get());
+    }
+
+    #[test]
+    fn source_status_is_transient_before_the_live_count_returns() {
+        assert_eq!(
+            footer_status(Some("Indexed 4096 rows"), None, "4096+ rows"),
+            "Indexed 4096 rows"
+        );
+        assert_eq!(footer_status(None, None, "4096+ rows"), "4096+ rows");
     }
 
     #[test]

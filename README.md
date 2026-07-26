@@ -560,7 +560,7 @@ cargo clippy --all-targets --all-features -- -D warnings
 | `i` | Edit the current column view configuration, sort state, and filter action. |
 | `u` | Edit staged source filters, native sort, and source limit. |
 | `V` | Show source-independent view configuration. |
-| `p` | Show and copy the active source SQL or query plan. |
+| `p` | Show and copy the active source SQL when available. |
 | `f`, `F` | Filter in or filter out rows by the current column. `Tab` cycles text, regex, and numeric modes; submitting an empty condition clears filters for the current column. |
 | `n` | Go to the next search result. |
 | `N` | Go to the previous search result. |
