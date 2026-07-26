@@ -32,9 +32,9 @@ pub fn validate_source_query(
     for column in query
         .filters
         .iter()
-        .filter_map(|filter| match filter.scope {
+        .filter_map(|filter| match &filter.scope {
             super::SourceFilterScope::WholeRecord => None,
-            super::SourceFilterScope::Column(column) => Some(column),
+            super::SourceFilterScope::Column(column) => Some(*column),
         })
         .chain(query.order_by.iter().map(|sort| sort.column))
     {
