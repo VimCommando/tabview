@@ -390,7 +390,15 @@ struct RawSavedFilter {
 struct RawSavedSourceFilter {
     column: String,
     operator: String,
+    #[serde(default, deserialize_with = "deserialize_present_value")]
     value: Option<Value>,
+}
+
+fn deserialize_present_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1993,6 +2001,42 @@ view:
         assert_eq!(parsed.view.source.sort.len(), 1);
         assert_eq!(parsed.view.view.filters.len(), 1);
         assert_eq!(parsed.view.view.sort.len(), 1);
+    }
+
+    #[test]
+    fn explicit_null_source_operand_matches_the_saved_view_schema() {
+        let parsed = parse_saved_view_yaml(
+            r#"
+name: null-operand
+filenames: [data.csv]
+source:
+  filters:
+    - column: deleted_at
+      operator: equal
+      value: null
+view: {}
+"#,
+        )
+        .expect("parse");
+
+        assert!(parsed.warnings.is_empty());
+        assert_eq!(
+            parsed.view.source.filters[0].value,
+            Some(SourceFilterValue::Null)
+        );
+        assert!(matches!(
+            parsed.view.source_options().source_filters.unwrap()[0].operand,
+            Some(SourceOperand::Null)
+        ));
+
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../schemas/view.schema.json"))
+                .expect("saved view schema");
+        let value_types = schema
+            .pointer("/$defs/sourceFilter/properties/value/type")
+            .and_then(serde_json::Value::as_array)
+            .expect("source filter value types");
+        assert!(value_types.iter().any(|value| value == "null"));
     }
 
     #[test]

@@ -368,7 +368,7 @@ impl Drop for SourceQueryCoordinator {
         state.shutdown = true;
         state.pending = None;
         wake.notify_one();
-        // Do not block application shutdown on an active file scan. The one
+        // Do not block application shutdown on an active source query. The one
         // worker exits as soon as its current task returns.
         self.worker_handle.take();
     }
