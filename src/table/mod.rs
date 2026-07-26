@@ -428,13 +428,14 @@ fn execute_streaming_file_query(
 
 fn file_source_filter_matches(filter: &SourceFilter, row: &Row) -> bool {
     if matches!(filter.scope, SourceFilterScope::WholeRecord) {
-        let record = CellValue::Text(
-            row.cells
-                .iter()
-                .map(|value| value.display())
-                .collect::<Vec<_>>()
-                .join("\t"),
-        );
+        let mut record = String::new();
+        for (index, value) in row.cells.iter().enumerate() {
+            if index > 0 {
+                record.push('\t');
+            }
+            record.push_str(&value.display());
+        }
+        let record = CellValue::Text(record);
         return match filter.operator {
             SourceFilterOperator::IsNull => false,
             SourceFilterOperator::IsNotNull => true,
@@ -495,12 +496,18 @@ fn file_value_matches(
         SourceFilterOperator::GreaterThanOrEqual => {
             ordering.is_some_and(|value| value != Ordering::Less)
         }
-        SourceFilterOperator::Contains => value
-            .display()
-            .contains(source_operand_display(operand).as_ref()),
-        SourceFilterOperator::Prefix => value
-            .display()
-            .starts_with(source_operand_display(operand).as_ref()),
+        SourceFilterOperator::Contains => {
+            !matches!(operand, SourceOperand::Null)
+                && value
+                    .display()
+                    .contains(source_operand_display(operand).as_ref())
+        }
+        SourceFilterOperator::Prefix => {
+            !matches!(operand, SourceOperand::Null)
+                && value
+                    .display()
+                    .starts_with(source_operand_display(operand).as_ref())
+        }
         SourceFilterOperator::IsNull | SourceFilterOperator::IsNotNull => false,
     }
 }
@@ -1451,6 +1458,48 @@ mod tests {
         ));
         assert!(!file_source_filter_matches(
             &filter(SourceFilterOperator::IsNotNull),
+            &row
+        ));
+    }
+
+    #[test]
+    fn file_source_text_filters_do_not_treat_null_as_an_empty_wildcard() {
+        let generation = SourceGeneration::new();
+        let row = Row::new(
+            RowId {
+                generation,
+                ordinal: 0,
+            },
+            vec![CellValue::Text("alpha".to_owned())],
+        );
+        let filter = |scope, operator, operand| SourceFilter {
+            scope,
+            operator,
+            operand: Some(operand),
+        };
+        let column = SourceFilterScope::Column(ColumnId {
+            generation,
+            ordinal: 0,
+        });
+
+        assert!(!file_source_filter_matches(
+            &filter(
+                column.clone(),
+                SourceFilterOperator::Contains,
+                SourceOperand::Null
+            ),
+            &row
+        ));
+        assert!(!file_source_filter_matches(
+            &filter(column, SourceFilterOperator::Prefix, SourceOperand::Null),
+            &row
+        ));
+        assert!(file_source_filter_matches(
+            &filter(
+                SourceFilterScope::WholeRecord,
+                SourceFilterOperator::Contains,
+                SourceOperand::Text("alpha".to_owned())
+            ),
             &row
         ));
     }
