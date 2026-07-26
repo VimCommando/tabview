@@ -349,12 +349,7 @@ impl FileSourceQueryStore {
                 "source sorting is unavailable for streaming delimited and structured files"
             );
         }
-        let (result, extent) = {
-            let mut store = base
-                .lock()
-                .map_err(|_| anyhow::anyhow!("file source query lock was poisoned"))?;
-            execute_streaming_file_query(store.as_mut(), &mut definition, &query)?
-        };
+        let (result, extent) = execute_streaming_file_query(&base, &mut definition, &query)?;
         Ok(Self {
             base,
             definition,
@@ -366,9 +361,18 @@ impl FileSourceQueryStore {
 }
 
 fn execute_streaming_file_query(
-    store: &mut dyn TableStore,
+    base: &Arc<Mutex<Box<dyn TableStore>>>,
     definition: &mut TableDefinition,
     query: &SourceQuery,
+) -> anyhow::Result<(InMemoryTable, ResultExtent)> {
+    execute_streaming_file_query_with_chunk_hook(base, definition, query, || {})
+}
+
+fn execute_streaming_file_query_with_chunk_hook(
+    base: &Arc<Mutex<Box<dyn TableStore>>>,
+    definition: &mut TableDefinition,
+    query: &SourceQuery,
+    mut after_chunk: impl FnMut(),
 ) -> anyhow::Result<(InMemoryTable, ResultExtent)> {
     const CHUNK: usize = 1_024;
     let limit = query.limit.get();
@@ -393,15 +397,21 @@ fn execute_streaming_file_query(
             }
             ControlFlow::Continue(())
         };
-        let progress = store.index_and_scan_rows(
-            RowIndex(start.0.saturating_add(CHUNK.saturating_sub(1))),
-            ScanRequest {
-                start,
-                direction: ScanDirection::Forward,
-                max_rows: CHUNK,
-            },
-            &mut visitor,
-        )?;
+        let progress = {
+            let mut store = base
+                .lock()
+                .map_err(|_| anyhow::anyhow!("file source query lock was poisoned"))?;
+            store.index_and_scan_rows(
+                RowIndex(start.0.saturating_add(CHUNK.saturating_sub(1))),
+                ScanRequest {
+                    start,
+                    direction: ScanDirection::Forward,
+                    max_rows: CHUNK,
+                },
+                &mut visitor,
+            )?
+        };
+        after_chunk();
         definition.apply_delta(progress.index.schema_delta)?;
         next = progress.scan.next;
         if progress.scan.reached_end {
@@ -414,6 +424,7 @@ fn execute_streaming_file_query(
         if progress.scan.visited == 0 || next == Some(start) {
             anyhow::bail!("file source filter made no forward progress");
         }
+        std::thread::yield_now();
     }
     let truncated = matched.len() > limit;
     matched.truncate(limit);
@@ -1401,6 +1412,77 @@ fn csv_reader_builder(options: &ParseOptions) -> ReaderBuilder {
 mod tests {
     use super::*;
 
+    struct ChunkedQueryStore {
+        generation: SourceGeneration,
+        calls: usize,
+    }
+
+    impl TableStore for ChunkedQueryStore {
+        fn generation(&self) -> SourceGeneration {
+            self.generation
+        }
+
+        fn row_count(&self) -> RowCount {
+            RowCount::Exact(2)
+        }
+
+        fn column_count(&self) -> usize {
+            1
+        }
+
+        fn row(&mut self, index: RowIndex) -> anyhow::Result<Option<Row>> {
+            Ok((index.0 < 2).then(|| {
+                Row::new(
+                    RowId {
+                        generation: self.generation,
+                        ordinal: index.0 as u64,
+                    },
+                    vec![CellValue::Integer(index.0 as i64)],
+                )
+            }))
+        }
+
+        fn ensure_indexed_through(&mut self, _index: RowIndex) -> anyhow::Result<IndexProgress> {
+            Ok(IndexProgress {
+                row_count: RowCount::Exact(2),
+                schema_delta: SchemaDelta::default(),
+                bytes_scanned: 0,
+            })
+        }
+
+        fn index_and_scan_rows(
+            &mut self,
+            _through: RowIndex,
+            _request: ScanRequest,
+            visitor: &mut dyn RowVisitor,
+        ) -> anyhow::Result<IndexScanProgress> {
+            let index = self.calls;
+            self.calls += 1;
+            let row = self.row(RowIndex(index))?.expect("chunk row");
+            let _ = visitor.visit(RowIndex(index), &row);
+            Ok(IndexScanProgress {
+                index: self.ensure_indexed_through(RowIndex(index))?,
+                scan: ScanProgress {
+                    visited: 1,
+                    next: (index == 0).then_some(RowIndex(1)),
+                    reached_end: index > 0,
+                },
+            })
+        }
+
+        fn scan_rows(
+            &mut self,
+            _request: ScanRequest,
+            _visitor: &mut dyn RowVisitor,
+        ) -> anyhow::Result<ScanProgress> {
+            anyhow::bail!("test store uses combined indexing and scanning")
+        }
+
+        fn materialize(&mut self) -> anyhow::Result<InMemoryTable> {
+            Ok(InMemoryTable::from_text_rows(self.generation, Vec::new()))
+        }
+    }
+
     fn text_row(table: &mut dyn TableStore, index: usize) -> Vec<String> {
         table
             .row(RowIndex(index))
@@ -1502,6 +1584,45 @@ mod tests {
             ),
             &row
         ));
+    }
+
+    #[test]
+    fn file_query_releases_the_base_store_after_each_chunk() {
+        let generation = SourceGeneration::new();
+        let base: Arc<Mutex<Box<dyn TableStore>>> =
+            Arc::new(Mutex::new(Box::new(ChunkedQueryStore {
+                generation,
+                calls: 0,
+            })));
+        let definition = TableDefinition {
+            generation,
+            columns: vec![ColumnDefinition {
+                id: ColumnId {
+                    generation,
+                    ordinal: 0,
+                },
+                source_identity: ColumnSourceIdentity::Positional(0),
+                display_name: "value".to_owned(),
+                source_declared_type: None,
+                source_type: LogicalType::Integer,
+                type_origin: TypeOrigin::Declared,
+            }],
+            schema_state: SchemaState::Complete,
+            relation: RelationMetadata::implicit("test", true),
+        };
+        let query = SourceQuery::new(generation, std::num::NonZeroUsize::new(10).unwrap());
+        let mut definition = definition;
+        let mut observed_chunks = 0;
+
+        execute_streaming_file_query_with_chunk_hook(&base, &mut definition, &query, || {
+            let _store = base
+                .try_lock()
+                .expect("base store must be unlocked between chunks");
+            observed_chunks += 1;
+        })
+        .expect("query result");
+
+        assert_eq!(observed_chunks, 2);
     }
 
     #[test]
