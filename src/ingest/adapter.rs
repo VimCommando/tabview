@@ -220,12 +220,10 @@ pub fn open_source(source: InputSource, options: &OpenOptions) -> anyhow::Result
         if options.json_path.is_some() {
             anyhow::bail!("JSON starting paths cannot be used with SQLite input");
         }
-        if options.object_mode != ObjectMode::Auto {
-            anyhow::bail!("object mode cannot be used with SQLite input");
-        }
     }
     let incompatible_object_mode = options.object_mode != ObjectMode::Auto
-        && matches!(resolved, InputFormat::Delimited | InputFormat::Ndjson);
+        && (matches!(resolved, InputFormat::Delimited | InputFormat::Ndjson)
+            || is_sqlite_format(resolved));
     let mut effective_options = options.clone();
     let warning =
         if incompatible_object_mode && options.object_mode_origin == ObjectModeOrigin::SavedView {
@@ -601,6 +599,47 @@ mod tests {
         assert!(error
             .to_string()
             .contains("options cannot be used with SQLite input"));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn saved_object_mode_is_ignored_for_sqlite_but_cli_mode_is_rejected() {
+        let file = tempfile::NamedTempFile::new().expect("SQLite fixture");
+        let connection = rusqlite::Connection::open(file.path()).expect("SQLite connection");
+        connection
+            .execute_batch(
+                "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT);
+                 INSERT INTO users VALUES (1, 'Ada');",
+            )
+            .expect("SQLite fixture data");
+        drop(connection);
+        let saved_options = OpenOptions {
+            object_mode: ObjectMode::Entries,
+            object_mode_origin: ObjectModeOrigin::SavedView,
+            table: Some("users".to_owned()),
+            ..OpenOptions::default()
+        };
+
+        let table = open_source(InputSource::Path(file.path().to_path_buf()), &saved_options)
+            .expect("saved mode ignored")
+            .into_implicit_table()
+            .expect("SQLite table");
+        assert!(table
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("object_mode") && warning.contains("ignored")));
+
+        let error = open_source(
+            InputSource::Path(file.path().to_path_buf()),
+            &OpenOptions {
+                object_mode_origin: ObjectModeOrigin::Cli,
+                ..saved_options
+            },
+        )
+        .err()
+        .expect("CLI mode rejected");
+        assert!(error.to_string().contains("object mode"));
+        assert!(error.to_string().contains("incompatible with sqlite"));
     }
 
     #[test]
