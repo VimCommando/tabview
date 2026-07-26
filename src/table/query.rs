@@ -260,6 +260,7 @@ struct SourceQueryJob {
 #[derive(Default)]
 struct SourceQueryWorkerState {
     pending: Option<SourceQueryJob>,
+    latest_requested: u64,
     shutdown: bool,
 }
 
@@ -315,6 +316,7 @@ impl SourceQueryCoordinator {
         let mut state = state
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.latest_requested = revision;
         state.pending = Some(SourceQueryJob { revision, task });
         wake.notify_one();
         revision
@@ -394,6 +396,17 @@ fn source_query_worker(
             }
             state.pending.take().expect("pending source query job")
         };
+        std::thread::yield_now();
+        let is_latest = {
+            let (state, _) = &*worker;
+            let state = state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            !state.shutdown && job.revision == state.latest_requested
+        };
+        if !is_latest {
+            continue;
+        }
         let result = (job.task)();
         if sender
             .send(SourceQueryJobResult {
