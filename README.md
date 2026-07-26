@@ -353,17 +353,7 @@ Saved views can define sparse per-column state:
 name: cat-shards
 filenames:
   - cat_shards.txt
-source:
-  format: sqlite
-  table: transactions
-  limit: 1000
-  filters:
-    - column: status
-      operator: equal
-      value: completed
-  sort:
-    - column: created_at
-      direction: desc
+source: {}
 view:
   nulls: last
   columns:
