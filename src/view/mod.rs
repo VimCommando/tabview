@@ -567,18 +567,16 @@ impl TableView {
 
     pub fn source_column_name_for_id(&self, id: crate::table::ColumnId) -> Option<String> {
         let definition = self.table_definition.as_ref()?;
-        let column = definition.columns.iter().find(|column| column.id == id)?;
-        match &column.source_identity {
-            crate::table::ColumnSourceIdentity::RelationColumn { name, .. } => Some(name.clone()),
-            _ => definition
-                .canonical_column_key(id.ordinal as usize)
-                .or_else(|| {
-                    self.header
-                        .as_ref()
-                        .and_then(|header| header.get(id.ordinal as usize))
-                        .cloned()
-                }),
-        }
+        let index = definition
+            .columns
+            .iter()
+            .position(|column| column.id == id)?;
+        definition.canonical_column_key(index).or_else(|| {
+            self.header
+                .as_ref()
+                .and_then(|header| header.get(index))
+                .cloned()
+        })
     }
 
     pub fn view_transform_summary(&self) -> String {
@@ -4375,6 +4373,54 @@ mod tests {
             object_mode: None,
             warnings: Vec::new(),
         }
+    }
+
+    #[test]
+    fn source_column_name_for_id_preserves_duplicate_relation_occurrences() {
+        let generation = SourceGeneration::new();
+        let mut view = TableView::classify(
+            rows(&[&["first", "second"], &["1", "2"]]),
+            Viewport::new(10, 4),
+        );
+        view.table_definition = Some(TableDefinition {
+            generation,
+            columns: (0..2)
+                .map(|ordinal| ColumnDefinition {
+                    id: ColumnId {
+                        generation,
+                        ordinal,
+                    },
+                    source_identity: ColumnSourceIdentity::RelationColumn {
+                        relation: "duplicates".to_owned(),
+                        name: "value".to_owned(),
+                        ordinal: ordinal as usize,
+                    },
+                    display_name: "value".to_owned(),
+                    source_declared_type: None,
+                    source_type: LogicalType::Text,
+                    type_origin: TypeOrigin::Declared,
+                })
+                .collect(),
+            schema_state: SchemaState::Complete,
+            relation: RelationMetadata::implicit("duplicates", true),
+        });
+
+        assert_eq!(
+            view.source_column_name_for_id(ColumnId {
+                generation,
+                ordinal: 0
+            })
+            .as_deref(),
+            Some("value#1")
+        );
+        assert_eq!(
+            view.source_column_name_for_id(ColumnId {
+                generation,
+                ordinal: 1
+            })
+            .as_deref(),
+            Some("value#2")
+        );
     }
 
     #[test]

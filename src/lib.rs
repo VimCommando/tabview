@@ -353,7 +353,7 @@ fn run_interactive(
                     ui::render_configuration_popup_with_theme(
                         "Source Query",
                         &app.query_modal_body(),
-                        &["Copy", "Close"],
+                        QUERY_POPUP_ACTIONS,
                         popup_area(area),
                         frame.buffer_mut(),
                         &app.theme,
@@ -468,6 +468,8 @@ struct App {
     #[cfg(feature = "saved-views")]
     view_modal: Option<ViewModal>,
 }
+
+const QUERY_POPUP_ACTIONS: &[&str] = &["Copy (y)", "Close (Enter/Esc)"];
 
 #[derive(Debug, Clone)]
 struct SourceConfigModal {
@@ -938,37 +940,44 @@ impl App {
             }
             KeyCode::Enter => {
                 let query = modal.draft.clone();
-                if self.view.request_source_query(query.clone()) {
-                    self.open_options.limit = Some(query.limit);
-                    self.open_options.source_filters = query
-                        .filters
-                        .iter()
-                        .filter_map(|filter| {
-                            let crate::table::SourceFilterScope::Column(column) = filter.scope
-                            else {
-                                return Some(ingest::SourceFilterRequest {
-                                    column: "*".to_owned(),
-                                    operator: filter.operator,
-                                    operand: filter.operand.clone(),
-                                });
-                            };
-                            Some(ingest::SourceFilterRequest {
-                                column: self.view.source_column_name_for_id(column)?,
+                let source_filters = query
+                    .filters
+                    .iter()
+                    .map(|filter| {
+                        let crate::table::SourceFilterScope::Column(column) = filter.scope else {
+                            return Some(ingest::SourceFilterRequest {
+                                column: "*".to_owned(),
                                 operator: filter.operator,
                                 operand: filter.operand.clone(),
-                            })
+                            });
+                        };
+                        Some(ingest::SourceFilterRequest {
+                            column: self.view.source_column_name_for_id(column)?,
+                            operator: filter.operator,
+                            operand: filter.operand.clone(),
                         })
-                        .collect();
-                    self.open_options.source_sort = query
-                        .order_by
-                        .iter()
-                        .filter_map(|sort| {
-                            Some(ingest::SourceSortRequest {
-                                column: self.view.source_column_name_for_id(sort.column)?,
-                                direction: sort.direction,
-                            })
+                    })
+                    .collect::<Option<Vec<_>>>();
+                let source_sort = query
+                    .order_by
+                    .iter()
+                    .map(|sort| {
+                        Some(ingest::SourceSortRequest {
+                            column: self.view.source_column_name_for_id(sort.column)?,
+                            direction: sort.direction,
                         })
-                        .collect();
+                    })
+                    .collect::<Option<Vec<_>>>();
+                let (Some(source_filters), Some(source_sort)) = (source_filters, source_sort)
+                else {
+                    modal.error = Some("source query references an unavailable column".to_owned());
+                    self.source_modal = Some(modal);
+                    return;
+                };
+                if self.view.request_source_query(query.clone()) {
+                    self.open_options.limit = Some(query.limit);
+                    self.open_options.source_filters = source_filters;
+                    self.open_options.source_sort = source_sort;
                     self.popup = None;
                     return;
                 }
@@ -1377,9 +1386,7 @@ fn next_source_operator(
 }
 
 fn parse_source_operand(value: &str) -> crate::table::SourceOperand {
-    if value.eq_ignore_ascii_case("null") {
-        crate::table::SourceOperand::Null
-    } else if value.eq_ignore_ascii_case("true") {
+    if value.eq_ignore_ascii_case("true") {
         crate::table::SourceOperand::Boolean(true)
     } else if value.eq_ignore_ascii_case("false") {
         crate::table::SourceOperand::Boolean(false)
@@ -2751,6 +2758,54 @@ mod tests {
         assert_eq!(app.popup, None);
         assert_eq!(app.view.row_count(), 2);
         assert!(!app.view.column_has_filter(0));
+    }
+
+    #[test]
+    fn source_filter_null_text_requires_an_explicit_null_operator() {
+        assert_eq!(
+            parse_source_operand("null"),
+            crate::table::SourceOperand::Text("null".to_owned())
+        );
+        assert_eq!(
+            parse_source_operand("NULL"),
+            crate::table::SourceOperand::Text("NULL".to_owned())
+        );
+    }
+
+    #[test]
+    fn query_popup_actions_document_their_keyboard_shortcuts() {
+        assert_eq!(QUERY_POPUP_ACTIONS, ["Copy (y)", "Close (Enter/Esc)"]);
+    }
+
+    #[test]
+    fn source_config_surfaces_unresolvable_columns_without_persisting_them() {
+        let file = tempfile::NamedTempFile::new().expect("csv fixture");
+        std::fs::write(file.path(), "name\nalpha\n").expect("csv");
+        let mut app = app_for_source(file.path().to_path_buf(), ingest::OpenOptions::default());
+        app.open_source_config_modal();
+        app.source_modal
+            .as_mut()
+            .expect("source modal")
+            .draft
+            .filters
+            .push(crate::table::SourceFilter {
+                scope: crate::table::SourceFilterScope::Column(crate::table::ColumnId {
+                    generation: crate::table::SourceGeneration::new(),
+                    ordinal: 0,
+                }),
+                operator: crate::table::SourceFilterOperator::Equal,
+                operand: Some(crate::table::SourceOperand::Text("alpha".to_owned())),
+            });
+
+        app.handle_key(key(KeyCode::Enter)).expect("apply draft");
+
+        assert_eq!(app.popup, Some(ui::Popup::SourceConfig));
+        assert!(app
+            .source_modal
+            .as_ref()
+            .and_then(|modal| modal.error.as_deref())
+            .is_some_and(|error| error.contains("unavailable column")));
+        assert!(app.open_options.source_filters.is_empty());
     }
 
     #[cfg(feature = "sqlite")]
