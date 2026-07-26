@@ -1,6 +1,6 @@
 use std::fmt;
 use std::num::NonZeroUsize;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc, Condvar, Mutex};
 
 use super::{CellValue, ColumnId, SourceGeneration, SourceQueryTask, TableStore};
 
@@ -252,11 +252,23 @@ struct SourceQueryJobResult {
     result: anyhow::Result<Box<dyn TableStore>>,
 }
 
+struct SourceQueryJob {
+    revision: u64,
+    task: SourceQueryTask,
+}
+
+#[derive(Default)]
+struct SourceQueryWorkerState {
+    pending: Option<SourceQueryJob>,
+    shutdown: bool,
+}
+
 pub struct SourceQueryCoordinator {
     next_revision: u64,
     latest_requested: u64,
     progress: SourceQueryProgress,
-    sender: mpsc::Sender<SourceQueryJobResult>,
+    worker: Arc<(Mutex<SourceQueryWorkerState>, Condvar)>,
+    worker_handle: Option<std::thread::JoinHandle<()>>,
     receiver: mpsc::Receiver<SourceQueryJobResult>,
 }
 
@@ -273,11 +285,21 @@ impl fmt::Debug for SourceQueryCoordinator {
 impl Default for SourceQueryCoordinator {
     fn default() -> Self {
         let (sender, receiver) = mpsc::channel();
+        let worker = Arc::new((
+            Mutex::new(SourceQueryWorkerState::default()),
+            Condvar::new(),
+        ));
+        let worker_state = worker.clone();
+        let worker_handle = std::thread::Builder::new()
+            .name("tabview-source-query".to_owned())
+            .spawn(move || source_query_worker(worker_state, sender))
+            .expect("source query worker thread");
         Self {
             next_revision: 1,
             latest_requested: 0,
             progress: SourceQueryProgress::Idle,
-            sender,
+            worker,
+            worker_handle: Some(worker_handle),
             receiver,
         }
     }
@@ -289,11 +311,12 @@ impl SourceQueryCoordinator {
         self.next_revision = self.next_revision.saturating_add(1);
         self.latest_requested = revision;
         self.progress = SourceQueryProgress::Pending { revision };
-        let sender = self.sender.clone();
-        std::thread::spawn(move || {
-            let result = task();
-            let _ = sender.send(SourceQueryJobResult { revision, result });
-        });
+        let (state, wake) = &*self.worker;
+        let mut state = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.pending = Some(SourceQueryJob { revision, task });
+        wake.notify_one();
         revision
     }
 
@@ -332,6 +355,54 @@ impl SourceQueryCoordinator {
                     error,
                 })
             }
+        }
+    }
+}
+
+impl Drop for SourceQueryCoordinator {
+    fn drop(&mut self) {
+        let (state, wake) = &*self.worker;
+        let mut state = state
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        state.shutdown = true;
+        state.pending = None;
+        wake.notify_one();
+        // Do not block application shutdown on an active file scan. The one
+        // worker exits as soon as its current task returns.
+        self.worker_handle.take();
+    }
+}
+
+fn source_query_worker(
+    worker: Arc<(Mutex<SourceQueryWorkerState>, Condvar)>,
+    sender: mpsc::Sender<SourceQueryJobResult>,
+) {
+    loop {
+        let job = {
+            let (state, wake) = &*worker;
+            let mut state = state
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            while state.pending.is_none() && !state.shutdown {
+                state = wake
+                    .wait(state)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+            }
+            if state.shutdown {
+                return;
+            }
+            state.pending.take().expect("pending source query job")
+        };
+        let result = (job.task)();
+        if sender
+            .send(SourceQueryJobResult {
+                revision: job.revision,
+                result,
+            })
+            .is_err()
+        {
+            return;
         }
     }
 }
@@ -443,11 +514,25 @@ mod tests {
         let generation = SourceGeneration::new();
         let mut coordinator = SourceQueryCoordinator::default();
         let (release, wait) = std::sync::mpsc::channel();
+        let (started, first_started) = std::sync::mpsc::channel();
+        let superseded_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         coordinator.request(Box::new(move || {
+            started.send(()).unwrap();
             wait.recv().unwrap();
             Ok(Box::new(super::super::InMemoryTable::from_text_rows(
                 generation,
                 vec![vec!["stale".to_owned()]],
+            )))
+        }));
+        first_started
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("first source query started");
+        let ran = superseded_ran.clone();
+        coordinator.request(Box::new(move || {
+            ran.store(true, std::sync::atomic::Ordering::SeqCst);
+            Ok(Box::new(super::super::InMemoryTable::from_text_rows(
+                generation,
+                vec![vec!["superseded".to_owned()]],
             )))
         }));
         let latest = coordinator.request(Box::new(move || {
@@ -456,20 +541,23 @@ mod tests {
                 vec![vec!["latest".to_owned()]],
             )))
         }));
+        release.send(()).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let event = loop {
             if let Some(event) = coordinator.poll() {
                 break event;
             }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "source query worker timed out"
+            );
             std::thread::yield_now();
         };
         assert!(matches!(
             event,
             SourceQueryCoordinatorEvent::Ready { revision, .. } if revision == latest
         ));
-        release.send(()).unwrap();
-        while coordinator.receiver.try_recv().is_err() {
-            std::thread::yield_now();
-        }
+        assert!(!superseded_ran.load(std::sync::atomic::Ordering::SeqCst));
         assert!(coordinator.poll().is_none());
     }
 }

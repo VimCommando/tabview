@@ -940,6 +940,10 @@ impl App {
             }
             KeyCode::Enter => {
                 let query = modal.draft.clone();
+                if self.view.active_source_query() == Some(&query) {
+                    self.popup = None;
+                    return;
+                }
                 let source_filters = query
                     .filters
                     .iter()
@@ -2888,6 +2892,27 @@ mod tests {
             .as_ref()
             .and_then(|modal| modal.error.as_deref())
             .is_some_and(|error| error.contains("unavailable")));
+    }
+
+    #[test]
+    fn applying_an_unchanged_source_draft_is_a_no_op() {
+        let file = tempfile::NamedTempFile::new().expect("csv fixture");
+        std::fs::write(file.path(), "name,value\nalpha,1\nbeta,2\n").expect("csv");
+        let mut app = app_for_source(file.path().to_path_buf(), ingest::OpenOptions::default());
+        let active = app
+            .view
+            .active_source_query()
+            .expect("active source query")
+            .clone();
+
+        app.open_source_config_modal();
+        app.handle_key(key(KeyCode::Enter))
+            .expect("apply unchanged draft");
+
+        assert_eq!(app.popup, None);
+        assert!(!app.view.source_query_is_pending());
+        assert_eq!(app.view.active_source_query(), Some(&active));
+        assert_eq!(app.open_options.limit, None);
     }
 
     #[test]
