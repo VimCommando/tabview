@@ -8,6 +8,7 @@ use ratatui::style::Style;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use crate::command::KeyBinding;
+use crate::ingest::{RelationAvailability, RelationCatalogEntry};
 use crate::ops::filter::{FilterKind, FilterMode};
 use crate::ops::search::CaseInsensitiveQuery;
 use crate::theme::ResolvedTheme;
@@ -27,6 +28,9 @@ pub enum Popup {
     Search,
     Filter,
     ColumnInfo,
+    SourceConfig,
+    ViewConfig,
+    Query,
     #[cfg(feature = "saved-views")]
     SavedView,
 }
@@ -625,6 +629,55 @@ pub fn render_info_popup_with_theme(
     render_popup_with_actions("Info", info, &["Close"], area, buffer, theme);
 }
 
+pub fn render_configuration_popup_with_theme(
+    title: &str,
+    body: &str,
+    actions: &[&str],
+    area: Rect,
+    buffer: &mut Buffer,
+    theme: &ResolvedTheme,
+) {
+    render_popup_with_actions(title, body, actions, area, buffer, theme);
+}
+
+pub fn render_relation_picker_with_theme(
+    relations: &[RelationCatalogEntry],
+    selected: usize,
+    area: Rect,
+    buffer: &mut Buffer,
+    theme: &ResolvedTheme,
+) {
+    render_popup_with_actions("Select table", "", &["Open", "Cancel"], area, buffer, theme);
+    if area.width < 4 || area.height < 4 {
+        return;
+    }
+    let width = area.width.saturating_sub(4) as usize;
+    let height = area.height.saturating_sub(4) as usize;
+    for (offset, relation) in relations.iter().take(height).enumerate() {
+        let (suffix, style) = match &relation.availability {
+            RelationAvailability::Selectable if offset == selected => {
+                ("".to_owned(), theme.style("popup.active"))
+            }
+            RelationAvailability::Selectable => ("".to_owned(), theme.style("popup.body")),
+            RelationAvailability::Unavailable { reason } => {
+                (format!(" — {reason}"), theme.style("popup.disabled"))
+            }
+        };
+        let prefix = if offset == selected && relation.is_selectable() {
+            "> "
+        } else {
+            "  "
+        };
+        buffer.set_stringn(
+            area.x + 2,
+            area.y + 2 + offset as u16,
+            format!("{prefix}{}{}", relation.metadata.display_name, suffix),
+            width,
+            style,
+        );
+    }
+}
+
 #[cfg(feature = "saved-views")]
 pub fn render_saved_view_popup(
     filename: &str,
@@ -1153,9 +1206,11 @@ mod tests {
             r#"
 name: flags
 filenames: [flags.csv]
-columns:
-  Flag:
-    type: boolean
+source: {}
+view:
+  columns:
+    Flag:
+      type: boolean
 "#,
         )
         .expect("parse");
@@ -1554,9 +1609,11 @@ columns:
             r#"
 name: late
 filenames: [late.json]
-columns:
-  /late:
-    label: Later
+source: {}
+view:
+  columns:
+    /late:
+      label: Later
 "#,
         )
         .expect("saved");
@@ -1654,11 +1711,13 @@ columns:
             r#"
 name: colors
 filenames: [data.csv]
-columns:
-  Status:
-    colors:
-      - match:
-          active: green
+source: {}
+view:
+  columns:
+    Status:
+      colors:
+        - match:
+            active: green
 "#,
         )
         .expect("parse");
@@ -1692,11 +1751,13 @@ columns:
             r##"
 name: counts
 filenames: [counts.csv]
-columns:
-  Count:
-    type: integer
-    format: mask
-    mask: "#,##0"
+source: {}
+view:
+  columns:
+    Count:
+      type: integer
+      format: mask
+      mask: "#,##0"
 "##,
         )
         .expect("parse");
@@ -1788,6 +1849,44 @@ columns:
         assert!(text.contains("Natural sort"));
         assert!(text.contains("#/@"));
         assert!(text.contains("Numeric sort"));
+    }
+
+    #[test]
+    fn relation_picker_distinguishes_selectable_and_disabled_entries() {
+        let relations = vec![
+            RelationCatalogEntry {
+                metadata: crate::table::RelationMetadata {
+                    name: "users".to_owned(),
+                    display_name: "users".to_owned(),
+                    header_visible: true,
+                },
+                kind: crate::ingest::RelationKind::Table,
+                availability: RelationAvailability::Selectable,
+            },
+            RelationCatalogEntry {
+                metadata: crate::table::RelationMetadata {
+                    name: "search".to_owned(),
+                    display_name: "search".to_owned(),
+                    header_visible: true,
+                },
+                kind: crate::ingest::RelationKind::VirtualTable,
+                availability: RelationAvailability::Unavailable {
+                    reason: "virtual tables are unsupported".to_owned(),
+                },
+            },
+        ];
+        let area = Rect::new(0, 0, 64, 10);
+        let mut buffer = Buffer::empty(area);
+        let theme = default_theme();
+
+        render_relation_picker_with_theme(&relations, 0, area, &mut buffer, &theme);
+
+        let text = buffer_text(&buffer);
+        assert!(text.contains("Select table"));
+        assert!(text.contains("> users"));
+        assert!(text.contains("search — virtual tables are unsupported"));
+        assert_eq!(buffer[(2, 3)].style().fg, theme.style("popup.disabled").fg);
+        assert_eq!(buffer[(2, 3)].style().bg, theme.style("popup.disabled").bg);
     }
 
     #[test]

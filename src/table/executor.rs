@@ -3,14 +3,15 @@ use std::cmp::Ordering;
 use regex::Regex;
 
 use super::{
-    CellValue, ColumnId, FilterMode, FilterPredicate, InMemoryTable, NullPlacement, QueryExecution,
-    Row, SortDirection, SortMode, TableDefinition, TableQuery, TableStore, ValueDomain,
+    CellValue, ColumnId, FilterMode, InMemoryTable, NullPlacement, Row, SortDirection, SourceQuery,
+    SourceQueryValidationError, TableDefinition, TableStore, ValueDomain, ViewFilterPredicate,
+    ViewSortMode, ViewTransform,
 };
 
 static NULL_CELL: CellValue = CellValue::Null;
 
 #[derive(Debug, thiserror::Error, PartialEq, Eq)]
-pub enum QueryValidationError {
+pub enum ViewTransformValidationError {
     #[error("query belongs to a different source generation")]
     StaleGeneration,
     #[error("query references an unknown or stale column")]
@@ -21,19 +22,50 @@ pub enum QueryValidationError {
     InvalidNumericOperand,
 }
 
-pub fn validate_query(
+pub fn validate_source_query(
     definition: &TableDefinition,
-    query: &TableQuery,
-) -> Result<(), QueryValidationError> {
+    query: &SourceQuery,
+) -> Result<(), SourceQueryValidationError> {
+    if query.generation != definition.generation {
+        return Err(SourceQueryValidationError::StaleGeneration);
+    }
+    for column in query
+        .filters
+        .iter()
+        .filter_map(|filter| match filter.scope {
+            super::SourceFilterScope::WholeRecord => None,
+            super::SourceFilterScope::Column(column) => Some(column),
+        })
+        .chain(query.order_by.iter().map(|sort| sort.column))
+    {
+        if column.generation != definition.generation
+            || !definition
+                .columns
+                .iter()
+                .any(|candidate| candidate.id == column)
+        {
+            return Err(SourceQueryValidationError::UnknownColumn);
+        }
+    }
+    for filter in &query.filters {
+        filter.validate()?;
+    }
+    Ok(())
+}
+
+pub fn validate_view_transform(
+    definition: &TableDefinition,
+    query: &ViewTransform,
+) -> Result<(), ViewTransformValidationError> {
     prepare_query(definition, query).map(|_| ())
 }
 
 fn prepare_query(
     definition: &TableDefinition,
-    query: &TableQuery,
-) -> Result<Vec<Option<Regex>>, QueryValidationError> {
+    query: &ViewTransform,
+) -> Result<Vec<Option<Regex>>, ViewTransformValidationError> {
     if query.generation != definition.generation {
-        return Err(QueryValidationError::StaleGeneration);
+        return Err(ViewTransformValidationError::StaleGeneration);
     }
     for column in query
         .filters
@@ -47,98 +79,88 @@ fn prepare_query(
                 .iter()
                 .any(|candidate| candidate.id == column)
         {
-            return Err(QueryValidationError::UnknownColumn);
+            return Err(ViewTransformValidationError::UnknownColumn);
         }
     }
     query
         .filters
         .iter()
         .map(|filter| match &filter.predicate {
-            FilterPredicate::Regex { pattern, .. } => Regex::new(pattern)
+            ViewFilterPredicate::Regex { pattern, .. } => Regex::new(pattern)
                 .map(Some)
-                .map_err(|error| QueryValidationError::InvalidRegex(error.to_string())),
-            FilterPredicate::Numeric { operand, .. } if !operand.is_finite() => {
-                Err(QueryValidationError::InvalidNumericOperand)
+                .map_err(|error| ViewTransformValidationError::InvalidRegex(error.to_string())),
+            ViewFilterPredicate::Numeric { operand, .. } if !operand.is_finite() => {
+                Err(ViewTransformValidationError::InvalidNumericOperand)
             }
             _ => Ok(None),
         })
         .collect()
 }
 
-pub fn execute_query(
+pub fn execute_view_transform(
     store: &mut dyn TableStore,
     definition: &TableDefinition,
-    query: &TableQuery,
+    transform: &ViewTransform,
     render: &dyn Fn(ColumnId, &CellValue) -> String,
 ) -> anyhow::Result<Box<dyn TableStore>> {
-    execute_query_with_profiles(
+    execute_view_transform_with_profiles(
         store,
         definition,
-        query,
+        transform,
         &|_| crate::ops::sort::NumericColumnProfile::default(),
         render,
     )
 }
 
-pub(crate) fn execute_query_with_profiles(
+pub(crate) fn execute_view_transform_with_profiles(
     store: &mut dyn TableStore,
     definition: &TableDefinition,
-    query: &TableQuery,
+    transform: &ViewTransform,
     numeric_profile: &dyn Fn(ColumnId) -> crate::ops::sort::NumericColumnProfile,
     render: &dyn Fn(ColumnId, &CellValue) -> String,
 ) -> anyhow::Result<Box<dyn TableStore>> {
     if store.generation() != definition.generation {
         anyhow::bail!("table store belongs to a different source generation");
     }
-    let prepared_regexes = prepare_query(definition, query)?;
-    match store.try_execute_query(query)? {
-        QueryExecution::Executed(result) => {
-            if result.generation() != definition.generation {
-                anyhow::bail!("query result belongs to a different source generation");
-            }
-            Ok(result)
-        }
-        QueryExecution::Unsupported => {
-            let base = store.materialize()?;
-            Ok(Box::new(execute_prepared_local_query(
-                &base,
-                definition,
-                query,
-                &prepared_regexes,
-                numeric_profile,
-                render,
-            )?))
-        }
-    }
+    let prepared_regexes = prepare_query(definition, transform)?;
+    let base = store.materialize()?;
+    Ok(Box::new(execute_prepared_local_query(
+        &base,
+        definition,
+        transform,
+        &prepared_regexes,
+        numeric_profile,
+        render,
+    )?))
 }
 
-pub fn execute_local_query(
+pub fn execute_local_view_transform(
     base: &InMemoryTable,
     definition: &TableDefinition,
-    query: &TableQuery,
+    transform: &ViewTransform,
     render: &dyn Fn(ColumnId, &CellValue) -> String,
 ) -> anyhow::Result<InMemoryTable> {
-    execute_local_query_with_profiles(
+    execute_local_view_transform_with_profiles(
         base,
         definition,
-        query,
+        transform,
         &|_| crate::ops::sort::NumericColumnProfile::default(),
         render,
     )
 }
 
-pub(crate) fn execute_local_query_with_profiles(
+pub(crate) fn execute_local_view_transform_with_profiles(
     base: &InMemoryTable,
     definition: &TableDefinition,
-    query: &TableQuery,
+    transform: &ViewTransform,
     numeric_profile: &dyn Fn(ColumnId) -> crate::ops::sort::NumericColumnProfile,
     render: &dyn Fn(ColumnId, &CellValue) -> String,
 ) -> anyhow::Result<InMemoryTable> {
-    let prepared_regexes = prepare_query(definition, query)?;
+    let prepared_regexes = prepare_query(definition, transform)?;
     execute_prepared_local_query(
         base,
         definition,
-        query,
+        transform,
         &prepared_regexes,
         numeric_profile,
         render,
@@ -148,7 +170,7 @@ pub(crate) fn execute_local_query_with_profiles(
 fn execute_prepared_local_query(
     base: &InMemoryTable,
     definition: &TableDefinition,
-    query: &TableQuery,
+    query: &ViewTransform,
     prepared_regexes: &[Option<Regex>],
     numeric_profile: &dyn Fn(ColumnId) -> crate::ops::sort::NumericColumnProfile,
     render: &dyn Fn(ColumnId, &CellValue) -> String,
@@ -208,7 +230,7 @@ fn cell(row: &Row, column: ColumnId) -> &CellValue {
 }
 
 fn predicate_matches(
-    predicate: &FilterPredicate,
+    predicate: &ViewFilterPredicate,
     prepared_regex: Option<&Regex>,
     numeric_profile: crate::ops::sort::NumericColumnProfile,
     column: ColumnId,
@@ -216,18 +238,18 @@ fn predicate_matches(
     render: &dyn Fn(ColumnId, &CellValue) -> String,
 ) -> bool {
     match predicate {
-        FilterPredicate::Text {
+        ViewFilterPredicate::Text {
             value: needle,
             domain,
         } => domain_values(*domain, column, value, render)
             .iter()
             .any(|candidate| candidate.contains(needle)),
-        FilterPredicate::Regex { domain, .. } => prepared_regex.is_some_and(|regex| {
+        ViewFilterPredicate::Regex { domain, .. } => prepared_regex.is_some_and(|regex| {
             domain_values(*domain, column, value, render)
                 .iter()
                 .any(|candidate| regex.is_match(candidate))
         }),
-        FilterPredicate::Numeric { operator, operand } => numeric_value(value, numeric_profile)
+        ViewFilterPredicate::Numeric { operator, operand } => numeric_value(value, numeric_profile)
             .is_some_and(|value| {
                 use super::NumericOperator;
                 match operator {
@@ -277,7 +299,7 @@ fn numeric_value(
 fn compare_typed_cells(
     left: &CellValue,
     right: &CellValue,
-    mode: SortMode,
+    mode: ViewSortMode,
     direction: SortDirection,
     nulls: NullPlacement,
     numeric_profile: crate::ops::sort::NumericColumnProfile,
@@ -301,7 +323,7 @@ fn compare_typed_cells(
         return ordering;
     }
 
-    let ordering = if mode == SortMode::Numeric {
+    let ordering = if mode == ViewSortMode::Numeric {
         match (left, right) {
             (CellValue::Integer(left), CellValue::Integer(right)) => left.cmp(right),
             _ => match (
@@ -328,27 +350,27 @@ fn compare_typed_cells(
     }
 }
 
-fn operation_sort_mode(mode: SortMode) -> crate::ops::sort::SortMode {
+fn operation_sort_mode(mode: ViewSortMode) -> crate::ops::sort::SortMode {
     match mode {
-        SortMode::Lexical => crate::ops::sort::SortMode::Lexical,
-        SortMode::Natural => crate::ops::sort::SortMode::Natural,
-        SortMode::Numeric => crate::ops::sort::SortMode::Numeric,
+        ViewSortMode::Lexical => crate::ops::sort::SortMode::Lexical,
+        ViewSortMode::Natural => crate::ops::sort::SortMode::Natural,
+        ViewSortMode::Numeric => crate::ops::sort::SortMode::Numeric,
         #[cfg(feature = "saved-views")]
-        SortMode::Date => crate::ops::sort::SortMode::Date,
+        ViewSortMode::Date => crate::ops::sort::SortMode::Date,
         #[cfg(not(feature = "saved-views"))]
-        SortMode::Date => crate::ops::sort::SortMode::Lexical,
+        ViewSortMode::Date => crate::ops::sort::SortMode::Lexical,
         #[cfg(feature = "saved-views")]
-        SortMode::SemanticVersion => crate::ops::sort::SortMode::SemVer,
+        ViewSortMode::SemanticVersion => crate::ops::sort::SortMode::SemVer,
         #[cfg(not(feature = "saved-views"))]
-        SortMode::SemanticVersion => crate::ops::sort::SortMode::Natural,
+        ViewSortMode::SemanticVersion => crate::ops::sort::SortMode::Natural,
         #[cfg(feature = "saved-views")]
-        SortMode::Ip => crate::ops::sort::SortMode::Ip,
+        ViewSortMode::Ip => crate::ops::sort::SortMode::Ip,
         #[cfg(not(feature = "saved-views"))]
-        SortMode::Ip => crate::ops::sort::SortMode::Natural,
+        ViewSortMode::Ip => crate::ops::sort::SortMode::Natural,
         #[cfg(feature = "saved-views")]
-        SortMode::Boolean => crate::ops::sort::SortMode::Boolean,
+        ViewSortMode::Boolean => crate::ops::sort::SortMode::Boolean,
         #[cfg(not(feature = "saved-views"))]
-        SortMode::Boolean => crate::ops::sort::SortMode::Lexical,
+        ViewSortMode::Boolean => crate::ops::sort::SortMode::Lexical,
     }
 }
 
@@ -356,8 +378,8 @@ fn operation_sort_mode(mode: SortMode) -> crate::ops::sort::SortMode {
 mod tests {
     use super::*;
     use crate::table::{
-        ColumnDefinition, ColumnSourceIdentity, FilterSpec, LogicalType, NumericOperator, RowId,
-        SchemaState, SortSpec, SourceGeneration, TypeOrigin,
+        ColumnDefinition, ColumnSourceIdentity, LogicalType, NumericOperator, RowId, SchemaState,
+        SourceGeneration, TypeOrigin, ViewFilter, ViewSort,
     };
 
     fn fixture() -> (TableDefinition, InMemoryTable) {
@@ -369,6 +391,7 @@ mod tests {
             },
             source_identity: ColumnSourceIdentity::Positional(ordinal as usize),
             display_name: format!("c{ordinal}"),
+            source_declared_type: None,
             source_type: LogicalType::Mixed,
             type_origin: TypeOrigin::Inferred,
         };
@@ -420,17 +443,17 @@ mod tests {
     fn typed_numeric_sort_keeps_nulls_last_in_both_directions_and_stable_ties() {
         let (definition, base) = fixture();
         for direction in [SortDirection::Ascending, SortDirection::Descending] {
-            let query = TableQuery {
+            let query = ViewTransform {
                 generation: definition.generation,
                 filters: Vec::new(),
-                order_by: vec![SortSpec {
+                order_by: vec![ViewSort {
                     column: definition.columns[0].id,
-                    mode: SortMode::Numeric,
+                    mode: ViewSortMode::Numeric,
                     direction,
                     nulls: NullPlacement::Last,
                 }],
             };
-            let result = execute_local_query(&base, &definition, &query, &|_, value| {
+            let result = execute_local_view_transform(&base, &definition, &query, &|_, value| {
                 value.display().into_owned()
             })
             .unwrap();
@@ -471,18 +494,18 @@ mod tests {
             ],
         )
         .unwrap();
-        let query = TableQuery {
+        let query = ViewTransform {
             generation: definition.generation,
             filters: Vec::new(),
-            order_by: vec![SortSpec {
+            order_by: vec![ViewSort {
                 column: definition.columns[0].id,
-                mode: SortMode::Numeric,
+                mode: ViewSortMode::Numeric,
                 direction: SortDirection::Ascending,
                 nulls: NullPlacement::Last,
             }],
         };
 
-        let result = execute_local_query(&base, &definition, &query, &|_, value| {
+        let result = execute_local_view_transform(&base, &definition, &query, &|_, value| {
             value.display().into_owned()
         })
         .unwrap();
@@ -500,19 +523,19 @@ mod tests {
     #[test]
     fn filter_out_is_exact_negation_and_domains_are_explicit() {
         let (definition, base) = fixture();
-        let query = TableQuery {
+        let query = ViewTransform {
             generation: definition.generation,
-            filters: vec![FilterSpec {
+            filters: vec![ViewFilter {
                 column: definition.columns[1].id,
                 mode: FilterMode::Out,
-                predicate: FilterPredicate::Regex {
+                predicate: ViewFilterPredicate::Regex {
                     pattern: "^[ab]$".to_owned(),
                     domain: ValueDomain::Raw,
                 },
             }],
             order_by: Vec::new(),
         };
-        let result = execute_local_query(&base, &definition, &query, &|_, value| {
+        let result = execute_local_view_transform(&base, &definition, &query, &|_, value| {
             value.display().into_owned()
         })
         .unwrap();
@@ -551,20 +574,25 @@ mod tests {
         .unwrap();
         let profile = |_: ColumnId| crate::ops::sort::NumericColumnProfile::time();
         let render = |_: ColumnId, value: &CellValue| value.display().into_owned();
-        let sort_query = TableQuery {
+        let sort_query = ViewTransform {
             generation: definition.generation,
             filters: Vec::new(),
-            order_by: vec![SortSpec {
+            order_by: vec![ViewSort {
                 column: definition.columns[0].id,
-                mode: SortMode::Numeric,
+                mode: ViewSortMode::Numeric,
                 direction: SortDirection::Ascending,
                 nulls: NullPlacement::Last,
             }],
         };
 
-        let sorted =
-            execute_local_query_with_profiles(&base, &definition, &sort_query, &profile, &render)
-                .unwrap();
+        let sorted = execute_local_view_transform_with_profiles(
+            &base,
+            &definition,
+            &sort_query,
+            &profile,
+            &render,
+        )
+        .unwrap();
         assert_eq!(
             sorted
                 .rows()
@@ -574,21 +602,26 @@ mod tests {
             [1, 0]
         );
 
-        let filter_query = TableQuery {
+        let filter_query = ViewTransform {
             generation: definition.generation,
-            filters: vec![FilterSpec {
+            filters: vec![ViewFilter {
                 column: definition.columns[0].id,
                 mode: FilterMode::In,
-                predicate: FilterPredicate::Numeric {
+                predicate: ViewFilterPredicate::Numeric {
                     operator: NumericOperator::LessThan,
                     operand: 60.0,
                 },
             }],
             order_by: Vec::new(),
         };
-        let filtered =
-            execute_local_query_with_profiles(&base, &definition, &filter_query, &profile, &render)
-                .unwrap();
+        let filtered = execute_local_view_transform_with_profiles(
+            &base,
+            &definition,
+            &filter_query,
+            &profile,
+            &render,
+        )
+        .unwrap();
         assert_eq!(
             filtered
                 .rows()
@@ -603,27 +636,27 @@ mod tests {
     fn validates_before_store_execution() {
         let (definition, mut base) = fixture();
         let stale = SourceGeneration::new();
-        let query = TableQuery {
+        let query = ViewTransform {
             generation: stale,
-            ..TableQuery::default()
+            ..ViewTransform::default()
         };
         assert_eq!(
-            validate_query(&definition, &query),
-            Err(QueryValidationError::StaleGeneration)
+            validate_view_transform(&definition, &query),
+            Err(ViewTransformValidationError::StaleGeneration)
         );
         assert!(
-            execute_query(&mut base, &definition, &query, &|_, value| value
+            execute_view_transform(&mut base, &definition, &query, &|_, value| value
                 .display()
                 .into_owned())
             .is_err()
         );
 
-        let query = TableQuery {
+        let query = ViewTransform {
             generation: definition.generation,
-            filters: vec![FilterSpec {
+            filters: vec![ViewFilter {
                 column: definition.columns[0].id,
                 mode: FilterMode::In,
-                predicate: FilterPredicate::Numeric {
+                predicate: ViewFilterPredicate::Numeric {
                     operator: NumericOperator::Equal,
                     operand: f64::NAN,
                 },
@@ -631,21 +664,22 @@ mod tests {
             order_by: Vec::new(),
         };
         assert_eq!(
-            validate_query(&definition, &query),
-            Err(QueryValidationError::InvalidNumericOperand)
+            validate_view_transform(&definition, &query),
+            Err(ViewTransformValidationError::InvalidNumericOperand)
         );
 
         let mut mismatched_store =
             InMemoryTable::from_text_rows(SourceGeneration::new(), vec![vec!["1".to_owned()]]);
-        let query = TableQuery {
+        let query = ViewTransform {
             generation: definition.generation,
-            ..TableQuery::default()
+            ..ViewTransform::default()
         };
-        let error = execute_query(&mut mismatched_store, &definition, &query, &|_, value| {
-            value.display().into_owned()
-        })
-        .err()
-        .expect("mismatched store generation");
+        let error =
+            execute_view_transform(&mut mismatched_store, &definition, &query, &|_, value| {
+                value.display().into_owned()
+            })
+            .err()
+            .expect("mismatched store generation");
         assert!(error.to_string().contains("table store"));
     }
 }

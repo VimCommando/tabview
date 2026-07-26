@@ -1,15 +1,17 @@
-use super::{ColumnId, SourceGeneration};
+use std::fmt;
+use std::num::NonZeroUsize;
+use std::sync::mpsc;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+use super::{CellValue, ColumnId, SourceGeneration, SourceQueryTask, TableStore};
+
+#[cfg(feature = "sqlite")]
+pub const DEFAULT_SQLITE_SOURCE_LIMIT: usize = 1_000;
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum NullPlacement {
     First,
+    #[default]
     Last,
-}
-
-impl Default for NullPlacement {
-    fn default() -> Self {
-        Self::Last
-    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -26,7 +28,7 @@ pub enum FilterMode {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub enum FilterPredicate {
+pub enum ViewFilterPredicate {
     Text {
         value: String,
         domain: ValueDomain,
@@ -51,14 +53,14 @@ pub enum NumericOperator {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct FilterSpec {
+pub struct ViewFilter {
     pub column: ColumnId,
     pub mode: FilterMode,
-    pub predicate: FilterPredicate,
+    pub predicate: ViewFilterPredicate,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SortMode {
+pub enum ViewSortMode {
     Lexical,
     Natural,
     Numeric,
@@ -75,18 +77,294 @@ pub enum SortDirection {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct SortSpec {
+pub struct ViewSort {
     pub column: ColumnId,
-    pub mode: SortMode,
+    pub mode: ViewSortMode,
     pub direction: SortDirection,
     pub nulls: NullPlacement,
 }
 
 #[derive(Debug, Clone, PartialEq, Default)]
-pub struct TableQuery {
+pub struct ViewTransform {
     pub generation: SourceGeneration,
-    pub filters: Vec<FilterSpec>,
-    pub order_by: Vec<SortSpec>,
+    pub filters: Vec<ViewFilter>,
+    pub order_by: Vec<ViewSort>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SourceOperand {
+    Null,
+    Boolean(bool),
+    Integer(i64),
+    Float(f64),
+    Text(String),
+    Binary(Vec<u8>),
+}
+
+impl From<SourceOperand> for CellValue {
+    fn from(value: SourceOperand) -> Self {
+        match value {
+            SourceOperand::Null => Self::Null,
+            SourceOperand::Boolean(value) => Self::Boolean(value),
+            SourceOperand::Integer(value) => Self::Integer(value),
+            SourceOperand::Float(value) => Self::Float(value),
+            SourceOperand::Text(value) => Self::Text(value),
+            SourceOperand::Binary(value) => Self::Binary(value),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum SourceFilterOperator {
+    Equal,
+    NotEqual,
+    LessThan,
+    LessThanOrEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+    Contains,
+    Prefix,
+    IsNull,
+    IsNotNull,
+}
+
+impl SourceFilterOperator {
+    pub fn requires_operand(self) -> bool {
+        !matches!(self, Self::IsNull | Self::IsNotNull)
+    }
+}
+
+impl fmt::Display for SourceFilterOperator {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Equal => "equal",
+            Self::NotEqual => "not equal",
+            Self::LessThan => "less than",
+            Self::LessThanOrEqual => "less than or equal",
+            Self::GreaterThan => "greater than",
+            Self::GreaterThanOrEqual => "greater than or equal",
+            Self::Contains => "contains",
+            Self::Prefix => "prefix",
+            Self::IsNull => "is null",
+            Self::IsNotNull => "is not null",
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SourceFilterScope {
+    WholeRecord,
+    Column(ColumnId),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceFilter {
+    pub scope: SourceFilterScope,
+    pub operator: SourceFilterOperator,
+    pub operand: Option<SourceOperand>,
+}
+
+impl SourceFilter {
+    pub fn validate(&self) -> Result<(), SourceQueryValidationError> {
+        if self.operator.requires_operand() != self.operand.is_some() {
+            return Err(SourceQueryValidationError::OperandMismatch {
+                operator: self.operator,
+            });
+        }
+        if matches!(self.operand, Some(SourceOperand::Float(value)) if !value.is_finite()) {
+            return Err(SourceQueryValidationError::NonFiniteOperand);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SourceSort {
+    pub column: ColumnId,
+    pub direction: SortDirection,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceQuery {
+    pub generation: SourceGeneration,
+    pub filters: Vec<SourceFilter>,
+    pub order_by: Vec<SourceSort>,
+    pub limit: NonZeroUsize,
+}
+
+impl SourceQuery {
+    pub fn new(generation: SourceGeneration, limit: NonZeroUsize) -> Self {
+        Self {
+            generation,
+            filters: Vec::new(),
+            order_by: Vec::new(),
+            limit,
+        }
+    }
+
+    #[cfg(feature = "sqlite")]
+    pub fn sqlite_default(generation: SourceGeneration) -> Self {
+        Self::new(
+            generation,
+            NonZeroUsize::new(DEFAULT_SQLITE_SOURCE_LIMIT).expect("non-zero SQLite default"),
+        )
+    }
+}
+
+#[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
+pub enum SourceQueryValidationError {
+    #[error("source query belongs to a different source generation")]
+    StaleGeneration,
+    #[error("source query references an unknown or stale column")]
+    UnknownColumn,
+    #[error("source filter '{operator}' has the wrong operand shape")]
+    OperandMismatch { operator: SourceFilterOperator },
+    #[error("source query contains a non-finite floating-point operand")]
+    NonFiniteOperand,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CapabilityStatus {
+    Supported,
+    Unavailable { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SourceQueryProgress {
+    Idle,
+    Pending { revision: u64 },
+    Failed { revision: u64, error: String },
+}
+
+pub enum SourceQueryCoordinatorEvent {
+    Ready {
+        revision: u64,
+        store: Box<dyn TableStore>,
+    },
+    Failed {
+        revision: u64,
+        error: String,
+    },
+}
+
+struct SourceQueryJobResult {
+    revision: u64,
+    result: anyhow::Result<Box<dyn TableStore>>,
+}
+
+pub struct SourceQueryCoordinator {
+    next_revision: u64,
+    latest_requested: u64,
+    progress: SourceQueryProgress,
+    sender: mpsc::Sender<SourceQueryJobResult>,
+    receiver: mpsc::Receiver<SourceQueryJobResult>,
+}
+
+impl fmt::Debug for SourceQueryCoordinator {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("SourceQueryCoordinator")
+            .field("latest_requested", &self.latest_requested)
+            .field("progress", &self.progress)
+            .finish_non_exhaustive()
+    }
+}
+
+impl Default for SourceQueryCoordinator {
+    fn default() -> Self {
+        let (sender, receiver) = mpsc::channel();
+        Self {
+            next_revision: 1,
+            latest_requested: 0,
+            progress: SourceQueryProgress::Idle,
+            sender,
+            receiver,
+        }
+    }
+}
+
+impl SourceQueryCoordinator {
+    pub fn request(&mut self, task: SourceQueryTask) -> u64 {
+        let revision = self.next_revision;
+        self.next_revision = self.next_revision.saturating_add(1);
+        self.latest_requested = revision;
+        self.progress = SourceQueryProgress::Pending { revision };
+        let sender = self.sender.clone();
+        std::thread::spawn(move || {
+            let result = task();
+            let _ = sender.send(SourceQueryJobResult { revision, result });
+        });
+        revision
+    }
+
+    pub fn progress(&self) -> &SourceQueryProgress {
+        &self.progress
+    }
+
+    pub fn is_pending(&self) -> bool {
+        matches!(self.progress, SourceQueryProgress::Pending { .. })
+    }
+
+    pub fn poll(&mut self) -> Option<SourceQueryCoordinatorEvent> {
+        let mut latest = None;
+        while let Ok(result) = self.receiver.try_recv() {
+            if result.revision == self.latest_requested {
+                latest = Some(result);
+            }
+        }
+        let result = latest?;
+        match result.result {
+            Ok(store) => {
+                self.progress = SourceQueryProgress::Idle;
+                Some(SourceQueryCoordinatorEvent::Ready {
+                    revision: result.revision,
+                    store,
+                })
+            }
+            Err(error) => {
+                let error = error.to_string();
+                self.progress = SourceQueryProgress::Failed {
+                    revision: result.revision,
+                    error: error.clone(),
+                };
+                Some(SourceQueryCoordinatorEvent::Failed {
+                    revision: result.revision,
+                    error,
+                })
+            }
+        }
+    }
+}
+
+impl CapabilityStatus {
+    pub fn is_supported(&self) -> bool {
+        matches!(self, Self::Supported)
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceOperationCapabilities {
+    pub filters: Vec<SourceFilterOperator>,
+    pub sorting: CapabilityStatus,
+    pub configurable_limit: bool,
+}
+
+impl SourceOperationCapabilities {
+    pub fn supports_filter(&self, operator: SourceFilterOperator) -> bool {
+        self.filters.contains(&operator)
+    }
+}
+
+impl Default for SourceOperationCapabilities {
+    fn default() -> Self {
+        Self {
+            filters: Vec::new(),
+            sorting: CapabilityStatus::Unavailable {
+                reason: "source-native sorting is unavailable for this source".to_owned(),
+            },
+            configurable_limit: false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -94,30 +372,104 @@ mod tests {
     use super::*;
 
     #[test]
-    fn query_references_generation_scoped_columns_and_resolved_nulls() {
+    fn operation_layers_reference_generation_scoped_columns() {
         let generation = SourceGeneration::new();
         let column = ColumnId {
             generation,
             ordinal: 1,
         };
-        let query = TableQuery {
+        let view = ViewTransform {
             generation,
-            filters: vec![FilterSpec {
+            filters: vec![ViewFilter {
                 column,
                 mode: FilterMode::In,
-                predicate: FilterPredicate::Text {
+                predicate: ViewFilterPredicate::Text {
                     value: "ok".to_owned(),
                     domain: ValueDomain::RawOrRendered,
                 },
             }],
-            order_by: vec![SortSpec {
+            order_by: vec![ViewSort {
                 column,
-                mode: SortMode::Natural,
+                mode: ViewSortMode::Natural,
                 direction: SortDirection::Descending,
                 nulls: NullPlacement::First,
             }],
         };
-        assert_eq!(query.order_by[0].nulls, NullPlacement::First);
-        assert_eq!(query.filters[0].column.generation, generation);
+        let source = SourceQuery {
+            generation,
+            filters: vec![SourceFilter {
+                scope: SourceFilterScope::Column(column),
+                operator: SourceFilterOperator::Equal,
+                operand: Some(SourceOperand::Text("ok".to_owned())),
+            }],
+            order_by: vec![SourceSort {
+                column,
+                direction: SortDirection::Ascending,
+            }],
+            limit: NonZeroUsize::new(1_000).unwrap(),
+        };
+        assert_eq!(view.order_by[0].nulls, NullPlacement::First);
+        assert!(matches!(
+            source.filters[0].scope,
+            SourceFilterScope::Column(id) if id.generation == generation
+        ));
+    }
+
+    #[test]
+    fn null_tests_reject_operands_and_comparisons_require_them() {
+        let generation = SourceGeneration::new();
+        let column = ColumnId {
+            generation,
+            ordinal: 0,
+        };
+        assert!(SourceFilter {
+            scope: SourceFilterScope::Column(column),
+            operator: SourceFilterOperator::IsNull,
+            operand: None,
+        }
+        .validate()
+        .is_ok());
+        assert!(SourceFilter {
+            scope: SourceFilterScope::Column(column),
+            operator: SourceFilterOperator::Equal,
+            operand: None,
+        }
+        .validate()
+        .is_err());
+    }
+
+    #[test]
+    fn coordinator_publishes_only_latest_revision() {
+        let generation = SourceGeneration::new();
+        let mut coordinator = SourceQueryCoordinator::default();
+        let (release, wait) = std::sync::mpsc::channel();
+        coordinator.request(Box::new(move || {
+            wait.recv().unwrap();
+            Ok(Box::new(super::super::InMemoryTable::from_text_rows(
+                generation,
+                vec![vec!["stale".to_owned()]],
+            )))
+        }));
+        let latest = coordinator.request(Box::new(move || {
+            Ok(Box::new(super::super::InMemoryTable::from_text_rows(
+                generation,
+                vec![vec!["latest".to_owned()]],
+            )))
+        }));
+        let event = loop {
+            if let Some(event) = coordinator.poll() {
+                break event;
+            }
+            std::thread::yield_now();
+        };
+        assert!(matches!(
+            event,
+            SourceQueryCoordinatorEvent::Ready { revision, .. } if revision == latest
+        ));
+        release.send(()).unwrap();
+        while coordinator.receiver.try_recv().is_err() {
+            std::thread::yield_now();
+        }
+        assert!(coordinator.poll().is_none());
     }
 }

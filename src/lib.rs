@@ -28,7 +28,9 @@ pub fn run(args: cli::Args) -> anyhow::Result<()> {
     let source = ingest::source::InputSource::from_cli_value(&config.filename.to_string_lossy());
     match execution {
         output::ExecutionMode::Batch(format) => {
-            let mut app = prepare_app(&config, theme_load, source, |_| Ok(()))?;
+            let Some(mut app) = prepare_app(&config, theme_load, source, |_| Ok(()), None)? else {
+                return Ok(());
+            };
             emit_diagnostics(&app.diagnostics);
             output::write_view_to_stdout(format, config.color, &mut app.view, &app.theme)
         }
@@ -51,23 +53,35 @@ pub fn run(args: cli::Args) -> anyhow::Result<()> {
                 source
             };
             let theme = theme_load.theme.clone();
-            let mut app = prepare_app(&config, theme_load, source, |message| {
-                terminal.terminal_mut().draw(|frame| {
-                    ui::render_footer_with_theme(
-                        Some(message),
-                        frame.area(),
-                        frame.buffer_mut(),
-                        &theme,
-                    );
-                })?;
-                Ok(())
+            terminal.terminal_mut().draw(|frame| {
+                ui::render_footer_with_theme(
+                    Some(&format!("Loading {}", source.display_name())),
+                    frame.area(),
+                    frame.buffer_mut(),
+                    &theme,
+                );
             })?;
+            let mut select_relation = |relations: &[ingest::RelationCatalogEntry]| {
+                select_table_modal(&mut terminal, &theme, relations)
+            };
+            let Some(mut app) = prepare_app(
+                &config,
+                theme_load,
+                source,
+                |_| Ok(()),
+                Some(&mut select_relation),
+            )?
+            else {
+                terminal.restore()?;
+                return Ok(());
+            };
             run_interactive(&mut app, &mut terminal)?;
             restore_before_export(
                 || terminal.restore(),
                 || {
                     emit_diagnostics(&app.diagnostics);
                     if let Some(format) = emit_on_exit {
+                        app.view.await_latest_source_query()?;
                         output::write_view_to_stdout(
                             format,
                             config.color,
@@ -90,18 +104,73 @@ fn restore_before_export(
     export()
 }
 
+fn select_table_modal(
+    terminal: &mut ui::terminal::TerminalSession,
+    theme: &theme::ResolvedTheme,
+    relations: &[ingest::RelationCatalogEntry],
+) -> anyhow::Result<Option<String>> {
+    let selectable = relations
+        .iter()
+        .enumerate()
+        .filter_map(|(index, relation)| relation.is_selectable().then_some(index))
+        .collect::<Vec<_>>();
+    if selectable.is_empty() {
+        return Ok(None);
+    }
+    let mut selected = selectable[0];
+    loop {
+        terminal.terminal_mut().draw(|frame| {
+            ui::render_relation_picker_with_theme(
+                relations,
+                selected,
+                popup_area(frame.area()),
+                frame.buffer_mut(),
+                theme,
+            );
+        })?;
+        let Event::Key(event) = read()? else {
+            continue;
+        };
+        match event.code {
+            KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('Q') => return Ok(None),
+            KeyCode::Enter => {
+                return Ok(Some(relations[selected].metadata.name.clone()));
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                let position = selectable
+                    .iter()
+                    .position(|index| *index == selected)
+                    .unwrap_or_default();
+                selected = selectable[position.saturating_sub(1)];
+            }
+            KeyCode::Down | KeyCode::Char('j') => {
+                let position = selectable
+                    .iter()
+                    .position(|index| *index == selected)
+                    .unwrap_or_default();
+                selected = selectable[(position + 1).min(selectable.len() - 1)];
+            }
+            _ => {}
+        }
+    }
+}
+
 fn emit_diagnostics(diagnostics: &[String]) {
     for diagnostic in diagnostics {
         eprintln!("{diagnostic}");
     }
 }
 
+type RelationSelector<'a> =
+    dyn FnMut(&[ingest::RelationCatalogEntry]) -> anyhow::Result<Option<String>> + 'a;
+
 fn prepare_app(
     config: &cli::Config,
     theme_load: theme::ThemeLoad,
     source: ingest::source::InputSource,
     mut report_status: impl FnMut(&str) -> anyhow::Result<()>,
-) -> anyhow::Result<App> {
+    mut select_relation: Option<&mut RelationSelector<'_>>,
+) -> anyhow::Result<Option<App>> {
     report_status(&format!("Loading {}", source.display_name()))?;
     let parse_options = ingest::ParseOptions {
         encoding: config.encoding.clone(),
@@ -123,7 +192,17 @@ fn prepare_app(
     if let Some(schema_status) = full_schema_scan_status(&source, &open_options) {
         report_status(&schema_status)?;
     }
-    let opened = ingest::open_source(source.clone(), &open_options)?.into_implicit_table()?;
+    let mut opened_source = ingest::open_source(source.clone(), &open_options)?;
+    if !opened_source.has_selected_table() && opened_source.selectable_relations().count() > 1 {
+        if let Some(selector) = select_relation.as_mut() {
+            let Some(selected) = selector(opened_source.list_relations())? else {
+                return Ok(None);
+            };
+            opened_source.open_relation(&selected)?;
+            open_options.table = Some(selected);
+        }
+    }
+    let opened = opened_source.into_implicit_table()?;
     let mut view = view::TableView::from_opened_table(opened, view::Viewport::new(20, 8))?
         .with_column_width_mode(config.width);
     #[cfg(feature = "saved-views")]
@@ -147,13 +226,14 @@ fn prepare_app(
         view.goto_user_column(column.max(1));
     }
 
-    Ok(App {
+    Ok(Some(App {
         source,
         open_options,
         view,
         popup: None,
         filter_prompt: None,
         column_info: None,
+        source_modal: None,
         search_query: String::new(),
         keys: command::KeyInterpreter::default(),
         message,
@@ -163,7 +243,7 @@ fn prepare_app(
         saved_view,
         #[cfg(feature = "saved-views")]
         view_modal: None,
-    })
+    }))
 }
 
 fn run_interactive(
@@ -171,9 +251,14 @@ fn run_interactive(
     terminal: &mut ui::terminal::TerminalSession,
 ) -> anyhow::Result<()> {
     loop {
+        app.view.poll_source_query();
+        if let Some(status) = app.view.take_source_status() {
+            app.message = Some(status);
+        }
         terminal.terminal_mut().draw(|frame| {
             let area = frame.area();
             let table_area = table_area(area);
+            let count_status = app.source_count_status();
             ui::render_table_with_theme(
                 &mut app.view,
                 table_area,
@@ -182,7 +267,7 @@ fn run_interactive(
                 Some(&app.search_query),
             );
             ui::render_footer_with_theme(
-                app.message.as_deref(),
+                Some(app.message.as_deref().unwrap_or(&count_status)),
                 area,
                 frame.buffer_mut(),
                 &app.theme,
@@ -241,6 +326,39 @@ fn run_interactive(
                         );
                     }
                 }
+                Some(ui::Popup::SourceConfig) => {
+                    ui::render_configuration_popup_with_theme(
+                        "Source Configuration",
+                        &app.source_modal_body(),
+                        &["Apply", "Cancel"],
+                        popup_area(area),
+                        frame.buffer_mut(),
+                        &app.theme,
+                    );
+                }
+                Some(ui::Popup::ViewConfig) => {
+                    ui::render_configuration_popup_with_theme(
+                        "View Configuration",
+                        &format!(
+                            "{}\n\nx: clear view filters/sorts\nn: toggle null placement\nColumn Info (i) edits the current column.",
+                            app.view.view_transform_summary()
+                        ),
+                        &["Close"],
+                        popup_area(area),
+                        frame.buffer_mut(),
+                        &app.theme,
+                    );
+                }
+                Some(ui::Popup::Query) => {
+                    ui::render_configuration_popup_with_theme(
+                        "Source Query",
+                        &app.query_modal_body(),
+                        &["Copy", "Close"],
+                        popup_area(area),
+                        frame.buffer_mut(),
+                        &app.theme,
+                    );
+                }
                 #[cfg(feature = "saved-views")]
                 Some(ui::Popup::SavedView) => {
                     if let Some(modal) = &app.view_modal {
@@ -259,8 +377,9 @@ fn run_interactive(
             }
         })?;
 
-        let input_ready = if app.source.is_streaming()
-            && !matches!(app.view.row_count_state(), crate::table::RowCount::Exact(_))
+        let input_ready = if app.view.source_query_is_pending()
+            || (app.source.is_streaming()
+                && !matches!(app.view.row_count_state(), crate::table::RowCount::Exact(_)))
         {
             poll(Duration::from_millis(100))?
         } else {
@@ -284,6 +403,8 @@ fn full_schema_scan_status(
     let structured_hint = match options.format {
         ingest::InputFormat::Json | ingest::InputFormat::Ndjson => true,
         ingest::InputFormat::Delimited => false,
+        #[cfg(feature = "sqlite")]
+        ingest::InputFormat::Sqlite => false,
         ingest::InputFormat::Auto => {
             options.json_path.is_some()
                 || matches!(
@@ -336,6 +457,7 @@ struct App {
     popup: Option<ui::Popup>,
     filter_prompt: Option<FilterPrompt>,
     column_info: Option<ColumnInfoModal>,
+    source_modal: Option<SourceConfigModal>,
     search_query: String,
     keys: command::KeyInterpreter,
     message: Option<String>,
@@ -345,6 +467,16 @@ struct App {
     saved_view: Option<SavedViewRuntime>,
     #[cfg(feature = "saved-views")]
     view_modal: Option<ViewModal>,
+}
+
+#[derive(Debug, Clone)]
+struct SourceConfigModal {
+    draft: crate::table::SourceQuery,
+    column: usize,
+    operator: crate::table::SourceFilterOperator,
+    filter_input: String,
+    editing_filter: bool,
+    error: Option<String>,
 }
 
 #[cfg(feature = "saved-views")]
@@ -378,6 +510,34 @@ impl App {
         }
         if self.popup == Some(ui::Popup::ColumnInfo) {
             self.handle_column_info_key(event);
+            return Ok(false);
+        }
+        if self.popup == Some(ui::Popup::SourceConfig) {
+            self.handle_source_config_key(event);
+            return Ok(false);
+        }
+        if self.popup == Some(ui::Popup::ViewConfig) {
+            match event.code {
+                KeyCode::Esc | KeyCode::Enter => self.popup = None,
+                KeyCode::Char('x') => self.view.clear_view_operations(),
+                KeyCode::Char('n') => self.view.toggle_view_null_placement(),
+                KeyCode::Char('i') => self.open_column_info_modal(),
+                _ => {}
+            }
+            return Ok(false);
+        }
+        if self.popup == Some(ui::Popup::Query) {
+            match event.code {
+                KeyCode::Esc | KeyCode::Enter => self.popup = None,
+                KeyCode::Char('y') => {
+                    let sql = self
+                        .view
+                        .source_query_provenance()
+                        .map(|provenance| provenance.copyable_sql.clone());
+                    let _ = ops::clipboard::yank_text(sql.as_deref());
+                }
+                _ => {}
+            }
             return Ok(false);
         }
         #[cfg(feature = "saved-views")]
@@ -471,6 +631,9 @@ impl App {
                 self.popup = Some(ui::Popup::Search);
             }
             Command::ColumnInfo => self.open_column_info_modal(),
+            Command::SourceConfig => self.open_source_config_modal(),
+            Command::ViewConfig => self.popup = Some(ui::Popup::ViewConfig),
+            Command::Query => self.popup = Some(ui::Popup::Query),
             #[cfg(feature = "saved-views")]
             Command::SavedView => self.open_saved_view_modal(),
             Command::FilterIn => self.open_filter_prompt(FilterMode::In),
@@ -600,6 +763,290 @@ impl App {
         }
     }
 
+    fn open_source_config_modal(&mut self) {
+        let Some(query) = self.view.active_source_query().cloned() else {
+            self.message =
+                Some("This source does not expose a configurable bounded source query".to_owned());
+            return;
+        };
+        let column = self
+            .view
+            .table_definition()
+            .map(|definition| {
+                self.view
+                    .cursor()
+                    .column
+                    .min(definition.columns.len().saturating_sub(1))
+            })
+            .unwrap_or_default();
+        self.source_modal = Some(SourceConfigModal {
+            draft: query,
+            column,
+            operator: crate::table::SourceFilterOperator::Equal,
+            filter_input: String::new(),
+            editing_filter: false,
+            error: None,
+        });
+        self.popup = Some(ui::Popup::SourceConfig);
+    }
+
+    fn source_modal_body(&self) -> String {
+        let Some(modal) = &self.source_modal else {
+            return "Source configuration is unavailable".to_owned();
+        };
+        let relation = self
+            .view
+            .table_definition()
+            .map(|definition| definition.relation.display_name.as_str())
+            .unwrap_or("source");
+        let column = self
+            .view
+            .table_definition()
+            .and_then(|definition| definition.columns.get(modal.column))
+            .map(|column| column.display_name.as_str())
+            .unwrap_or("none");
+        let extent = self
+            .view
+            .source_result_extent()
+            .map(|extent| format!("{extent:?}"))
+            .unwrap_or_else(|| "pending".to_owned());
+        let capabilities = self.view.source_capabilities();
+        let sort_capability = match &capabilities.sorting {
+            crate::table::CapabilityStatus::Supported => "supported".to_owned(),
+            crate::table::CapabilityStatus::Unavailable { reason } => {
+                format!("unavailable: {reason}")
+            }
+        };
+        let sql = self
+            .view
+            .source_query_provenance()
+            .map(|provenance| format!("\n\nSQL:\n{}", provenance.logical_sql))
+            .unwrap_or_default();
+        let editor = if modal.editing_filter {
+            format!(
+                "\n\nFilter editor: {} {:?} {}\nTab: operator  Enter: add  Esc: cancel editor",
+                column, modal.operator, modal.filter_input
+            )
+        } else {
+            "\n\n←/→: column  f: add filter  Tab: operator\ns/S: source sort asc/desc  x: clear column\n+/-: adjust limit  Enter: apply  Esc: cancel"
+                .to_owned()
+        };
+        let limit = if modal.draft.limit == std::num::NonZeroUsize::MAX {
+            "unbounded".to_owned()
+        } else {
+            modal.draft.limit.to_string()
+        };
+        format!(
+            "Source: {relation}\nLimit: {}  Extent: {extent}\nFilters: {}  Sort keys: {}\nSelected column: {column}\nSource sorting: {sort_capability}{}{}{}",
+            limit,
+            modal.draft.filters.len(),
+            modal.draft.order_by.len(),
+            editor,
+            modal
+                .error
+                .as_ref()
+                .map(|error| format!("\nError: {error}"))
+                .unwrap_or_default(),
+            sql
+        )
+    }
+
+    fn query_modal_body(&self) -> String {
+        let view_note = format!(
+            "\n\nLocal transformations not represented by SQL:\n{}",
+            self.view.view_transform_summary()
+        );
+        self.view
+            .source_query_provenance()
+            .map(|provenance| {
+                format!(
+                    "Parameterized SQL:\n{}\n\nParameters: {:?}\n\nCopyable SQL:\n{}{}",
+                    provenance.logical_sql,
+                    provenance.parameters,
+                    provenance.copyable_sql,
+                    view_note
+                )
+            })
+            .unwrap_or_else(|| format!("This source has no native query artifact.{}", view_note))
+    }
+
+    fn handle_source_config_key(&mut self, event: KeyEvent) {
+        let Some(mut modal) = self.source_modal.take() else {
+            self.popup = None;
+            return;
+        };
+        if modal.editing_filter {
+            match event.code {
+                KeyCode::Esc => {
+                    modal.editing_filter = false;
+                    modal.error = None;
+                }
+                KeyCode::Tab => modal.operator = next_source_operator(modal.operator),
+                KeyCode::Backspace => {
+                    modal.filter_input.pop();
+                    modal.error = None;
+                }
+                KeyCode::Enter => {
+                    let operand = if modal.operator.requires_operand() {
+                        if modal.filter_input.is_empty() {
+                            modal.error = Some("filter value is required".to_owned());
+                            self.source_modal = Some(modal);
+                            return;
+                        }
+                        Some(parse_source_operand(&modal.filter_input))
+                    } else {
+                        None
+                    };
+                    if !self
+                        .view
+                        .source_capabilities()
+                        .supports_filter(modal.operator)
+                    {
+                        modal.error =
+                            Some(format!("source filter '{}' is unavailable", modal.operator));
+                    } else if let Some(column) = self
+                        .view
+                        .table_definition()
+                        .and_then(|definition| definition.columns.get(modal.column))
+                    {
+                        modal.draft.filters.push(crate::table::SourceFilter {
+                            scope: crate::table::SourceFilterScope::Column(column.id),
+                            operator: modal.operator,
+                            operand,
+                        });
+                        modal.filter_input.clear();
+                        modal.editing_filter = false;
+                        modal.error = None;
+                    }
+                }
+                KeyCode::Char(ch)
+                    if event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT =>
+                {
+                    modal.filter_input.push(ch);
+                    modal.error = None;
+                }
+                _ => {}
+            }
+            self.source_modal = Some(modal);
+            return;
+        }
+
+        match event.code {
+            KeyCode::Esc => {
+                self.popup = None;
+                return;
+            }
+            KeyCode::Enter => {
+                let query = modal.draft.clone();
+                if self.view.request_source_query(query.clone()) {
+                    self.open_options.limit = Some(query.limit);
+                    self.open_options.source_filters = query
+                        .filters
+                        .iter()
+                        .filter_map(|filter| {
+                            let crate::table::SourceFilterScope::Column(column) = filter.scope
+                            else {
+                                return Some(ingest::SourceFilterRequest {
+                                    column: "*".to_owned(),
+                                    operator: filter.operator,
+                                    operand: filter.operand.clone(),
+                                });
+                            };
+                            Some(ingest::SourceFilterRequest {
+                                column: self.view.source_column_name_for_id(column)?,
+                                operator: filter.operator,
+                                operand: filter.operand.clone(),
+                            })
+                        })
+                        .collect();
+                    self.open_options.source_sort = query
+                        .order_by
+                        .iter()
+                        .filter_map(|sort| {
+                            Some(ingest::SourceSortRequest {
+                                column: self.view.source_column_name_for_id(sort.column)?,
+                                direction: sort.direction,
+                            })
+                        })
+                        .collect();
+                    self.popup = None;
+                    return;
+                }
+                modal.error = self.view.take_source_status();
+            }
+            KeyCode::Left | KeyCode::Char('h') => {
+                modal.column = modal.column.saturating_sub(1);
+            }
+            KeyCode::Right | KeyCode::Char('l') => {
+                let last = self
+                    .view
+                    .table_definition()
+                    .map(|definition| definition.columns.len().saturating_sub(1))
+                    .unwrap_or_default();
+                modal.column = (modal.column + 1).min(last);
+            }
+            KeyCode::Char('f') => {
+                modal.editing_filter = true;
+                modal.error = None;
+            }
+            KeyCode::Tab => modal.operator = next_source_operator(modal.operator),
+            KeyCode::Char('s' | 'S') => {
+                if !self.view.source_capabilities().sorting.is_supported() {
+                    modal.error = Some("source sorting is unavailable".to_owned());
+                } else if let Some(column) = self
+                    .view
+                    .table_definition()
+                    .and_then(|definition| definition.columns.get(modal.column))
+                {
+                    modal.draft.order_by.retain(|sort| sort.column != column.id);
+                    modal.draft.order_by.push(crate::table::SourceSort {
+                        column: column.id,
+                        direction: if event.code == KeyCode::Char('s') {
+                            crate::table::SortDirection::Ascending
+                        } else {
+                            crate::table::SortDirection::Descending
+                        },
+                    });
+                }
+            }
+            KeyCode::Char('x') => {
+                if let Some(column) = self
+                    .view
+                    .table_definition()
+                    .and_then(|definition| definition.columns.get(modal.column))
+                {
+                    modal.draft.filters.retain(|filter| {
+                        !matches!(
+                            filter.scope,
+                            crate::table::SourceFilterScope::Column(id) if id == column.id
+                        )
+                    });
+                    modal.draft.order_by.retain(|sort| sort.column != column.id);
+                }
+            }
+            KeyCode::Char('+') => {
+                let next = if modal.draft.limit == std::num::NonZeroUsize::MAX {
+                    1_000
+                } else {
+                    modal.draft.limit.get().saturating_add(100)
+                };
+                modal.draft.limit =
+                    std::num::NonZeroUsize::new(next).expect("positive source limit");
+            }
+            KeyCode::Char('-') => {
+                let next = if modal.draft.limit == std::num::NonZeroUsize::MAX {
+                    1_000
+                } else {
+                    modal.draft.limit.get().saturating_sub(100).max(1)
+                };
+                modal.draft.limit =
+                    std::num::NonZeroUsize::new(next).expect("positive source limit");
+            }
+            _ => {}
+        }
+        self.source_modal = Some(modal);
+    }
+
     fn open_filter_prompt(&mut self, mode: FilterMode) {
         let column = self.view.cursor().column;
         self.filter_prompt = Some(FilterPrompt::new(&self.view, mode, column));
@@ -721,10 +1168,11 @@ impl App {
             return;
         };
         let input_filename = self.input_filename();
-        let yaml = self.view.to_saved_view_yaml(
+        let yaml = self.view.to_saved_view_yaml_with_source_options(
             &saved_view.view_name,
             &input_filename,
             saved_view.explicit_locale.as_deref(),
+            &self.open_options,
         );
         let filename = saved_view
             .target_path
@@ -864,9 +1312,22 @@ impl App {
                 }
             })
             .unwrap_or_default();
+        let extent = self
+            .view
+            .source_result_extent()
+            .map(|extent| match extent {
+                crate::table::ResultExtent::Complete { .. } => "complete".to_owned(),
+                crate::table::ResultExtent::Truncated { limit, .. } => {
+                    format!("limited to {limit}")
+                }
+            })
+            .unwrap_or_else(|| "in progress".to_owned());
         format!(
-            "Rows: {}\nColumns: {}\nPosition: {},{}\nWidth mode: {:?}\nColumn gap: {}\nMark: {}{}",
+            "Rows: {}\nVisible rows: {}\nFetched source rows: {}\nSource extent: {}\nColumns: {}\nPosition: {},{}\nWidth mode: {:?}\nColumn gap: {}\nMark: {}{}",
             rows,
+            self.view.visible_row_count(),
+            self.view.fetched_source_row_count(),
+            extent,
             self.view.column_count(),
             self.view.cursor().row + 1,
             self.view.cursor().column + 1,
@@ -878,6 +1339,56 @@ impl App {
                 .unwrap_or_else(|| "none".to_owned()),
             object_mode
         )
+    }
+
+    fn source_count_status(&self) -> String {
+        let extent = match self.view.source_result_extent() {
+            Some(crate::table::ResultExtent::Complete { .. }) => "complete".to_owned(),
+            Some(crate::table::ResultExtent::Truncated { limit, .. }) => {
+                format!("limited {limit}")
+            }
+            None if self.view.source_query_is_pending() => "querying".to_owned(),
+            None => "fetching".to_owned(),
+        };
+        format!(
+            "{} visible / {} source ({extent})",
+            self.view.visible_row_count(),
+            self.view.fetched_source_row_count()
+        )
+    }
+}
+
+fn next_source_operator(
+    current: crate::table::SourceFilterOperator,
+) -> crate::table::SourceFilterOperator {
+    use crate::table::SourceFilterOperator as Operator;
+    match current {
+        Operator::Equal => Operator::NotEqual,
+        Operator::NotEqual => Operator::LessThan,
+        Operator::LessThan => Operator::LessThanOrEqual,
+        Operator::LessThanOrEqual => Operator::GreaterThan,
+        Operator::GreaterThan => Operator::GreaterThanOrEqual,
+        Operator::GreaterThanOrEqual => Operator::Contains,
+        Operator::Contains => Operator::Prefix,
+        Operator::Prefix => Operator::IsNull,
+        Operator::IsNull => Operator::IsNotNull,
+        Operator::IsNotNull => Operator::Equal,
+    }
+}
+
+fn parse_source_operand(value: &str) -> crate::table::SourceOperand {
+    if value.eq_ignore_ascii_case("null") {
+        crate::table::SourceOperand::Null
+    } else if value.eq_ignore_ascii_case("true") {
+        crate::table::SourceOperand::Boolean(true)
+    } else if value.eq_ignore_ascii_case("false") {
+        crate::table::SourceOperand::Boolean(false)
+    } else if let Ok(value) = value.parse::<i64>() {
+        crate::table::SourceOperand::Integer(value)
+    } else if let Ok(value) = value.parse::<f64>() {
+        crate::table::SourceOperand::Float(value)
+    } else {
+        crate::table::SourceOperand::Text(value.to_owned())
     }
 }
 
@@ -947,6 +1458,8 @@ struct ColumnInfoModal {
     nulls: view::ColumnNullPlacementChoice,
     canonical_source: Option<String>,
     source_type: Option<String>,
+    source_declared_type: Option<String>,
+    source_operations: Vec<String>,
     filters: usize,
 }
 
@@ -983,6 +1496,8 @@ impl ColumnInfoModal {
             nulls: info.nulls,
             canonical_source: info.canonical_source,
             source_type: info.source_type,
+            source_declared_type: info.source_declared_type,
+            source_operations: info.source_operations,
             filters: 0,
         }
     }
@@ -991,7 +1506,7 @@ impl ColumnInfoModal {
         ui::ColumnInfoPopup {
             title: "Column Info".to_owned(),
             summary: format!(
-                "{}  visible:{} source:{}  nulls:{:?}{}{}",
+                "{}  visible:{} source:{}  nulls:{:?}{}{}{}{}",
                 self.column_name,
                 self.visible_column + 1,
                 self.source_column + 1,
@@ -1003,7 +1518,16 @@ impl ColumnInfoModal {
                 self.source_type
                     .as_ref()
                     .map(|value| format!(" type:{value}"))
-                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                self.source_declared_type
+                    .as_ref()
+                    .map(|value| format!(" declared:{value}"))
+                    .unwrap_or_default(),
+                if self.source_operations.is_empty() {
+                    String::new()
+                } else {
+                    format!(" [{}]", self.source_operations.join(", "))
+                }
             ),
             sections: ColumnInfoGroup::VISUAL
                 .into_iter()
@@ -1349,12 +1873,12 @@ fn apply_saved_view(
             source_path: Some(selected.view.path.clone()),
             target_path: Some(selected.view.path.clone()),
             view_name: selected.view.canonical_name.clone(),
-            explicit_locale: selected.view.view.locale.clone(),
+            explicit_locale: selected.view.view.view.locale.clone(),
             messages,
         }));
     };
     let header = header.to_vec();
-    view.set_view_null_placement(selected.view.view.nulls);
+    view.set_view_null_placement(selected.view.view.view.nulls);
     let structured_definition = view.table_definition().filter(|definition| {
         definition
             .columns
@@ -1370,9 +1894,10 @@ fn apply_saved_view(
         saved_views::resolve_columns(&selected.view.view, &header)
     };
     messages.extend(resolved.warnings.iter().map(format_saved_view_warning));
-    view.apply_saved_columns(&resolved, selected.view.view.locale.as_deref());
+    view.apply_saved_columns(&resolved, selected.view.view.view.locale.as_deref());
 
     let sort_keys = selected
+        .view
         .view
         .view
         .sort
@@ -1411,7 +1936,7 @@ fn apply_saved_view(
     view.apply_saved_sort_keys(sort_keys);
 
     let mut unresolved_filters = Vec::new();
-    for filter in &selected.view.view.filters {
+    for filter in &selected.view.view.view.filters {
         let column = view
             .table_definition()
             .filter(|definition| {
@@ -1442,13 +1967,16 @@ fn apply_saved_view(
         let _ = view.apply_source_filter(column, mode, kind, filter.condition.clone());
     }
     if structured_schema_provisional {
-        view.retain_pending_saved_operations(selected.view.view.sort.clone(), unresolved_filters);
+        view.retain_pending_saved_operations(
+            selected.view.view.view.sort.clone(),
+            unresolved_filters,
+        );
     }
     Ok(Some(SavedViewRuntime {
         source_path: Some(selected.view.path.clone()),
         target_path: Some(selected.view.path.clone()),
         view_name: selected.view.canonical_name.clone(),
-        explicit_locale: selected.view.view.locale.clone(),
+        explicit_locale: selected.view.view.view.locale.clone(),
         messages,
     }))
 }
@@ -1723,6 +2251,8 @@ fn help_popup_area(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "sqlite")]
+    use clap::Parser;
     use crossterm::event::KeyModifiers;
     use std::cell::Cell;
     use std::io::{Seek, Write};
@@ -1791,6 +2321,7 @@ mod tests {
             popup: None,
             filter_prompt: None,
             column_info: None,
+            source_modal: None,
             search_query: String::new(),
             keys: command::KeyInterpreter::default(),
             message: None,
@@ -1814,6 +2345,196 @@ mod tests {
         app.view =
             view::TableView::from_opened_table(opened, view::Viewport::new(8, 80)).expect("view");
         app
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn create_sqlite_database(path: &std::path::Path, statements: &[&str]) {
+        let runtime = tokio::runtime::Runtime::new().expect("sqlite runtime");
+        runtime.block_on(async {
+            let database = turso::Builder::new_local(path.to_str().expect("utf8 path"))
+                .build()
+                .await
+                .expect("sqlite database");
+            let connection = database.connect().expect("sqlite connection");
+            for statement in statements {
+                connection
+                    .execute(statement, ())
+                    .await
+                    .expect("sqlite statement");
+            }
+        });
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn sqlite_app(statements: &[&str], table: &str) -> (tempfile::TempDir, App) {
+        let directory = tempfile::tempdir().expect("sqlite fixture");
+        let path = directory.path().join("modal.db");
+        create_sqlite_database(&path, statements);
+        let options = ingest::OpenOptions {
+            table: Some(table.to_owned()),
+            ..ingest::OpenOptions::default()
+        };
+        (directory, app_for_source(path, options))
+    }
+
+    #[cfg(feature = "sqlite")]
+    fn sqlite_artifact_snapshot(path: &std::path::Path) -> Vec<(String, Option<Vec<u8>>)> {
+        ["", "-journal", "-wal", "-shm", "-tshm", "-log"]
+            .into_iter()
+            .map(|suffix| {
+                let mut artifact = path.as_os_str().to_os_string();
+                artifact.push(suffix);
+                (
+                    suffix.to_owned(),
+                    std::fs::read(std::path::PathBuf::from(artifact)).ok(),
+                )
+            })
+            .collect()
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn cancelling_table_selection_is_a_clean_startup_outcome() {
+        let directory = tempfile::tempdir().expect("SQLite directory");
+        let path = directory.path().join("multiple.db");
+        create_sqlite_database(
+            &path,
+            &[
+                "CREATE TABLE users(id INTEGER PRIMARY KEY)",
+                "CREATE TABLE events(id INTEGER PRIMARY KEY)",
+            ],
+        );
+        let filename = path.to_string_lossy().into_owned();
+        let args = cli::Args::try_parse_from(["tabview", filename.as_str()]).expect("arguments");
+        let mut config = cli::Config::from_args(args).expect("configuration");
+        #[cfg(feature = "saved-views")]
+        {
+            config.saved_view = cli::SavedViewSelection::Disabled;
+        }
+        let source = ingest::source::InputSource::Path(path);
+        let theme_load = theme::ThemeLoad {
+            theme: theme::default_theme(),
+            warnings: Vec::new(),
+        };
+        let mut selector = |_: &[ingest::RelationCatalogEntry]| Ok(None);
+
+        let prepared = prepare_app(&config, theme_load, source, |_| Ok(()), Some(&mut selector))
+            .expect("clean cancellation");
+
+        assert!(prepared.is_none());
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn post_interactive_export_waits_for_latest_sqlite_query() {
+        let (_directory, mut app) = sqlite_app(
+            &[
+                "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT)",
+                "INSERT INTO users VALUES (1, 'Ada')",
+                "INSERT INTO users VALUES (2, 'Grace')",
+                "INSERT INTO users VALUES (3, 'Linus')",
+            ],
+            "users",
+        );
+        let id = app.view.table_definition().expect("definition").columns[0].id;
+        let mut query = app
+            .view
+            .active_source_query()
+            .expect("source query")
+            .clone();
+        query.order_by = vec![crate::table::SourceSort {
+            column: id,
+            direction: crate::table::SortDirection::Descending,
+        }];
+        assert!(app.view.request_source_query(query));
+        assert!(app.view.source_query_is_pending());
+
+        let mut output = Vec::new();
+        restore_before_export(
+            || Ok(()),
+            || {
+                app.view.await_latest_source_query()?;
+                crate::output::write_view(
+                    crate::output::OutputFormat::Table,
+                    crate::output::ColorOutput::Never,
+                    &mut app.view,
+                    &app.theme,
+                    &mut output,
+                )
+            },
+        )
+        .expect("post-interactive export");
+
+        let output = String::from_utf8(output).expect("UTF-8 table output");
+        let linus = output.find("Linus").expect("latest first row");
+        let grace = output.find("Grace").expect("latest second row");
+        let ada = output.find("Ada").expect("latest third row");
+        assert!(linus < grace && grace < ada);
+        assert!(!output.contains("SELECT"));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn supported_actions_preserve_sqlite_database_and_sidecar_bytes() {
+        for (label, wal) in [("rollback", false), ("wal", true)] {
+            let directory = tempfile::tempdir().expect("SQLite directory");
+            let path = directory.path().join(format!("{label}.db"));
+            let writer = rusqlite::Connection::open(&path).expect("fixture connection");
+            writer
+                .execute_batch(if wal {
+                    "PRAGMA journal_mode=WAL;
+                     PRAGMA wal_autocheckpoint=0;
+                     CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT);
+                     INSERT INTO users VALUES (1, 'Ada'), (2, 'Grace'), (3, 'Linus');"
+                } else {
+                    "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT);
+                     INSERT INTO users VALUES (1, 'Ada'), (2, 'Grace'), (3, 'Linus');"
+                })
+                .expect("fixture schema and rows");
+            let held_writer = if wal {
+                Some(writer)
+            } else {
+                drop(writer);
+                None
+            };
+            let before = sqlite_artifact_snapshot(&path);
+
+            {
+                let mut app = app_for_source(
+                    path.clone(),
+                    ingest::OpenOptions {
+                        table: Some("users".to_owned()),
+                        ..ingest::OpenOptions::default()
+                    },
+                );
+                app.view.goto(1, 1);
+                app.view
+                    .apply_filter(
+                        1,
+                        crate::ops::filter::FilterMode::In,
+                        crate::ops::filter::FilterKind::Text,
+                        "a".to_owned(),
+                    )
+                    .expect("view filter");
+                app.view.clear_filters_for_column(1);
+                app.handle_key(key(KeyCode::Char('u')))
+                    .expect("source configuration");
+                app.handle_key(key(KeyCode::Char('s')))
+                    .expect("source sort");
+                app.handle_key(key(KeyCode::Enter))
+                    .expect("apply source query");
+                app.view.await_latest_source_query().expect("source result");
+                assert!(app.query_modal_body().contains("SELECT"));
+                app.reload().expect("reload");
+            }
+
+            assert_eq!(
+                sqlite_artifact_snapshot(&path),
+                before,
+                "{label} database artifacts changed"
+            );
+            drop(held_writer);
+        }
     }
 
     #[test]
@@ -1905,6 +2626,7 @@ mod tests {
             popup: None,
             filter_prompt: None,
             column_info: None,
+            source_modal: None,
             search_query: String::new(),
             keys: command::KeyInterpreter::default(),
             message: None,
@@ -2031,6 +2753,88 @@ mod tests {
         assert!(!app.view.column_has_filter(0));
     }
 
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_source_view_column_and_query_modals_keep_their_scopes_distinct() {
+        let (_directory, mut app) = sqlite_app(
+            &[
+                "CREATE TABLE users(id INTEGER PRIMARY KEY, name VARCHAR(30))",
+                "INSERT INTO users VALUES (1, 'Ada')",
+                "INSERT INTO users VALUES (2, 'Grace')",
+            ],
+            "users",
+        );
+        let original_limit = app.view.active_source_query().unwrap().limit;
+
+        app.handle_key(key(KeyCode::Char('u')))
+            .expect("source modal");
+        assert_eq!(app.popup, Some(ui::Popup::SourceConfig));
+        assert!(app.source_modal_body().contains("Source: users"));
+        app.handle_key(key(KeyCode::Char('+')))
+            .expect("stage source limit");
+        assert_ne!(
+            app.source_modal.as_ref().unwrap().draft.limit,
+            original_limit
+        );
+        app.handle_key(key(KeyCode::Esc))
+            .expect("cancel source draft");
+        assert_eq!(
+            app.view.active_source_query().unwrap().limit,
+            original_limit
+        );
+
+        app.handle_key(key(KeyCode::Char('u')))
+            .expect("source modal");
+        app.handle_key(key(KeyCode::Char('s')))
+            .expect("stage source sort");
+        app.handle_key(key(KeyCode::Enter))
+            .expect("apply source sort");
+        app.view.await_latest_source_query().expect("source result");
+
+        app.handle_key(key(KeyCode::Char('V'))).expect("view modal");
+        assert_eq!(app.popup, Some(ui::Popup::ViewConfig));
+        app.handle_key(key(KeyCode::Char('i')))
+            .expect("column info from view");
+        assert_eq!(app.popup, Some(ui::Popup::ColumnInfo));
+        let popup = app.column_info.as_ref().unwrap().popup();
+        assert!(popup.summary.contains("declared:INTEGER"));
+        assert!(popup.summary.contains("source sort"));
+        app.handle_key(key(KeyCode::Esc))
+            .expect("close column info");
+
+        app.handle_key(key(KeyCode::Char('p')))
+            .expect("query modal");
+        assert_eq!(app.popup, Some(ui::Popup::Query));
+        let query = app.query_modal_body();
+        assert!(query.contains("SELECT"));
+        assert!(query.contains("Copyable SQL"));
+        assert!(query.contains("Local transformations not represented by SQL"));
+    }
+
+    #[test]
+    fn file_source_modal_is_available_without_forcing_initial_materialization() {
+        let file = tempfile::NamedTempFile::new().expect("csv fixture");
+        std::fs::write(file.path(), "name,value\nalpha,1\nbeta,2\n").expect("csv");
+        let mut app = app_for_source(file.path().to_path_buf(), ingest::OpenOptions::default());
+        assert!(matches!(
+            app.view.row_count_state(),
+            crate::table::RowCount::AtLeast(_) | crate::table::RowCount::Exact(_)
+        ));
+
+        app.handle_key(key(KeyCode::Char('u')))
+            .expect("source modal");
+        let body = app.source_modal_body();
+        assert!(body.contains("Limit: unbounded"));
+        assert!(body.contains("Source sorting: unavailable"));
+        app.handle_key(key(KeyCode::Char('s')))
+            .expect("unavailable source sort");
+        assert!(app
+            .source_modal
+            .as_ref()
+            .and_then(|modal| modal.error.as_deref())
+            .is_some_and(|error| error.contains("unavailable")));
+    }
+
     #[test]
     fn reload_reapplies_active_filters_and_clamps_cursor() {
         let mut file = tempfile::NamedTempFile::new().expect("temp file");
@@ -2048,6 +2852,7 @@ mod tests {
             popup: None,
             filter_prompt: None,
             column_info: None,
+            source_modal: None,
             search_query: String::new(),
             keys: command::KeyInterpreter::default(),
             message: None,

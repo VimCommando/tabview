@@ -7,6 +7,7 @@ Local SQLite support can therefore be added as a Turso-backed adapter and store 
 ## What Changes
 
 - Add local SQLite as an explicit and signature-detected input format, opened through the `turso` crate.
+- Put SQLite support and its Turso/Tokio dependency graph behind a default-enabled `sqlite` Cargo feature; builds without that feature omit SQLite format parsing, signature dispatch, and `--table`.
 - Discover user-facing ordinary SQLite tables and compatible ordinary views, exclude virtual, shadow, and internal objects, and select one with `--table`, saved `source.table`, automatic selection when exactly one selectable candidate exists, or a simple interactive table picker when multiple selectable choices remain. Preserve unavailable-view diagnostics so the picker or an explicit selection can explain incompatibility.
 - Extend the existing source-identity model with relation-column identity; SQLite column metadata is supplied directly and is never represented as a synthetic CSV header row.
 - Map Turso values directly into the existing typed `CellValue` variants. Preserve raw SQLite declarations for inspection, use SQLite affinity only as an initial logical-type hint, and widen the observed profile when runtime values disagree.
@@ -18,8 +19,8 @@ Local SQLite support can therefore be added as a Turso-backed adapter and store 
 - Preserve the existing format-neutral object interpretation option by moving `object_mode` into the nested `source` section with the other source-opening options.
 - Implement `TursoTableStore` with asynchronous query replacement, bounded fetching, cached rows, stable identity where available, and local materialization bounded by the source result rather than the full database.
 - Make SQLite available through the existing source-neutral output adapters. Direct batch output auto-selects a sole selectable relation but fails clearly when multiple selectable relations remain unresolved; interactive and interactive-export modes may use the table picker.
-- Enforce the read-only user contract inside Tabview: keep the Turso connection behind a read-only application facade, expose only schema inspection and generated `SELECT` operations, enable and verify `PRAGMA query_only=ON` as defense in depth, and regression-test that every supported user action leaves logical database contents unchanged.
-- Keep Turso's default features intentionally, including FTS and mimalloc, without treating Turso's FTS feature as compatibility with existing SQLite FTS virtual tables.
+- Enforce the read-only user contract inside Tabview: open the database through Turso core with `OpenFlags::ReadOnly` before creating a connection, keep that connection behind a read-only application facade, expose only schema inspection and generated `SELECT` operations, enable and verify `PRAGMA query_only=ON` as defense in depth, and regression-test that supported actions neither change database bytes nor create or modify engine sidecars.
+- Disable Turso's default feature set, explicitly retaining mimalloc as Tabview's global allocator while omitting Tantivy-backed FTS because Tabview does not expose it.
 
 ## Capabilities
 
@@ -37,7 +38,7 @@ Local SQLite support can therefore be added as a Turso-backed adapter and store 
 
 ## Impact
 
-- Adds `turso` and the minimal Tokio support needed to drive its asynchronous local API. Turso's default FTS and mimalloc features remain enabled, but SQLite virtual tables remain outside the selectable relation set.
+- Adds optional `turso` and Tokio dependencies behind the default-enabled `sqlite` feature. Turso defaults are disabled, mimalloc is explicitly enabled as the global allocator, Tantivy-backed FTS is omitted, and SQLite virtual tables remain outside the selectable relation set.
 - Extends `InputFormat`, `OpenOptions`, `SourceOptionOverrides`, format resolution, `OpenedSource` relation selection, and source-neutral batch preparation.
 - Refactors the flat `SavedView` schema and the single `TableQuery`/filter/sort state into explicit source-query and view-transform models; backward compatibility for the pre-change YAML shape is not required.
 - Adds a SQLite `SourceAdapter`, SQL query compiler, asynchronous query coordinator, and `TursoTableStore`; the existing `TableDefinition`, typed cells, and store boundaries remain authoritative.

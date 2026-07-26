@@ -9,10 +9,14 @@ use crate::output::{ColorOutput, OutputFormat};
 use crate::view::ColumnWidthMode;
 
 #[derive(Debug, Clone, PartialEq, Eq, Parser)]
-#[command(
-    name = "tabview",
-    about = "View delimited, JSON, or NDJSON data in a spreadsheet-like display.",
-    disable_help_subcommand = true
+#[command(name = "tabview", disable_help_subcommand = true)]
+#[cfg_attr(
+    feature = "sqlite",
+    command(about = "View delimited, JSON, NDJSON, or local SQLite data.")
+)]
+#[cfg_attr(
+    not(feature = "sqlite"),
+    command(about = "View delimited, JSON, or NDJSON data.")
 )]
 pub struct Args {
     /// File to read. Use '-' to read from standard input.
@@ -74,6 +78,11 @@ pub struct Args {
     #[arg(long = "schema-scan", value_parser = parse_schema_scan)]
     pub schema_scan: Option<SchemaScan>,
 
+    /// SQLite table or compatible view to open.
+    #[cfg(feature = "sqlite")]
+    #[arg(long = "table")]
+    pub table: Option<String>,
+
     /// Force a saved view by canonical name.
     #[cfg(feature = "saved-views")]
     #[arg(long = "view", conflicts_with = "no_view")]
@@ -95,7 +104,7 @@ impl Args {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Config {
     pub filename: PathBuf,
     pub interactive: bool,
@@ -120,10 +129,8 @@ impl Config {
             || args.quoting.is_some()
             || args.quote_char != "\"";
         let explicit_format = args.format;
-        if matches!(
-            explicit_format,
-            Some(InputFormat::Json | InputFormat::Ndjson)
-        ) && delimited_option_selected
+        if explicit_format.is_some_and(format_rejects_delimited_options)
+            && delimited_option_selected
         {
             return Err(CliError::IncompatibleOptions {
                 format: explicit_format.expect("checked format"),
@@ -150,12 +157,28 @@ impl Config {
                 option: "--object-mode",
             });
         }
-        let resolved_cli_format = match explicit_format {
-            Some(InputFormat::Auto) | None if delimited_option_selected => {
-                Some(InputFormat::Delimited)
-            }
-            value => value,
-        };
+        #[cfg(feature = "sqlite")]
+        if args.table.is_some()
+            && matches!(
+                explicit_format,
+                Some(
+                    InputFormat::Delimited
+                        | InputFormat::Json
+                        | InputFormat::Ndjson
+                        | InputFormat::Auto
+                )
+            )
+        {
+            return Err(CliError::IncompatibleOptions {
+                format: explicit_format.expect("checked format"),
+                option: "--table",
+            });
+        }
+        #[cfg(feature = "sqlite")]
+        let table = args.table;
+        #[cfg(not(feature = "sqlite"))]
+        let table = None;
+        let resolved_cli_format = explicit_format;
         Ok(Self {
             filename: args.filename,
             interactive: args.interactive,
@@ -173,10 +196,21 @@ impl Config {
                 json_path: args.json_path,
                 object_mode: args.object_mode,
                 schema_scan: args.schema_scan,
+                table,
+                ..SourceOptionOverrides::default()
             },
             #[cfg(feature = "saved-views")]
             saved_view: SavedViewSelection::from_args(args.view, args.no_view),
         })
+    }
+}
+
+fn format_rejects_delimited_options(format: InputFormat) -> bool {
+    match format {
+        InputFormat::Json | InputFormat::Ndjson => true,
+        #[cfg(feature = "sqlite")]
+        InputFormat::Sqlite => true,
+        InputFormat::Auto | InputFormat::Delimited => false,
     }
 }
 
@@ -520,7 +554,7 @@ mod tests {
         assert_eq!(config.filename, PathBuf::from("-"));
         assert_eq!(config.delimiter, Some(b'\t'));
         assert_eq!(config.quoting, Some(Quoting::None));
-        assert_eq!(config.source_options.format, Some(InputFormat::Delimited));
+        assert_eq!(config.source_options.format, None);
     }
 
     #[test]
@@ -579,6 +613,36 @@ mod tests {
         let help = Args::command().render_long_help().to_string();
         assert!(help.contains("--object-mode <OBJECT_MODE>"));
         assert!(help.contains("selected structured object"));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_feature_exposes_its_cli_surface() {
+        let config = parse(&[
+            "tabview",
+            "--format",
+            "sqlite",
+            "--table",
+            "users",
+            "application.db",
+        ]);
+        assert_eq!(config.source_options.format, Some(InputFormat::Sqlite));
+        assert_eq!(config.source_options.table.as_deref(), Some("users"));
+
+        let help = Args::command().render_long_help().to_string();
+        assert!(help.contains("--table <TABLE>"));
+        assert!(help.contains("local SQLite"));
+    }
+
+    #[cfg(not(feature = "sqlite"))]
+    #[test]
+    fn sqlite_feature_removes_its_cli_surface() {
+        assert!(Args::try_parse_from(["tabview", "--format", "sqlite", "application.db"]).is_err());
+        assert!(Args::try_parse_from(["tabview", "--table", "users", "application.db"]).is_err());
+
+        let help = Args::command().render_long_help().to_string();
+        assert!(!help.contains("--table <TABLE>"));
+        assert!(!help.contains("local SQLite"));
     }
 
     #[test]
@@ -664,9 +728,9 @@ mod tests {
     }
 
     #[test]
-    fn explicit_delimited_options_imply_delimited_auto_format() {
+    fn explicit_delimited_options_remain_pending_until_source_resolution() {
         let config = parse(&["tabview", "--delimiter", "|", "data.unknown"]);
-        assert_eq!(config.source_options.format, Some(InputFormat::Delimited));
+        assert_eq!(config.source_options.format, None);
     }
 
     #[test]

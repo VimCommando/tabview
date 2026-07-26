@@ -9,9 +9,9 @@ use serde_json::Value;
 
 use crate::table::{
     CellValue, ColumnDefinition, ColumnId, ColumnSourceIdentity, InMemoryTable, IndexProgress,
-    QueryExecution, RelationMetadata, Row, RowCount, RowId, RowIndex, RowVisitor, ScanDirection,
-    ScanProgress, ScanRequest, SchemaDelta, SchemaState, SourceGeneration, TableDefinition,
-    TableQuery, TableStore, TypeOrigin, TypeWidening,
+    RelationMetadata, Row, RowCount, RowId, RowIndex, RowVisitor, ScanDirection, ScanProgress,
+    ScanRequest, SchemaDelta, SchemaState, SourceGeneration, TableDefinition, TableStore,
+    TypeOrigin, TypeWidening,
 };
 
 use super::adapter::{OpenedSource, OpenedTable, ProbeResult, SourceAdapter};
@@ -738,10 +738,6 @@ impl TableStore for StreamingJsonTable {
                 .collect(),
         )
     }
-
-    fn try_execute_query(&mut self, _query: &TableQuery) -> anyhow::Result<QueryExecution> {
-        Ok(QueryExecution::Unsupported)
-    }
 }
 
 fn parse_available_json_rows(
@@ -836,6 +832,7 @@ impl JsonSchema {
                 },
                 source_identity: identity.clone(),
                 display_name: path.clone(),
+                source_declared_type: None,
                 source_type: value.logical_type(),
                 type_origin: TypeOrigin::Inferred,
             };
@@ -875,6 +872,7 @@ impl JsonSchema {
                     label
                 }
                 ColumnSourceIdentity::Delimited { .. } => String::new(),
+                ColumnSourceIdentity::RelationColumn { name, .. } => name.clone(),
             };
         }
         if let Some(key) = self
@@ -2101,10 +2099,6 @@ impl TableStore for JsonTableStore {
                 .filter_map(|index| self.typed_row(index))
                 .collect(),
         )
-    }
-
-    fn try_execute_query(&mut self, _query: &TableQuery) -> anyhow::Result<QueryExecution> {
-        Ok(QueryExecution::Unsupported)
     }
 }
 

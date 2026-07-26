@@ -435,6 +435,7 @@ fn delimited_column(
             name: name.clone(),
         },
         display_name,
+        source_declared_type: None,
         source_type: LogicalType::Text,
         type_origin: TypeOrigin::Declared,
     }

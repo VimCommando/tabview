@@ -1,7 +1,9 @@
 use std::fmt;
+use std::num::NonZeroUsize;
 use std::str::FromStr;
 
 use super::ParseOptions;
+use crate::table::{SortDirection, SourceFilterOperator, SourceOperand};
 
 pub const DEFAULT_SCHEMA_SCAN_BYTES: u64 = 100 * 1024 * 1024;
 
@@ -150,6 +152,8 @@ pub enum InputFormat {
     Delimited,
     Json,
     Ndjson,
+    #[cfg(feature = "sqlite")]
+    Sqlite,
 }
 
 impl FromStr for InputFormat {
@@ -161,6 +165,8 @@ impl FromStr for InputFormat {
             "delimited" => Ok(Self::Delimited),
             "json" => Ok(Self::Json),
             "ndjson" => Ok(Self::Ndjson),
+            #[cfg(feature = "sqlite")]
+            "sqlite" => Ok(Self::Sqlite),
             _ => Err(SourceOptionError::InvalidFormat(value.to_owned())),
         }
     }
@@ -173,6 +179,8 @@ impl fmt::Display for InputFormat {
             Self::Delimited => "delimited",
             Self::Json => "json",
             Self::Ndjson => "ndjson",
+            #[cfg(feature = "sqlite")]
+            Self::Sqlite => "sqlite",
         })
     }
 }
@@ -246,6 +254,19 @@ impl FromStr for StructuredPath {
 
 pub type JsonPointer = StructuredPath;
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceFilterRequest {
+    pub column: String,
+    pub operator: SourceFilterOperator,
+    pub operand: Option<SourceOperand>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceSortRequest {
+    pub column: String,
+    pub direction: SortDirection,
+}
+
 fn decode_pointer_segment(segment: &str, full: &str) -> Result<String, SourceOptionError> {
     let mut decoded = String::new();
     let mut chars = segment.chars();
@@ -263,7 +284,7 @@ fn decode_pointer_segment(segment: &str, full: &str) -> Result<String, SourceOpt
     Ok(decoded)
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OpenOptions {
     pub format: InputFormat,
     pub delimited: ParseOptions,
@@ -271,6 +292,10 @@ pub struct OpenOptions {
     pub object_mode: ObjectMode,
     pub object_mode_origin: ObjectModeOrigin,
     pub schema_scan: SchemaScan,
+    pub table: Option<String>,
+    pub limit: Option<NonZeroUsize>,
+    pub source_filters: Vec<SourceFilterRequest>,
+    pub source_sort: Vec<SourceSortRequest>,
     pub lazy_threshold_bytes: u64,
     pub schema_scan_bytes: u64,
 }
@@ -284,18 +309,26 @@ impl Default for OpenOptions {
             object_mode: ObjectMode::Auto,
             object_mode_origin: ObjectModeOrigin::Default,
             schema_scan: SchemaScan::Default,
+            table: None,
+            limit: None,
+            source_filters: Vec::new(),
+            source_sort: Vec::new(),
             lazy_threshold_bytes: super::DEFAULT_LAZY_THRESHOLD_BYTES,
             schema_scan_bytes: DEFAULT_SCHEMA_SCAN_BYTES,
         }
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct SourceOptionOverrides {
     pub format: Option<InputFormat>,
     pub json_path: Option<JsonPointer>,
     pub object_mode: Option<ObjectMode>,
     pub schema_scan: Option<SchemaScan>,
+    pub table: Option<String>,
+    pub limit: Option<NonZeroUsize>,
+    pub source_filters: Option<Vec<SourceFilterRequest>>,
+    pub source_sort: Option<Vec<SourceSortRequest>>,
 }
 
 impl OpenOptions {
@@ -324,6 +357,22 @@ impl OpenOptions {
                 .schema_scan
                 .or(saved.schema_scan)
                 .unwrap_or(defaults.schema_scan),
+            table: cli
+                .table
+                .clone()
+                .or_else(|| saved.table.clone())
+                .or(defaults.table),
+            limit: cli.limit.or(saved.limit).or(defaults.limit),
+            source_filters: cli
+                .source_filters
+                .clone()
+                .or_else(|| saved.source_filters.clone())
+                .unwrap_or(defaults.source_filters),
+            source_sort: cli
+                .source_sort
+                .clone()
+                .or_else(|| saved.source_sort.clone())
+                .unwrap_or(defaults.source_sort),
             ..defaults
         }
     }
@@ -338,6 +387,10 @@ impl OpenOptions {
 
 #[derive(Debug, thiserror::Error, Clone, PartialEq, Eq)]
 pub enum SourceOptionError {
+    #[cfg(feature = "sqlite")]
+    #[error("invalid input format '{0}' (expected auto, delimited, json, ndjson, or sqlite)")]
+    InvalidFormat(String),
+    #[cfg(not(feature = "sqlite"))]
     #[error("invalid input format '{0}' (expected auto, delimited, json, or ndjson)")]
     InvalidFormat(String),
     #[error("invalid schema scan policy '{0}' (expected default or full)")]
@@ -362,6 +415,24 @@ mod tests {
         assert_eq!(pointer.segments(), ["hits", "hits", "a/b", "~meta"]);
         assert!("hits/hits".parse::<JsonPointer>().is_err());
         assert!("/bad~2escape".parse::<JsonPointer>().is_err());
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_is_an_available_input_format() {
+        assert_eq!("sqlite".parse::<InputFormat>(), Ok(InputFormat::Sqlite));
+    }
+
+    #[cfg(not(feature = "sqlite"))]
+    #[test]
+    fn sqlite_is_not_an_available_input_format() {
+        let error = "sqlite"
+            .parse::<InputFormat>()
+            .expect_err("disabled format");
+        assert_eq!(
+            error.to_string(),
+            "invalid input format 'sqlite' (expected auto, delimited, json, or ndjson)"
+        );
     }
 
     #[test]

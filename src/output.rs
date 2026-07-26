@@ -630,11 +630,13 @@ mod tests {
             r#"
 name: colors
 filenames: ["*"]
-columns:
-  Active:
-    colors:
-      - match:
-          true: red
+source: {}
+view:
+  columns:
+    Active:
+      colors:
+        - match:
+            true: red
 "#,
         )
         .expect("saved view");

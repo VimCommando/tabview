@@ -4,18 +4,12 @@
   "title": "Tabview Saved View",
   "type": "object",
   "additionalProperties": false,
-  "required": ["name", "filenames"],
+  "required": ["name", "filenames", "source", "view"],
   "properties": {
     "name": {
       "type": "string",
       "minLength": 1,
       "description": "Human-readable saved view label. The canonical view name is the file stem."
-    },
-    "locale": {
-      "type": "string",
-      "pattern": "^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*(?:\\.[A-Za-z0-9_-]+)?(?:@[A-Za-z0-9_-]+)?$",
-      "minLength": 1,
-      "description": "Optional POSIX-style view-level locale identifier for locale-aware number formatting."
     },
     "filenames": {
       "type": "array",
@@ -25,50 +19,88 @@
         "minLength": 1
       }
     },
-    "format": {
-      "type": "string",
-      "enum": ["auto", "delimited", "json", "ndjson"],
-      "description": "Source format selected before the table is opened."
-    },
-    "json_path": {
-      "type": "string",
-      "pattern": "^(?:/(?:[^~]|~[01])*)*$",
-      "description": "RFC 6901 JSON Pointer selecting the table node."
-    },
-    "object_mode": {
-      "type": "string",
-      "enum": ["auto", "record", "entries"],
-      "description": "Interpret a selected structured object automatically, as one record, or as keyed entry rows."
-    },
-    "schema_scan": {
-      "type": "string",
-      "enum": ["default", "full"]
-    },
-    "nulls": {
-      "$ref": "#/$defs/nullPlacement"
-    },
-    "columns": {
+    "source": {
       "type": "object",
-      "default": {},
-      "propertyNames": {
-        "type": "string",
-        "minLength": 1
-      },
-      "additionalProperties": {
-        "$ref": "#/$defs/column"
+      "additionalProperties": false,
+      "properties": {
+        "format": {
+          "type": "string",
+          "enum": ["auto", "delimited", "json", "ndjson", "sqlite"],
+          "description": "Source format selected before the table is opened."
+        },
+        "json_path": {
+          "type": "string",
+          "pattern": "^(?:/(?:[^~]|~[01])*)*$",
+          "description": "RFC 6901 JSON Pointer selecting the table node."
+        },
+        "object_mode": {
+          "type": "string",
+          "enum": ["auto", "record", "entries"],
+          "description": "Interpret a selected structured object automatically, as one record, or as keyed entry rows."
+        },
+        "table": {
+          "type": "string",
+          "minLength": 1
+        },
+        "schema_scan": {
+          "type": "string",
+          "enum": ["default", "full"]
+        },
+        "limit": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "filters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/sourceFilter"
+          }
+        },
+        "sort": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/sourceSort"
+          }
+        }
       }
     },
-    "sort": {
-      "type": "array",
-      "maxItems": 3,
-      "items": {
-        "$ref": "#/$defs/sort"
-      }
-    },
-    "filters": {
-      "type": "array",
-      "items": {
-        "$ref": "#/$defs/filter"
+    "view": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "locale": {
+          "type": "string",
+          "pattern": "^[A-Za-z][A-Za-z0-9]*(?:_[A-Za-z0-9]+)*(?:\\.[A-Za-z0-9_-]+)?(?:@[A-Za-z0-9_-]+)?$",
+          "minLength": 1,
+          "description": "Optional POSIX-style view-level locale identifier for locale-aware number formatting."
+        },
+        "nulls": {
+          "$ref": "#/$defs/nullPlacement"
+        },
+        "columns": {
+          "type": "object",
+          "default": {},
+          "propertyNames": {
+            "type": "string",
+            "minLength": 1
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/column"
+          }
+        },
+        "sort": {
+          "type": "array",
+          "maxItems": 3,
+          "items": {
+            "$ref": "#/$defs/sort"
+          }
+        },
+        "filters": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/filter"
+          }
+        }
       }
     }
   },
@@ -314,6 +346,70 @@
         "bit",
         "word"
       ]
+    },
+    "sourceFilter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["column", "operator"],
+      "properties": {
+        "column": {
+          "type": "string",
+          "minLength": 1
+        },
+        "operator": {
+          "type": "string",
+          "enum": [
+            "equal",
+            "not_equal",
+            "less_than",
+            "less_or_equal",
+            "greater_than",
+            "greater_or_equal",
+            "contains",
+            "prefix",
+            "is_null",
+            "is_not_null"
+          ]
+        },
+        "value": {
+          "type": ["boolean", "integer", "number", "string"]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "operator": {
+                "enum": ["is_null", "is_not_null"]
+              }
+            },
+            "required": ["operator"]
+          },
+          "then": {
+            "not": {
+              "required": ["value"]
+            }
+          },
+          "else": {
+            "required": ["value"]
+          }
+        }
+      ]
+    },
+    "sourceSort": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["column", "direction"],
+      "properties": {
+        "column": {
+          "type": "string",
+          "minLength": 1
+        },
+        "direction": {
+          "type": "string",
+          "enum": ["asc", "desc"]
+        }
+      }
     },
     "sort": {
       "type": "object",

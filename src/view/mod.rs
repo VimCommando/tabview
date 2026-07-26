@@ -140,6 +140,8 @@ pub struct ColumnInfo {
     pub nulls: ColumnNullPlacementChoice,
     pub canonical_source: Option<String>,
     pub source_type: Option<String>,
+    pub source_declared_type: Option<String>,
+    pub source_operations: Vec<String>,
     pub filters: Vec<ColumnFilterSummary>,
 }
 
@@ -282,7 +284,15 @@ pub struct TableView {
     query_store: Option<SharedTableStore>,
     base_cached_rows: Option<Vec<Vec<String>>>,
     base_cached_row_ids: Option<Vec<crate::table::RowId>>,
-    active_query: Option<crate::table::TableQuery>,
+    active_source_query: Option<crate::table::SourceQuery>,
+    source_capabilities: crate::table::SourceOperationCapabilities,
+    source_result_extent: Option<crate::table::ResultExtent>,
+    source_query_provenance: Option<crate::table::QueryProvenance>,
+    source_query_coordinator: Rc<RefCell<crate::table::SourceQueryCoordinator>>,
+    pending_source_query: Option<crate::table::SourceQuery>,
+    pending_cursor_identity: Option<crate::table::StableRowIdentity>,
+    pending_mark_identity: Option<crate::table::StableRowIdentity>,
+    active_view_transform: Option<crate::table::ViewTransform>,
     committed_filters: Vec<ActiveFilter>,
     committed_sort_keys: Vec<ActiveSortKey>,
     row_ids: Vec<crate::table::RowId>,
@@ -383,7 +393,19 @@ impl TableView {
             query_store: None,
             base_cached_rows: None,
             base_cached_row_ids: None,
-            active_query: None,
+            active_source_query: None,
+            source_capabilities: crate::table::SourceOperationCapabilities::default(),
+            source_result_extent: Some(crate::table::ResultExtent::Complete {
+                source_rows: rows.len(),
+            }),
+            source_query_provenance: None,
+            source_query_coordinator: Rc::new(RefCell::new(
+                crate::table::SourceQueryCoordinator::default(),
+            )),
+            pending_source_query: None,
+            pending_cursor_identity: None,
+            pending_mark_identity: None,
+            active_view_transform: None,
             committed_filters: Vec::new(),
             committed_sort_keys: Vec::new(),
             row_ids: Vec::new(),
@@ -432,6 +454,10 @@ impl TableView {
         let generation = opened.definition.generation;
         let object_mode = opened.object_mode;
         let source_status = (!opened.warnings.is_empty()).then(|| opened.warnings.join("; "));
+        let active_source_query = opened.store.active_source_query().cloned();
+        let source_capabilities = opened.store.source_capabilities();
+        let source_result_extent = opened.store.result_extent();
+        let source_query_provenance = opened.store.query_provenance().cloned();
         let initial_target = viewport.height.saturating_sub(1);
         let progress = opened
             .store
@@ -463,7 +489,17 @@ impl TableView {
             query_store: None,
             base_cached_rows: None,
             base_cached_row_ids: None,
-            active_query: Some(crate::table::TableQuery {
+            active_source_query,
+            source_capabilities,
+            source_result_extent,
+            source_query_provenance,
+            source_query_coordinator: Rc::new(RefCell::new(
+                crate::table::SourceQueryCoordinator::default(),
+            )),
+            pending_source_query: None,
+            pending_cursor_identity: None,
+            pending_mark_identity: None,
+            active_view_transform: Some(crate::table::ViewTransform {
                 generation,
                 filters: Vec::new(),
                 order_by: Vec::new(),
@@ -521,6 +557,278 @@ impl TableView {
         self.table_definition.as_ref()
     }
 
+    pub fn active_source_query(&self) -> Option<&crate::table::SourceQuery> {
+        self.active_source_query.as_ref()
+    }
+
+    pub fn source_capabilities(&self) -> &crate::table::SourceOperationCapabilities {
+        &self.source_capabilities
+    }
+
+    pub fn source_column_name_for_id(&self, id: crate::table::ColumnId) -> Option<String> {
+        let definition = self.table_definition.as_ref()?;
+        let column = definition.columns.iter().find(|column| column.id == id)?;
+        match &column.source_identity {
+            crate::table::ColumnSourceIdentity::RelationColumn { name, .. } => Some(name.clone()),
+            _ => definition
+                .canonical_column_key(id.ordinal as usize)
+                .or_else(|| {
+                    self.header
+                        .as_ref()
+                        .and_then(|header| header.get(id.ordinal as usize))
+                        .cloned()
+                }),
+        }
+    }
+
+    pub fn view_transform_summary(&self) -> String {
+        format!(
+            "{} view filter(s), {} view sort key(s), nulls {:?}",
+            self.filters.len(),
+            self.sort_keys.len(),
+            self.view_nulls.unwrap_or(NullPlacement::Last)
+        )
+    }
+
+    pub fn clear_view_operations(&mut self) {
+        self.filters.clear();
+        self.sort_keys.clear();
+        self.apply_query_configuration();
+    }
+
+    pub fn toggle_view_null_placement(&mut self) {
+        let next = match self.view_nulls.unwrap_or(NullPlacement::Last) {
+            NullPlacement::First => Some(NullPlacement::Last),
+            NullPlacement::Last => Some(NullPlacement::First),
+        };
+        self.set_view_null_placement(next);
+    }
+
+    pub fn visible_row_count(&self) -> usize {
+        self.visible_rows.len()
+    }
+
+    pub fn source_operations_for_column(&self, column: crate::table::ColumnId) -> Vec<String> {
+        let Some(query) = &self.active_source_query else {
+            return Vec::new();
+        };
+        let mut operations = query
+            .filters
+            .iter()
+            .filter(|filter| {
+                matches!(
+                    filter.scope,
+                    crate::table::SourceFilterScope::Column(id) if id == column
+                )
+            })
+            .map(|filter| format!("source filter: {}", filter.operator))
+            .collect::<Vec<_>>();
+        operations.extend(
+            query
+                .order_by
+                .iter()
+                .filter(|sort| sort.column == column)
+                .map(|sort| format!("source sort: {:?}", sort.direction)),
+        );
+        operations
+    }
+
+    pub fn source_result_extent(&self) -> Option<crate::table::ResultExtent> {
+        self.incremental_store
+            .as_ref()
+            .and_then(|store| store.0.borrow().result_extent())
+            .or(self.source_result_extent)
+    }
+
+    pub fn source_query_provenance(&self) -> Option<&crate::table::QueryProvenance> {
+        self.source_query_provenance.as_ref()
+    }
+
+    pub fn fetched_source_row_count(&self) -> usize {
+        match self
+            .incremental_store
+            .as_ref()
+            .map(|store| store.0.borrow().row_count())
+            .or_else(|| self.source_store.as_ref().map(TableStore::row_count))
+        {
+            Some(RowCount::Exact(count) | RowCount::AtLeast(count)) => count,
+            Some(RowCount::Unknown) | None => self.rows.len(),
+        }
+    }
+
+    pub fn request_source_query(&mut self, query: crate::table::SourceQuery) -> bool {
+        let Some(definition) = self.table_definition.as_ref() else {
+            self.source_status = Some("Source queries require a store-backed table".to_owned());
+            return false;
+        };
+        if let Err(error) = crate::table::validate_source_query(definition, &query) {
+            self.source_status = Some(format!("Source query validation failed: {error}"));
+            return false;
+        }
+        let cursor_identity = self.current_stable_row_identity();
+        let mark_identity = self.mark_stable_row_identity();
+        let Some(source) = self.incremental_store.as_ref() else {
+            self.source_status = Some("Source query replacement is unavailable".to_owned());
+            return false;
+        };
+        let task = match source.0.borrow().source_query_task(query.clone()) {
+            Ok(task) => task,
+            Err(error) => {
+                self.source_status = Some(error.to_string());
+                return false;
+            }
+        };
+        let revision = self.source_query_coordinator.borrow_mut().request(task);
+        self.pending_source_query = Some(query);
+        self.pending_cursor_identity = cursor_identity;
+        self.pending_mark_identity = mark_identity;
+        self.source_status = Some(format!("Source query revision {revision} is running"));
+        true
+    }
+
+    pub fn source_query_is_pending(&self) -> bool {
+        self.source_query_coordinator.borrow().is_pending()
+    }
+
+    pub fn poll_source_query(&mut self) -> bool {
+        let event = self.source_query_coordinator.borrow_mut().poll();
+        match event {
+            Some(crate::table::SourceQueryCoordinatorEvent::Ready { revision, store }) => {
+                let Some(query) = self.pending_source_query.take() else {
+                    return false;
+                };
+                let cursor_identity = self.pending_cursor_identity.take();
+                let mark_identity = self.pending_mark_identity.take();
+                let applied =
+                    self.activate_source_replacement(query, store, cursor_identity, mark_identity);
+                if applied {
+                    self.source_status =
+                        Some(format!("Source query revision {revision} completed"));
+                }
+                applied
+            }
+            Some(crate::table::SourceQueryCoordinatorEvent::Failed { error, .. }) => {
+                self.pending_source_query = None;
+                self.pending_cursor_identity = None;
+                self.pending_mark_identity = None;
+                self.source_status = Some(format!(
+                    "Source query failed; prior result retained: {error}"
+                ));
+                false
+            }
+            None => false,
+        }
+    }
+
+    pub fn await_latest_source_query(&mut self) -> anyhow::Result<()> {
+        while self.source_query_is_pending() {
+            self.poll_source_query();
+            if self.source_query_is_pending() {
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        }
+        if let crate::table::SourceQueryProgress::Failed { error, .. } =
+            self.source_query_coordinator.borrow().progress()
+        {
+            anyhow::bail!("latest source query failed: {error}");
+        }
+        Ok(())
+    }
+
+    pub fn replace_source_query(&mut self, query: crate::table::SourceQuery) -> bool {
+        let Some(definition) = self.table_definition.clone() else {
+            self.source_status = Some("Source queries require a store-backed table".to_owned());
+            return false;
+        };
+        if let Err(error) = crate::table::validate_source_query(&definition, &query) {
+            self.source_status = Some(format!("Source query validation failed: {error}"));
+            return false;
+        }
+        let cursor_identity = self.current_stable_row_identity();
+        let mark_identity = self.mark_stable_row_identity();
+        let Some(source) = self.incremental_store.clone() else {
+            self.source_status = Some("Source query replacement is unavailable".to_owned());
+            return false;
+        };
+        let execution = source.0.borrow_mut().execute_source_query(&query);
+        let replacement = match execution {
+            Ok(
+                crate::table::SourceQueryExecution::SourceExecuted(store)
+                | crate::table::SourceQueryExecution::BoundedLocal(store),
+            ) => store,
+            Ok(crate::table::SourceQueryExecution::Unsupported { reason }) => {
+                self.source_status = Some(format!("Source query unsupported: {reason}"));
+                return false;
+            }
+            Err(error) => {
+                self.source_status = Some(format!(
+                    "Source query failed; prior result retained: {error}"
+                ));
+                return false;
+            }
+        };
+        self.activate_source_replacement(query, replacement, cursor_identity, mark_identity)
+    }
+
+    fn activate_source_replacement(
+        &mut self,
+        query: crate::table::SourceQuery,
+        mut replacement: Box<dyn TableStore>,
+        cursor_identity: Option<crate::table::StableRowIdentity>,
+        mark_identity: Option<crate::table::StableRowIdentity>,
+    ) -> bool {
+        let initial_target = self.viewport.height.saturating_sub(1);
+        let progress = match replacement.ensure_indexed_through(RowIndex(initial_target)) {
+            Ok(progress) => progress,
+            Err(error) => {
+                self.source_status = Some(format!(
+                    "Source query loading failed; prior result retained: {error}"
+                ));
+                return false;
+            }
+        };
+        let mut rows = Vec::new();
+        let mut row_ids = Vec::new();
+        for index in 0..=initial_target {
+            match replacement.row(RowIndex(index)) {
+                Ok(Some(row)) => {
+                    row_ids.push(row.id);
+                    rows.push(row.display_cells());
+                }
+                Ok(None) => break,
+                Err(error) => {
+                    self.source_status = Some(format!(
+                        "Source query loading failed; prior result retained: {error}"
+                    ));
+                    return false;
+                }
+            }
+        }
+        if !progress.schema_delta.is_empty() {
+            self.source_status =
+                Some("Source query unexpectedly changed a complete schema".to_owned());
+            return false;
+        }
+        self.source_capabilities = replacement.source_capabilities();
+        self.source_result_extent = replacement.result_extent();
+        self.source_query_provenance = replacement.query_provenance().cloned();
+        self.active_source_query = Some(query);
+        self.incremental_store = Some(SharedTableStore(Rc::new(RefCell::new(replacement))));
+        self.source_store = None;
+        self.query_store = None;
+        self.base_cached_rows = None;
+        self.base_cached_row_ids = None;
+        self.rows = rows;
+        self.row_ids = row_ids;
+        self.visible_rows = (0..self.rows.len()).collect();
+        if self.refresh_view_transform() == QueryRefresh::Failed {
+            self.source_status =
+                Some("Source result replaced but local view transform failed".to_owned());
+        }
+        self.restore_stable_identities(cursor_identity, mark_identity);
+        true
+    }
+
     pub fn object_mode_resolution(&self) -> Option<crate::ingest::ObjectModeResolution> {
         self.object_mode
     }
@@ -552,22 +860,29 @@ impl TableView {
     }
 
     pub fn row_count_state(&self) -> RowCount {
-        if self.query_is_active() {
+        if self.view_transform_is_active() {
             return self
                 .query_store
                 .as_ref()
                 .map(|store| store.0.borrow().row_count())
                 .unwrap_or(RowCount::Exact(self.rows.len()));
         }
-        self.incremental_store
+        self.source_store
             .as_ref()
-            .map(|store| store.0.borrow().row_count())
-            .or_else(|| self.source_store.as_ref().map(TableStore::row_count))
+            .map(TableStore::row_count)
+            .or_else(|| {
+                self.incremental_store
+                    .as_ref()
+                    .map(|store| store.0.borrow().row_count())
+            })
             .unwrap_or(RowCount::Exact(self.rows.len()))
     }
 
     pub fn ensure_source_indexed_through(&mut self, row: usize) -> anyhow::Result<RowCount> {
-        let loading_query_result = self.query_is_active() && self.query_store.is_some();
+        if let Some(source) = &self.source_store {
+            return Ok(source.row_count());
+        }
+        let loading_query_result = self.view_transform_is_active() && self.query_store.is_some();
         let shared = if loading_query_result {
             self.query_store.clone()
         } else {
@@ -634,7 +949,7 @@ impl TableView {
         }
         drop(store);
         self.apply_source_schema_delta(progress.schema_delta)?;
-        if self.query_is_active() && !loading_query_result {
+        if self.view_transform_is_active() && !loading_query_result {
             return Ok(self.row_count_state());
         }
         for source_row in appended {
@@ -650,8 +965,8 @@ impl TableView {
         Ok(progress.row_count)
     }
 
-    fn query_is_active(&self) -> bool {
-        self.active_query
+    fn view_transform_is_active(&self) -> bool {
+        self.active_view_transform
             .as_ref()
             .is_some_and(|query| !query.filters.is_empty() || !query.order_by.is_empty())
     }
@@ -881,13 +1196,7 @@ impl TableView {
                 let key = self
                     .table_definition
                     .as_ref()
-                    .and_then(|definition| definition.columns.get(index))
-                    .and_then(|column| {
-                        column
-                            .source_identity
-                            .canonical_key()
-                            .map(ToOwned::to_owned)
-                    });
+                    .and_then(|definition| definition.canonical_column_key(index));
                 let Some(key) = key else { continue };
                 if let Some(column_view) = self.pending_saved_columns.remove(&key) {
                     resolved.columns[index] = Some(crate::saved_views::ResolvedColumnView {
@@ -1512,7 +1821,7 @@ impl TableView {
     }
 
     fn apply_query_configuration(&mut self) -> bool {
-        match self.refresh_query_result() {
+        match self.refresh_view_transform() {
             QueryRefresh::Applied => return true,
             QueryRefresh::Failed => {
                 self.filters = self.committed_filters.clone();
@@ -1545,7 +1854,7 @@ impl TableView {
         true
     }
 
-    fn refresh_query_result(&mut self) -> QueryRefresh {
+    fn refresh_view_transform(&mut self) -> QueryRefresh {
         let Some(definition) = self.table_definition.clone() else {
             return QueryRefresh::NotStoreBacked;
         };
@@ -1554,7 +1863,7 @@ impl TableView {
             .get(self.cursor.row)
             .and_then(|index| self.row_ids.get(*index))
             .copied();
-        let query = crate::table::TableQuery {
+        let query = crate::table::ViewTransform {
             generation: definition.generation,
             filters: self
                 .filters
@@ -1566,16 +1875,16 @@ impl TableView {
                         FilterMode::Out => crate::table::FilterMode::Out,
                     };
                     let predicate = match &filter.condition {
-                        FilterCondition::Text(value) => crate::table::FilterPredicate::Text {
+                        FilterCondition::Text(value) => crate::table::ViewFilterPredicate::Text {
                             value: value.clone(),
                             domain: crate::table::ValueDomain::RawOrRendered,
                         },
-                        FilterCondition::Regex(regex) => crate::table::FilterPredicate::Regex {
+                        FilterCondition::Regex(regex) => crate::table::ViewFilterPredicate::Regex {
                             pattern: regex.as_str().to_owned(),
                             domain: crate::table::ValueDomain::RawOrRendered,
                         },
                         FilterCondition::Numeric { operator, operand } => {
-                            crate::table::FilterPredicate::Numeric {
+                            crate::table::ViewFilterPredicate::Numeric {
                                 operator: match operator {
                                     crate::ops::filter::NumericOperator::LessThan => {
                                         crate::table::NumericOperator::LessThan
@@ -1597,7 +1906,7 @@ impl TableView {
                             }
                         }
                     };
-                    Some(crate::table::FilterSpec {
+                    Some(crate::table::ViewFilter {
                         column,
                         mode,
                         predicate,
@@ -1608,7 +1917,7 @@ impl TableView {
                 .sort_keys
                 .iter()
                 .filter_map(|key| {
-                    Some(crate::table::SortSpec {
+                    Some(crate::table::ViewSort {
                         column: definition.columns.get(key.column)?.id,
                         mode: table_sort_mode(key.mode),
                         direction: match key.direction {
@@ -1621,7 +1930,7 @@ impl TableView {
                 .collect(),
         };
 
-        if let Err(error) = crate::table::validate_query(&definition, &query) {
+        if let Err(error) = crate::table::validate_view_transform(&definition, &query) {
             self.source_status = Some(format!("Query validation failed: {error}"));
             return QueryRefresh::Failed;
         }
@@ -1648,7 +1957,7 @@ impl TableView {
             self.base_cached_rows = None;
             self.base_cached_row_ids = None;
             self.visible_rows = (0..self.rows.len()).collect();
-            self.active_query = Some(query);
+            self.active_view_transform = Some(query);
             self.committed_filters = self.filters.clone();
             self.committed_sort_keys = self.sort_keys.clone();
             self.restore_selected_row(selected_id);
@@ -1658,118 +1967,60 @@ impl TableView {
         let Some(shared) = self.incremental_store.clone() else {
             return QueryRefresh::NotStoreBacked;
         };
-        let execution = {
-            let mut store = shared.0.borrow_mut();
-            store.try_execute_query(&query)
+        let base = if let Some(base) = self.source_store.clone() {
+            base
+        } else {
+            self.source_status = Some("Materializing bounded source result".to_owned());
+            match shared.0.borrow_mut().materialize() {
+                Ok(base) => base,
+                Err(error) => {
+                    self.source_status = Some(format!(
+                        "Materialization failed; prior view retained: {error}"
+                    ));
+                    return QueryRefresh::Failed;
+                }
+            }
         };
-
-        match execution {
-            Ok(crate::table::QueryExecution::Executed(mut result)) => {
-                if result.generation() != definition.generation {
-                    self.source_status = Some(
-                        "Query execution failed: result belongs to another source generation"
-                            .to_owned(),
-                    );
-                    return QueryRefresh::Failed;
-                }
-                let max_rows = self.viewport.height.max(1);
-                let mut delivered = Vec::new();
-                let mut collect = |_: RowIndex, row: &crate::table::Row| {
-                    delivered.push(row.clone());
-                    std::ops::ControlFlow::Continue(())
-                };
-                let load = result.index_and_scan_rows(
-                    RowIndex(max_rows.saturating_sub(1)),
-                    crate::table::ScanRequest {
-                        start: RowIndex(0),
-                        direction: crate::table::ScanDirection::Forward,
-                        max_rows,
-                    },
-                    &mut collect,
-                );
-                if let Err(error) = load {
-                    self.source_status = Some(format!("Query result loading failed: {error}"));
-                    return QueryRefresh::Failed;
-                }
-                self.cache_base_rows_before_first_query();
-                self.rows = delivered
-                    .iter()
-                    .map(crate::table::Row::display_cells)
-                    .collect();
-                self.row_ids = delivered.iter().map(|row| row.id).collect();
-                self.visible_rows = (0..self.rows.len()).collect();
-                self.query_store = Some(SharedTableStore(Rc::new(RefCell::new(result))));
-            }
-            Ok(crate::table::QueryExecution::Unsupported) => {
-                let base = if let Some(base) = self.source_store.clone() {
-                    base
-                } else {
-                    self.source_status = Some("Materializing source for complete query".to_owned());
-                    match shared.0.borrow_mut().materialize() {
-                        Ok(base) => base,
-                        Err(error) => {
-                            self.source_status = Some(format!(
-                                "Materialization failed; prior view retained: {error}"
-                            ));
-                            return QueryRefresh::Failed;
-                        }
-                    }
-                };
-                let numeric_profiles = definition
-                    .columns
-                    .iter()
-                    .map(|column| self.source_numeric_column_profile(column.id.ordinal as usize))
-                    .collect::<Vec<_>>();
-                let result = match crate::table::execute_local_query_with_profiles(
-                    &base,
-                    &definition,
-                    &query,
-                    &|column| {
-                        numeric_profiles
-                            .get(column.ordinal as usize)
-                            .copied()
-                            .unwrap_or_default()
-                    },
-                    &|_, value| value.display().into_owned(),
-                ) {
-                    Ok(result) => result,
-                    Err(error) => {
-                        self.source_status = Some(format!(
-                            "Query execution failed; prior view retained: {error}"
-                        ));
-                        return QueryRefresh::Failed;
-                    }
-                };
-                self.source_store = Some(base);
-                self.rows = result
-                    .rows()
-                    .iter()
-                    .map(crate::table::Row::display_cells)
-                    .collect();
-                self.row_ids = result.rows().iter().map(|row| row.id).collect();
-                self.visible_rows = (0..self.rows.len()).collect();
-                self.query_store = None;
-            }
+        let numeric_profiles = definition
+            .columns
+            .iter()
+            .map(|column| self.source_numeric_column_profile(column.id.ordinal as usize))
+            .collect::<Vec<_>>();
+        let result = match crate::table::execute_local_view_transform_with_profiles(
+            &base,
+            &definition,
+            &query,
+            &|column| {
+                numeric_profiles
+                    .get(column.ordinal as usize)
+                    .copied()
+                    .unwrap_or_default()
+            },
+            &|_, value| value.display().into_owned(),
+        ) {
+            Ok(result) => result,
             Err(error) => {
                 self.source_status = Some(format!(
                     "Query execution failed; prior view retained: {error}"
                 ));
                 return QueryRefresh::Failed;
             }
-        }
+        };
+        self.source_store = Some(base);
+        self.rows = result
+            .rows()
+            .iter()
+            .map(crate::table::Row::display_cells)
+            .collect();
+        self.row_ids = result.rows().iter().map(|row| row.id).collect();
+        self.visible_rows = (0..self.rows.len()).collect();
+        self.query_store = None;
 
-        self.active_query = Some(query);
+        self.active_view_transform = Some(query);
         self.committed_filters = self.filters.clone();
         self.committed_sort_keys = self.sort_keys.clone();
         self.restore_selected_row(selected_id);
         QueryRefresh::Applied
-    }
-
-    fn cache_base_rows_before_first_query(&mut self) {
-        if !self.query_is_active() && self.base_cached_rows.is_none() {
-            self.base_cached_rows = Some(self.rows.clone());
-            self.base_cached_row_ids = Some(self.row_ids.clone());
-        }
     }
 
     fn restore_selected_row(&mut self, selected_id: Option<crate::table::RowId>) {
@@ -1781,8 +2032,118 @@ impl TableView {
         self.cursor.row = self.cursor.row.min(self.rows.len().saturating_sub(1));
     }
 
-    pub fn active_table_query(&self) -> Option<&crate::table::TableQuery> {
-        self.active_query.as_ref()
+    fn current_stable_row_identity(&mut self) -> Option<crate::table::StableRowIdentity> {
+        let source_index = self
+            .visible_rows
+            .get(self.cursor.row)
+            .and_then(|row| self.row_ids.get(*row))
+            .map(|id| id.ordinal as usize)?;
+        self.incremental_store
+            .as_ref()?
+            .0
+            .borrow_mut()
+            .stable_row_identity(RowIndex(source_index))
+            .ok()
+            .flatten()
+    }
+
+    fn mark_stable_row_identity(&mut self) -> Option<crate::table::StableRowIdentity> {
+        let source_index = self.mark_identity?.0.ordinal as usize;
+        self.incremental_store
+            .as_ref()?
+            .0
+            .borrow_mut()
+            .stable_row_identity(RowIndex(source_index))
+            .ok()
+            .flatten()
+    }
+
+    fn restore_stable_identities(
+        &mut self,
+        cursor_identity: Option<crate::table::StableRowIdentity>,
+        mark_identity: Option<crate::table::StableRowIdentity>,
+    ) {
+        if !self.view_transform_is_active()
+            && (cursor_identity.is_some() || mark_identity.is_some())
+        {
+            let mut cursor_found = false;
+            let mut mark_found = false;
+            if let Some(store) = &self.incremental_store {
+                let mut store = store.0.borrow_mut();
+                let mut index = self.row_ids.len();
+                loop {
+                    let source_row = match store.row(RowIndex(index)) {
+                        Ok(Some(row)) => row,
+                        Ok(None) | Err(_) => break,
+                    };
+                    let identity = store.stable_row_identity(RowIndex(index)).ok().flatten();
+                    cursor_found |= identity.as_ref() == cursor_identity.as_ref();
+                    mark_found |= identity.as_ref() == mark_identity.as_ref();
+                    self.row_ids.push(source_row.id);
+                    let mut cells = source_row.display_cells();
+                    cells.resize(self.source_column_count(), String::new());
+                    self.rows.push(cells);
+                    index = index.saturating_add(1);
+                    if cursor_identity.as_ref().is_none_or(|_| cursor_found)
+                        && mark_identity.as_ref().is_none_or(|_| mark_found)
+                    {
+                        break;
+                    }
+                }
+            }
+            self.visible_rows = (0..self.rows.len()).collect();
+        }
+        let identities = if let Some(store) = &self.incremental_store {
+            let mut store = store.0.borrow_mut();
+            self.row_ids
+                .iter()
+                .map(|id| {
+                    store
+                        .stable_row_identity(RowIndex(id.ordinal as usize))
+                        .ok()
+                        .flatten()
+                })
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
+        if let Some(cursor_identity) = cursor_identity {
+            if let Some(row) = identities
+                .iter()
+                .position(|identity| identity.as_ref() == Some(&cursor_identity))
+            {
+                self.cursor.row = row;
+            } else {
+                self.cursor.row = 0;
+            }
+        } else {
+            self.cursor.row = 0;
+        }
+        if let Some(mark_identity) = mark_identity {
+            if let Some(row) = identities
+                .iter()
+                .position(|identity| identity.as_ref() == Some(&mark_identity))
+            {
+                if let Some((_, column_id)) = self.mark_identity {
+                    let new_row_id = self.row_ids[row];
+                    self.mark_identity = Some((new_row_id, column_id));
+                    if let Some(mark) = &mut self.mark {
+                        mark.row = row;
+                    }
+                }
+            } else {
+                self.mark = None;
+                self.mark_identity = None;
+            }
+        } else {
+            self.mark = None;
+            self.mark_identity = None;
+        }
+        self.keep_cursor_visible();
+    }
+
+    pub fn active_view_transform(&self) -> Option<&crate::table::ViewTransform> {
+        self.active_view_transform.as_ref()
     }
 
     fn sort_mode_for_source(&self, source_column: usize, requested: SortMode) -> SortMode {
@@ -1931,7 +2292,9 @@ impl TableView {
         let Some(source_column) = self.source_column_for_visible(self.cursor.column) else {
             return;
         };
-        let max_width = self.cached_rendered_value_width(source_column);
+        let max_width = self
+            .cached_rendered_value_width(source_column)
+            .max(self.rendered_source_header_width(source_column));
         self.ensure_custom_column_widths();
         if let Some(width) = self.column_widths.get_mut(source_column) {
             for _ in 0..steps.unsigned_abs() {
@@ -2036,8 +2399,8 @@ impl TableView {
             self.apply_source_schema_delta(progress.schema_delta)?;
         }
 
-        if self.query_is_active() {
-            match self.refresh_query_result() {
+        if self.view_transform_is_active() {
+            match self.refresh_view_transform() {
                 QueryRefresh::Applied | QueryRefresh::NotStoreBacked => {}
                 QueryRefresh::Failed => {
                     anyhow::bail!(
@@ -2050,7 +2413,7 @@ impl TableView {
             }
         }
 
-        let selected_store = if self.query_is_active() {
+        let selected_store = if self.view_transform_is_active() {
             self.query_store.clone()
         } else {
             self.incremental_store.clone()
@@ -2064,7 +2427,7 @@ impl TableView {
                 .collect();
             self.row_ids = materialized.rows().iter().map(|row| row.id).collect();
             self.visible_rows = (0..self.rows.len()).collect();
-            if !self.query_is_active() {
+            if !self.view_transform_is_active() {
                 self.source_store = Some(materialized);
             }
         }
@@ -2169,18 +2532,23 @@ impl TableView {
             canonical_source: self
                 .table_definition
                 .as_ref()
-                .and_then(|definition| definition.columns.get(source_column))
-                .and_then(|column| {
-                    column
-                        .source_identity
-                        .canonical_key()
-                        .map(ToOwned::to_owned)
-                }),
+                .and_then(|definition| definition.canonical_column_key(source_column)),
             source_type: self
                 .table_definition
                 .as_ref()
                 .and_then(|definition| definition.columns.get(source_column))
                 .map(|column| format!("{:?}", column.source_type)),
+            source_declared_type: self
+                .table_definition
+                .as_ref()
+                .and_then(|definition| definition.columns.get(source_column))
+                .and_then(|column| column.source_declared_type.clone()),
+            source_operations: self
+                .table_definition
+                .as_ref()
+                .and_then(|definition| definition.columns.get(source_column))
+                .map(|column| self.source_operations_for_column(column.id))
+                .unwrap_or_default(),
             filters,
         })
     }
@@ -2777,16 +3145,112 @@ impl TableView {
         input_filename: &str,
         locale: Option<&str>,
     ) -> String {
+        self.to_saved_view_yaml_inner(name, input_filename, locale, None)
+    }
+
+    #[cfg(feature = "saved-views")]
+    pub fn to_saved_view_yaml_with_source_options(
+        &self,
+        name: &str,
+        input_filename: &str,
+        locale: Option<&str>,
+        source_options: &crate::ingest::OpenOptions,
+    ) -> String {
+        self.to_saved_view_yaml_inner(name, input_filename, locale, Some(source_options))
+    }
+
+    #[cfg(feature = "saved-views")]
+    fn to_saved_view_yaml_inner(
+        &self,
+        name: &str,
+        input_filename: &str,
+        locale: Option<&str>,
+        source_options: Option<&crate::ingest::OpenOptions>,
+    ) -> String {
         let mut yaml = String::new();
         yaml.push_str(&format!("name: {}\n", yaml_scalar(name)));
-        if let Some(locale) = locale {
-            yaml.push_str(&format!("locale: {}\n", yaml_scalar(locale)));
+        yaml.push_str("filenames:\n");
+        yaml.push_str(&format!("  - {}\n", yaml_scalar(input_filename)));
+
+        let mut source_yaml = String::new();
+        if let Some(options) = source_options {
+            if self.source_query_provenance.is_some() {
+                source_yaml.push_str("format: sqlite\n");
+            } else if options.format != crate::ingest::InputFormat::Auto {
+                source_yaml.push_str(&format!("format: {}\n", options.format));
+            }
+            if let Some(json_path) = &options.json_path {
+                source_yaml.push_str(&format!("json_path: {}\n", yaml_scalar(json_path.as_str())));
+            }
+            if options.schema_scan == crate::ingest::SchemaScan::Full {
+                source_yaml.push_str("schema_scan: full\n");
+            }
+            if let Some(table) = options.table.as_ref().or_else(|| {
+                self.source_query_provenance
+                    .as_ref()
+                    .and(self.table_definition.as_ref())
+                    .map(|definition| &definition.relation.name)
+            }) {
+                source_yaml.push_str(&format!("table: {}\n", yaml_scalar(table)));
+            }
         }
         if let Some(object_mode) = self.object_mode {
-            yaml.push_str(&format!("object_mode: {}\n", object_mode.resolved));
+            source_yaml.push_str(&format!("object_mode: {}\n", object_mode.resolved));
+        }
+        if let Some(query) = &self.active_source_query {
+            if query.limit != std::num::NonZeroUsize::MAX {
+                source_yaml.push_str(&format!("limit: {}\n", query.limit));
+            }
+            if !query.filters.is_empty() {
+                source_yaml.push_str("filters:\n");
+                for filter in &query.filters {
+                    let column = match filter.scope {
+                        crate::table::SourceFilterScope::WholeRecord => "*".to_owned(),
+                        crate::table::SourceFilterScope::Column(column) => self
+                            .source_column_name_for_id(column)
+                            .unwrap_or_else(|| format!("column_{}", column.ordinal + 1)),
+                    };
+                    source_yaml.push_str(&format!("  - column: {}\n", yaml_scalar(&column)));
+                    source_yaml.push_str(&format!(
+                        "    operator: {}\n",
+                        source_filter_operator_name(filter.operator)
+                    ));
+                    if let Some(value) = &filter.operand {
+                        source_yaml
+                            .push_str(&format!("    value: {}\n", source_operand_yaml(value)));
+                    }
+                }
+            }
+            if !query.order_by.is_empty() {
+                source_yaml.push_str("sort:\n");
+                for sort in &query.order_by {
+                    let column = self
+                        .source_column_name_for_id(sort.column)
+                        .unwrap_or_else(|| format!("column_{}", sort.column.ordinal + 1));
+                    source_yaml.push_str(&format!("  - column: {}\n", yaml_scalar(&column)));
+                    source_yaml.push_str(&format!(
+                        "    direction: {}\n",
+                        match sort.direction {
+                            crate::table::SortDirection::Ascending => "asc",
+                            crate::table::SortDirection::Descending => "desc",
+                        }
+                    ));
+                }
+            }
+        }
+        if source_yaml.is_empty() {
+            yaml.push_str("source: {}\n");
+        } else {
+            yaml.push_str("source:\n");
+            push_indented_yaml(&mut yaml, &source_yaml, 2);
+        }
+
+        let mut view_yaml = String::new();
+        if let Some(locale) = locale {
+            view_yaml.push_str(&format!("locale: {}\n", yaml_scalar(locale)));
         }
         if let Some(nulls) = self.view_nulls {
-            yaml.push_str(&format!(
+            view_yaml.push_str(&format!(
                 "nulls: {}\n",
                 match nulls {
                     NullPlacement::First => "first",
@@ -2794,8 +3258,6 @@ impl TableView {
                 }
             ));
         }
-        yaml.push_str("filenames:\n");
-        yaml.push_str(&format!("  - {}\n", yaml_scalar(input_filename)));
 
         let mut column_blocks = Vec::new();
         for source_column in 0..self.source_column_count() {
@@ -2892,47 +3354,53 @@ impl TableView {
             column_blocks.push(block);
         }
         if !column_blocks.is_empty() {
-            yaml.push_str("columns:\n");
+            view_yaml.push_str("columns:\n");
             for block in column_blocks {
-                yaml.push_str(&block);
+                view_yaml.push_str(&block);
             }
         }
 
         if !self.sort_keys.is_empty() {
-            yaml.push_str("sort:\n");
+            view_yaml.push_str("sort:\n");
             for key in &self.sort_keys {
-                yaml.push_str(&format!(
+                view_yaml.push_str(&format!(
                     "  - column: {}\n",
                     yaml_scalar(&self.source_column_name(key.column))
                 ));
-                yaml.push_str(&format!(
+                view_yaml.push_str(&format!(
                     "    direction: {}\n",
                     match key.direction {
                         SortDirection::Ascending => "asc",
                         SortDirection::Descending => "desc",
                     }
                 ));
-                yaml.push_str(&format!("    kind: {}\n", sort_mode_name(key.mode)));
+                view_yaml.push_str(&format!("    kind: {}\n", sort_mode_name(key.mode)));
             }
         }
 
         if !self.filters.is_empty() {
-            yaml.push_str("filters:\n");
+            view_yaml.push_str("filters:\n");
             for filter in &self.filters {
-                yaml.push_str(&format!(
+                view_yaml.push_str(&format!(
                     "  - column: {}\n",
                     yaml_scalar(&self.source_column_name(filter.column))
                 ));
-                yaml.push_str(&format!(
+                view_yaml.push_str(&format!(
                     "    action: {}\n",
                     match filter.mode {
                         FilterMode::In => "in",
                         FilterMode::Out => "out",
                     }
                 ));
-                yaml.push_str(&format!("    kind: {}\n", filter_kind_name(filter.kind)));
-                yaml.push_str(&format!("    condition: {}\n", yaml_scalar(&filter.input)));
+                view_yaml.push_str(&format!("    kind: {}\n", filter_kind_name(filter.kind)));
+                view_yaml.push_str(&format!("    condition: {}\n", yaml_scalar(&filter.input)));
             }
+        }
+        if view_yaml.is_empty() {
+            yaml.push_str("view: {}\n");
+        } else {
+            yaml.push_str("view:\n");
+            push_indented_yaml(&mut yaml, &view_yaml, 2);
         }
         yaml
     }
@@ -2942,10 +3410,9 @@ impl TableView {
         if let Some(key) = self
             .table_definition
             .as_ref()
-            .and_then(|definition| definition.columns.get(source_column))
-            .and_then(|column| column.source_identity.canonical_key())
+            .and_then(|definition| definition.canonical_column_key(source_column))
         {
-            return key.to_owned();
+            return key;
         }
         self.header
             .as_ref()
@@ -3057,6 +3524,17 @@ impl TableView {
             })
             .map(|value| UnicodeWidthStr::width(value.as_str()))
             .max()
+            .unwrap_or(1)
+            .max(1)
+    }
+
+    fn rendered_source_header_width(&self, source_column: usize) -> usize {
+        self.rendered_source_header()
+            .and_then(|header| {
+                header
+                    .get(source_column)
+                    .map(|value| UnicodeWidthStr::width(value.as_str()))
+            })
             .unwrap_or(1)
             .max(1)
     }
@@ -3276,7 +3754,7 @@ impl TableView {
     fn exact_reduction_profiles(
         &mut self,
     ) -> anyhow::Result<Option<Vec<crate::table::ColumnReductionProfile>>> {
-        let shared = if self.query_is_active() {
+        let shared = if self.view_transform_is_active() {
             self.query_store.clone()
         } else {
             self.incremental_store.clone()
@@ -3498,19 +3976,19 @@ fn display_format_metadata_name(format: DisplayFormatMetadata) -> &'static str {
     }
 }
 
-fn table_sort_mode(mode: SortMode) -> crate::table::SortMode {
+fn table_sort_mode(mode: SortMode) -> crate::table::ViewSortMode {
     match mode {
-        SortMode::Lexical => crate::table::SortMode::Lexical,
-        SortMode::Natural => crate::table::SortMode::Natural,
-        SortMode::Numeric => crate::table::SortMode::Numeric,
+        SortMode::Lexical => crate::table::ViewSortMode::Lexical,
+        SortMode::Natural => crate::table::ViewSortMode::Natural,
+        SortMode::Numeric => crate::table::ViewSortMode::Numeric,
         #[cfg(feature = "saved-views")]
-        SortMode::Date => crate::table::SortMode::Date,
+        SortMode::Date => crate::table::ViewSortMode::Date,
         #[cfg(feature = "saved-views")]
-        SortMode::SemVer => crate::table::SortMode::SemanticVersion,
+        SortMode::SemVer => crate::table::ViewSortMode::SemanticVersion,
         #[cfg(feature = "saved-views")]
-        SortMode::Ip => crate::table::SortMode::Ip,
+        SortMode::Ip => crate::table::ViewSortMode::Ip,
         #[cfg(feature = "saved-views")]
-        SortMode::Boolean => crate::table::SortMode::Boolean,
+        SortMode::Boolean => crate::table::ViewSortMode::Boolean,
     }
 }
 
@@ -3627,6 +4105,16 @@ fn yaml_key(value: &str) -> String {
 }
 
 #[cfg(feature = "saved-views")]
+fn push_indented_yaml(output: &mut String, yaml: &str, spaces: usize) {
+    let indent = " ".repeat(spaces);
+    for line in yaml.lines() {
+        output.push_str(&indent);
+        output.push_str(line);
+        output.push('\n');
+    }
+}
+
+#[cfg(feature = "saved-views")]
 fn yaml_scalar(value: &str) -> String {
     if !value.is_empty()
         && value
@@ -3637,6 +4125,35 @@ fn yaml_scalar(value: &str) -> String {
         value.to_owned()
     } else {
         yaml_quoted_scalar(value)
+    }
+}
+
+#[cfg(feature = "saved-views")]
+fn source_filter_operator_name(operator: crate::table::SourceFilterOperator) -> &'static str {
+    use crate::table::SourceFilterOperator as Operator;
+    match operator {
+        Operator::Equal => "equal",
+        Operator::NotEqual => "not_equal",
+        Operator::LessThan => "less_than",
+        Operator::LessThanOrEqual => "less_or_equal",
+        Operator::GreaterThan => "greater_than",
+        Operator::GreaterThanOrEqual => "greater_or_equal",
+        Operator::Contains => "contains",
+        Operator::Prefix => "prefix",
+        Operator::IsNull => "is_null",
+        Operator::IsNotNull => "is_not_null",
+    }
+}
+
+#[cfg(feature = "saved-views")]
+fn source_operand_yaml(value: &crate::table::SourceOperand) -> String {
+    match value {
+        crate::table::SourceOperand::Null => "null".to_owned(),
+        crate::table::SourceOperand::Boolean(value) => value.to_string(),
+        crate::table::SourceOperand::Integer(value) => value.to_string(),
+        crate::table::SourceOperand::Float(value) => value.to_string(),
+        crate::table::SourceOperand::Text(value) => yaml_scalar(value),
+        crate::table::SourceOperand::Binary(value) => yaml_scalar(&String::from_utf8_lossy(value)),
     }
 }
 
@@ -3694,8 +4211,8 @@ mod tests {
     use crate::ops::filter::{FilterKind, FilterMode};
     use crate::table::{
         CellValue, ColumnDefinition, ColumnId, ColumnSourceIdentity, IndexProgress, LogicalType,
-        QueryExecution, RelationMetadata, Row, RowId, ScanDirection, ScanProgress, ScanRequest,
-        SchemaDelta, SchemaState, TypeOrigin,
+        RelationMetadata, Row, RowId, ScanDirection, ScanProgress, ScanRequest, SchemaDelta,
+        SchemaState, TypeOrigin,
     };
 
     fn rows(values: &[&[&str]]) -> Vec<Vec<String>> {
@@ -3710,22 +4227,7 @@ mod tests {
         generation: SourceGeneration,
         rows: Vec<Row>,
         indexed: usize,
-        query_rows: Option<Vec<Row>>,
-        fail_query: bool,
         fail_materialize: bool,
-    }
-
-    impl QueryTestStore {
-        fn derived(generation: SourceGeneration, rows: Vec<Row>) -> Self {
-            Self {
-                generation,
-                rows,
-                indexed: 0,
-                query_rows: None,
-                fail_query: false,
-                fail_materialize: false,
-            }
-        }
     }
 
     impl TableStore for QueryTestStore {
@@ -3823,29 +4325,9 @@ mod tests {
             }
             InMemoryTable::from_rows(self.generation, self.rows.clone())
         }
-
-        fn try_execute_query(
-            &mut self,
-            _query: &crate::table::TableQuery,
-        ) -> anyhow::Result<QueryExecution> {
-            if self.fail_query {
-                anyhow::bail!("injected query failure");
-            }
-            Ok(match &self.query_rows {
-                Some(rows) => {
-                    QueryExecution::Executed(Box::new(Self::derived(self.generation, rows.clone())))
-                }
-                None => QueryExecution::Unsupported,
-            })
-        }
     }
 
-    fn query_test_table(
-        values: &[&str],
-        query_values: Option<&[&str]>,
-        fail_query: bool,
-        fail_materialize: bool,
-    ) -> OpenedTable {
+    fn query_test_table(values: &[&str], fail_materialize: bool) -> OpenedTable {
         let generation = SourceGeneration::new();
         let make_rows = |values: &[&str]| {
             values
@@ -3863,7 +4345,6 @@ mod tests {
                 .collect::<Vec<_>>()
         };
         let source_rows = make_rows(values);
-        let query_rows = query_values.map(make_rows);
         OpenedTable {
             generation,
             definition: TableDefinition {
@@ -3878,6 +4359,7 @@ mod tests {
                         name: Some("value".to_owned()),
                     },
                     display_name: "value".to_owned(),
+                    source_declared_type: None,
                     source_type: LogicalType::Text,
                     type_origin: TypeOrigin::Declared,
                 }],
@@ -3888,8 +4370,6 @@ mod tests {
                 generation,
                 rows: source_rows,
                 indexed: 0,
-                query_rows,
-                fail_query,
                 fail_materialize,
             }),
             object_mode: None,
@@ -3916,63 +4396,51 @@ mod tests {
     }
 
     #[test]
-    fn source_executed_query_result_remains_incremental_and_restores_cached_base() {
-        let opened = query_test_table(
-            &["keep-0", "keep-1", "drop"],
-            Some(&["keep-0", "keep-1"]),
-            false,
-            false,
-        );
+    fn local_view_transform_materializes_active_result_and_restores_base() {
+        let opened = query_test_table(&["keep-0", "keep-1", "drop"], false);
         let mut view = TableView::from_opened_table(opened, Viewport::new(1, 1)).expect("view");
 
         view.apply_filter(0, FilterMode::In, FilterKind::Text, "keep".to_owned())
             .expect("filter");
 
-        assert_eq!(view.rows(), rows(&[&["keep-0"]]));
-        assert_eq!(view.row_count_state(), RowCount::AtLeast(1));
-        view.goto_bottom();
         assert_eq!(view.rows(), rows(&[&["keep-0"], &["keep-1"]]));
         assert_eq!(view.row_count_state(), RowCount::Exact(2));
 
         view.clear_filters_for_column(0);
-        assert_eq!(view.rows(), rows(&[&["keep-0"]]));
-        assert_eq!(view.row_count_state(), RowCount::AtLeast(1));
-        assert!(!view.query_is_active());
+        assert_eq!(view.rows(), rows(&[&["keep-0"], &["keep-1"], &["drop"]]));
+        assert_eq!(view.row_count_state(), RowCount::Exact(3));
+        assert!(!view.view_transform_is_active());
     }
 
     #[test]
-    fn query_and_materialization_failures_preserve_prior_view_and_configuration() {
-        for (fail_query, fail_materialize, expected) in [
-            (true, false, "injected query failure"),
-            (false, true, "injected materialization failure"),
-        ] {
-            let opened = query_test_table(&["b", "a"], None, fail_query, fail_materialize);
-            let mut view = TableView::from_opened_table(opened, Viewport::new(1, 1)).expect("view");
-            let prior_rows = view.rows.clone();
-            let prior_cursor = view.cursor;
-            let prior_viewport = view.viewport;
-            let prior_query = view.active_query.clone();
+    fn materialization_failures_preserve_prior_view_and_configuration() {
+        let expected = "injected materialization failure";
+        let opened = query_test_table(&["b", "a"], true);
+        let mut view = TableView::from_opened_table(opened, Viewport::new(1, 1)).expect("view");
+        let prior_rows = view.rows.clone();
+        let prior_cursor = view.cursor;
+        let prior_viewport = view.viewport;
+        let prior_query = view.active_view_transform.clone();
 
-            view.sort_current_column(SortMode::Lexical, SortDirection::Ascending);
+        view.sort_current_column(SortMode::Lexical, SortDirection::Ascending);
 
-            assert_eq!(view.rows, prior_rows);
-            assert_eq!(view.cursor, prior_cursor);
-            assert_eq!(view.viewport, prior_viewport);
-            assert_eq!(view.active_query, prior_query);
-            assert!(view.sort_keys.is_empty());
-            assert!(view.filters.is_empty());
-            assert!(view.take_source_status().unwrap().contains(expected));
+        assert_eq!(view.rows, prior_rows);
+        assert_eq!(view.cursor, prior_cursor);
+        assert_eq!(view.viewport, prior_viewport);
+        assert_eq!(view.active_view_transform, prior_query);
+        assert!(view.sort_keys.is_empty());
+        assert!(view.filters.is_empty());
+        assert!(view.take_source_status().unwrap().contains(expected));
 
-            view.apply_filter(0, FilterMode::In, FilterKind::Text, "a".to_owned())
-                .expect("filter input");
-            assert_eq!(view.rows, prior_rows);
-            assert_eq!(view.cursor, prior_cursor);
-            assert_eq!(view.viewport, prior_viewport);
-            assert_eq!(view.active_query, prior_query);
-            assert!(view.sort_keys.is_empty());
-            assert!(view.filters.is_empty());
-            assert!(view.take_source_status().unwrap().contains(expected));
-        }
+        view.apply_filter(0, FilterMode::In, FilterKind::Text, "a".to_owned())
+            .expect("filter input");
+        assert_eq!(view.rows, prior_rows);
+        assert_eq!(view.cursor, prior_cursor);
+        assert_eq!(view.viewport, prior_viewport);
+        assert_eq!(view.active_view_transform, prior_query);
+        assert!(view.sort_keys.is_empty());
+        assert!(view.filters.is_empty());
+        assert!(view.take_source_status().unwrap().contains(expected));
     }
 
     #[test]
@@ -4249,13 +4717,11 @@ mod tests {
     }
 
     #[test]
-    fn single_column_resize_scales_and_caps_at_cached_rendered_value_width() {
+    fn single_column_resize_scales_and_caps_at_content_or_header_width() {
+        let header = "A header wider than every value";
+        let header_width = UnicodeWidthStr::width(header);
         let mut view = TableView::classify(
-            rows(&[
-                &["A header wider than every value"],
-                &["1"],
-                &["1234567890"],
-            ]),
+            rows(&[&[header], &["1"], &["1234567890"]]),
             Viewport::new(3, 1),
         );
 
@@ -4265,10 +4731,13 @@ mod tests {
         view.adjust_current_column_width(2);
         assert_eq!(view.effective_column_widths(), [8]);
         view.adjust_current_column_width(20);
-        assert_eq!(view.effective_column_widths(), [10]);
+        assert_eq!(view.effective_column_widths(), [header_width]);
 
         view.adjust_current_column_width(-1);
-        assert_eq!(view.effective_column_widths(), [8]);
+        assert_eq!(
+            view.effective_column_widths(),
+            [header_width.saturating_sub((header_width / 5).max(1))]
+        );
         view.adjust_current_column_width(-20);
         assert_eq!(view.effective_column_widths(), [1]);
         view.adjust_current_column_width(-1);
@@ -4276,9 +4745,13 @@ mod tests {
 
         view.set_current_column_width(20);
         view.adjust_current_column_width(1);
-        assert_eq!(view.effective_column_widths(), [20]);
+        let widened = 24.min(header_width);
+        assert_eq!(view.effective_column_widths(), [widened]);
         view.adjust_current_column_width(-1);
-        assert_eq!(view.effective_column_widths(), [16]);
+        assert_eq!(
+            view.effective_column_widths(),
+            [widened.saturating_sub((widened / 5).max(1))]
+        );
     }
 
     #[test]
@@ -4609,12 +5082,14 @@ mod tests {
             r#"
 name: counts
 filenames: [counts.csv]
-columns:
-  Count:
-    type: integer
-    width: 12
-  Hidden:
-    visible: false
+source: {}
+view:
+  columns:
+    Count:
+      type: integer
+      width: 12
+    Hidden:
+      visible: false
 "#,
         )
         .expect("parse");
@@ -4646,29 +5121,31 @@ columns:
         let parsed = crate::saved_views::parse_saved_view_yaml(
             r##"
 name: display
-locale: de_DE
 filenames: [display.csv]
-columns:
-  Name:
-    type: text
-    format: uppercase
-  Locale:
-    type: float
-    format: locale
-  Mask:
-    type: float
-    format: mask
-    mask: "#,##0.00"
-  Flag:
-    type: word
-    format: bit
+source: {}
+view:
+  locale: de_DE
+  columns:
+    Name:
+      type: text
+      format: uppercase
+    Locale:
+      type: float
+      format: locale
+    Mask:
+      type: float
+      format: mask
+      mask: "#,##0.00"
+    Flag:
+      type: word
+      format: bit
 "##,
         )
         .expect("parse");
         let headers = view.header().expect("header").to_vec();
         let resolved = crate::saved_views::resolve_columns(&parsed.view, &headers);
 
-        view.apply_saved_columns(&resolved, parsed.view.locale.as_deref());
+        view.apply_saved_columns(&resolved, parsed.view.view.locale.as_deref());
 
         assert_eq!(
             view.visible_rows_vec(),
@@ -4691,10 +5168,12 @@ columns:
             r#"
 name: counts
 filenames: [counts.csv]
-columns:
-  Count:
-    type: integer
-    format: locale
+source: {}
+view:
+  columns:
+    Count:
+      type: integer
+      format: locale
 "#,
         )
         .expect("parse");
@@ -4730,19 +5209,21 @@ columns:
             r#"
 name: colors
 filenames: [data.csv]
-columns:
-  Status:
-    colors:
-      - match:
-          active: green
-  Percent:
-    type: number
-    colors:
-      - range:
-          "<10": red
-      - gradient:
-          mode: auto
-          colors: [green, yellow]
+source: {}
+view:
+  columns:
+    Status:
+      colors:
+        - match:
+            active: green
+    Percent:
+      type: number
+      colors:
+        - range:
+            "<10": red
+        - gradient:
+            mode: auto
+            colors: [green, yellow]
 "#,
         )
         .expect("parse");
@@ -4780,11 +5261,13 @@ columns:
             r#"
 name: colors
 filenames: [data.csv]
-columns:
-  Code:
-    colors:
-      - match:
-          "10": green
+source: {}
+view:
+  columns:
+    Code:
+      colors:
+        - match:
+            "10": green
 "#,
         )
         .expect("parse");
@@ -4835,8 +5318,14 @@ columns:
                 .as_deref(),
             Some("@key")
         );
-        let yaml = view.to_saved_view_yaml("repositories", "repositories.json", None);
-        assert!(yaml.contains("object_mode: entries\n"));
+        let yaml = view.to_saved_view_yaml_with_source_options(
+            "repositories",
+            "repositories.json",
+            None,
+            &options,
+        );
+        assert!(yaml.contains("source:\n  format: json\n  object_mode: entries\n"));
+        assert!(yaml.contains("\nview: {}\n"));
 
         let record_options = crate::ingest::OpenOptions {
             format: crate::ingest::InputFormat::Json,
@@ -4855,8 +5344,13 @@ columns:
         let record_view =
             TableView::from_opened_table(record, Viewport::new(8, 80)).expect("record view");
         assert!(record_view
-            .to_saved_view_yaml("record", "repositories.json", None)
-            .contains("object_mode: record\n"));
+            .to_saved_view_yaml_with_source_options(
+                "record",
+                "repositories.json",
+                None,
+                &record_options,
+            )
+            .contains("source:\n  format: json\n  object_mode: record\n"));
 
         let array_path = dir.path().join("array.json");
         std::fs::write(&array_path, r#"[{"name":"one"}]"#).expect("array write");
@@ -4886,13 +5380,15 @@ columns:
             r#"
 name: identifiers
 filenames: [data.csv]
-columns:
-  Name:
-    type: text
-    format: uppercase
-    colors:
-      - identifiers:
-          colors: auto
+source: {}
+view:
+  columns:
+    Name:
+      type: text
+      format: uppercase
+      colors:
+        - identifiers:
+            colors: auto
 "#,
         )
         .expect("parse");
@@ -4934,11 +5430,13 @@ columns:
             r#"
 name: identifiers
 filenames: [data.csv]
-columns:
-  Address:
-    type: ip
-    colors:
-      - identifiers: {}
+source: {}
+view:
+  columns:
+    Address:
+      type: ip
+      colors:
+        - identifiers: {}
 "#,
         )
         .expect("parse");
@@ -4972,11 +5470,13 @@ columns:
             r#"
 name: identifiers
 filenames: [data.csv]
-columns:
-  Address:
-    type: ip
-    colors:
-      - identifiers: {}
+source: {}
+view:
+  columns:
+    Address:
+      type: ip
+      colors:
+        - identifiers: {}
 "#,
         )
         .expect("parse");
@@ -5011,9 +5511,11 @@ columns:
             r#"
 name: dates
 filenames: [dates.csv]
-columns:
-  Created:
-    type: date
+source: {}
+view:
+  columns:
+    Created:
+      type: date
 "#,
         )
         .expect("parse");
@@ -5034,9 +5536,11 @@ columns:
             r#"
 name: versions
 filenames: [versions.csv]
-columns:
-  Version:
-    type: semver
+source: {}
+view:
+  columns:
+    Version:
+      type: semver
 "#,
         )
         .expect("parse");
@@ -5057,9 +5561,11 @@ columns:
             r#"
 name: ips
 filenames: [ips.csv]
-columns:
-  Address:
-    type: ip
+source: {}
+view:
+  columns:
+    Address:
+      type: ip
 "#,
         )
         .expect("parse");
@@ -5161,7 +5667,7 @@ columns:
         assert_eq!(view.visible_raw_rows_vec(), rows(&[&[""], &["1"], &["2"]]));
         assert_eq!(view.current_raw_cell(), Some("1"));
         assert_eq!(
-            view.active_table_query().unwrap().order_by[0].nulls,
+            view.active_view_transform().unwrap().order_by[0].nulls,
             NullPlacement::First
         );
 
@@ -5202,10 +5708,12 @@ columns:
             r#"
 name: late
 filenames: [late.json]
-columns:
-  /late:
-    label: Later
-    nulls: first
+source: {}
+view:
+  columns:
+    /late:
+      label: Later
+      nulls: first
 "#,
         )
         .expect("saved");
@@ -5246,23 +5754,28 @@ columns:
             r#"
 name: late operations
 filenames: [late.json]
-sort:
-  - column: /late
-    direction: desc
-    kind: numeric
-filters:
-  - column: /late
-    action: in
-    kind: numeric
-    condition: "> 2"
+source: {}
+view:
+  sort:
+    - column: /late
+      direction: desc
+      kind: numeric
+  filters:
+    - column: /late
+      action: in
+      kind: numeric
+      condition: "> 2"
 "#,
         )
         .expect("saved");
-        view.retain_pending_saved_operations(saved.view.sort.clone(), saved.view.filters.clone());
+        view.retain_pending_saved_operations(
+            saved.view.view.sort.clone(),
+            saved.view.view.filters.clone(),
+        );
 
         view.goto(1, 0);
 
-        let query = view.active_table_query().expect("query");
+        let query = view.active_view_transform().expect("query");
         assert_eq!(query.order_by.len(), 1);
         assert_eq!(query.order_by[0].column.ordinal, 1);
         assert_eq!(query.filters.len(), 1);

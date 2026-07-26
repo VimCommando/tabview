@@ -23,6 +23,9 @@ pub enum Command {
     ShowCell,
     Search,
     ColumnInfo,
+    SourceConfig,
+    ViewConfig,
+    Query,
     FilterIn,
     FilterOut,
     #[cfg(feature = "saved-views")]
@@ -151,6 +154,9 @@ pub fn lookup_char(ch: char) -> Option<Command> {
         '\n' => Command::ShowCell,
         '/' => Command::Search,
         'i' => Command::ColumnInfo,
+        'u' => Command::SourceConfig,
+        'V' => Command::ViewConfig,
+        'p' => Command::Query,
         #[cfg(feature = "saved-views")]
         'v' => Command::SavedView,
         'f' => Command::FilterIn,
@@ -302,6 +308,21 @@ pub fn default_key_bindings() -> Vec<KeyBinding> {
             command: Command::ColumnInfo,
             description: "Edit current column view",
         },
+        KeyBinding {
+            keys: "u",
+            command: Command::SourceConfig,
+            description: "Configure bounded source query",
+        },
+        KeyBinding {
+            keys: "V",
+            command: Command::ViewConfig,
+            description: "Configure local view",
+        },
+        KeyBinding {
+            keys: "p",
+            command: Command::Query,
+            description: "Show source query SQL",
+        },
     ];
     #[cfg(feature = "saved-views")]
     bindings.push(KeyBinding {
@@ -430,7 +451,7 @@ mod tests {
         assert_eq!(lookup_char('F'), Some(Command::FilterOut));
         assert_eq!(lookup_char('n'), Some(Command::NextSearchResult));
         assert_eq!(lookup_char('N'), Some(Command::PreviousSearchResult));
-        assert_eq!(lookup_char('p'), None);
+        assert_eq!(lookup_char('p'), Some(Command::Query));
         assert_eq!(lookup_char('#'), Some(Command::SortNumericAsc));
         assert_eq!(lookup_char('y'), Some(Command::YankCell));
         assert_eq!(lookup_char('z'), Some(Command::ToggleColumnWidthMode));

@@ -15,7 +15,7 @@ This change covers local SQLite-format files. Turso Cloud and `libsql://` URLs r
 **Goals:**
 
 - Open a local SQLite database through Turso and view one selected ordinary table or compatible ordinary view.
-- Guarantee that no Tabview user action can modify the opened database's logical schema or data.
+- Guarantee that Tabview opens SQLite files at the storage boundary as read-only, cannot modify logical schema or data, does not convert rollback-journal databases to WAL, and does not create or modify engine sidecars.
 - Bound every SQLite working set with a configurable source limit that defaults to 1,000 rows.
 - Apply source-native filters and sorting before the source limit.
 - Apply universal Tabview filters and sorting after the fixed source result is fetched.
@@ -26,7 +26,7 @@ This change covers local SQLite-format files. Turso Cloud and `libsql://` URLs r
 - Organize saved-view YAML into top-level `source` and `view` sections.
 - Present a simple table-selection modal in interactive execution only when multiple selectable user-facing relations remain unresolved.
 - Support SQLite in direct batch output and post-interactive output without a source-specific exporter.
-- Keep Turso's default features, including FTS and mimalloc, without implying compatibility with SQLite FTS virtual tables.
+- Disable Turso's default feature set, retain mimalloc explicitly as Tabview's global allocator, and omit Tantivy-backed FTS because it is unrelated to the read-only table source.
 
 **Non-Goals:**
 
@@ -317,13 +317,29 @@ The pre-change flat saved-view shape is not retained. CLI source options merge i
 
 The raw Turso connection is private to a Tabview-owned facade. The facade exposes typed relation discovery, schema inspection, source-query compilation, and row-query operations; it exposes no general execute method and accepts no user SQL.
 
-Immediately after connecting, the facade enables and verifies `PRAGMA query_only=ON`. If verification fails, opening fails. Regression tests snapshot logical schema and table contents before and after every supported action.
+The facade bypasses the high-level `turso::Builder::new_local` path because Turso 0.7.1 opens that path with create/write flags and may convert a legacy rollback-journal database to WAL before a connection exists. Instead, it constructs a Turso core database with `OpenFlags::ReadOnly` before connecting. Existing WAL files remain readable, but a missing WAL or shared-coordination file is not created.
 
-The guarantee concerns persistent logical database contents and schema. It does not promise byte-for-byte identity for engine-managed database, journal, WAL, or shared-memory files.
+Immediately after connecting, the facade enables and verifies `PRAGMA query_only=ON` as defense in depth. If verification fails, opening fails. Regression tests snapshot database bytes and any existing WAL or shared-memory files, exercise supported reads and rejected mutations, and verify that no file content or sidecar set changed.
 
-### Keep Turso defaults intentionally
+### Select Turso features explicitly
 
-Add `turso` with default features enabled, intentionally accepting Turso's FTS support and mimalloc. Turso's FTS feature does not imply that existing SQLite FTS3/4/5 virtual tables are selectable. Add only the Tokio features required by the runtime boundary and record binary-size, compile-time, allocator, and platform effects.
+Add `turso` with default features disabled, then explicitly enable mimalloc as
+Tabview's global allocator while leaving Tantivy-backed FTS out of the release
+dependency graph. Existing SQLite FTS3/4/5 virtual tables remain unselectable.
+Keep only the Tokio features required by the runtime boundary and record
+binary-size, compile-time, allocator, and platform effects.
+
+### Gate SQLite behind a default feature
+
+Add a default-enabled `sqlite` Cargo feature that activates the optional
+`turso` and `tokio` dependencies together with the SQLite adapter. The normal
+build keeps its SQLite behavior unchanged.
+
+A build without `sqlite` omits the adapter module and dependency graph,
+`InputFormat::Sqlite`, SQLite signature dispatch, and the `--table` CLI option.
+Its format diagnostics and help text list only the formats compiled into that
+binary. The source/view table model remains source-neutral and available to
+file adapters.
 
 ## Risks / Trade-offs
 
@@ -331,21 +347,22 @@ Add `turso` with default features enabled, intentionally accepting Turso's FTS s
 - **Source and view operations can look similar while producing different result sets** → Label their scope explicitly in commands, modals, saved YAML, status, and query output.
 - **View filtering may leave very few visible rows** → Report visible and source counts separately and never refill implicitly.
 - **A source lacks a stable row key** → Reset identity-dependent cursor or mark state across source-query replacement instead of guessing.
-- **A future code path could use a mutating Turso API** → Keep the raw connection private, verify `query_only`, and test logical before/after snapshots.
+- **A future code path could use a mutating Turso API** → Open Turso core with `OpenFlags::ReadOnly`, keep the raw connection private, verify `query_only`, and test physical and logical before/after snapshots.
 - **A file SourceSort may require unbounded work** → Make source-operation capabilities explicit and retain bounded view sorting as the universal alternative.
 - **Batch execution cannot ask which table to open** → Auto-select only a sole selectable candidate and require explicit table selection when multiple selectable candidates remain.
 - **A stored view can use SQL Turso cannot execute** → Probe every ordinary view with the pinned Turso version, retain unavailable reasons, and preserve normal query-failure handling for data-dependent incompatibilities.
 - **Virtual-table support depends on registered modules and module-specific semantics** → Exclude all virtual tables from the initial selectable catalog and test that virtual, shadow, and internal objects receive the intended diagnostics.
 - **Duplicate database column names are legal** → Include ordinal in source identity and use deterministic suffixed saved-view keys.
-- **mimalloc affects the whole process** → Keep it as the accepted default and verify supported release builds.
+- **Turso defaults add unrelated FTS code alongside the desired allocator** → Disable default features, enable only mimalloc, and verify Tantivy is absent from normal release builds.
+- **Feature-disabled builds could advertise unavailable SQLite behavior** → Compile-gate the format variant, signature probe, table-selection CLI, adapter, tests, and user-facing format diagnostics together.
 
 ## Migration Plan
 
 1. Refactor saved-view and runtime query state into explicit source and view sections.
 2. Add bounded source-query, result-extent, provenance, and asynchronous replacement contracts.
 3. Add SQLite format selection, relational identities, discovery, and the table picker.
-4. Implement the read-only Turso facade, typed SQLite adapter, source-query compiler, and limited incremental store.
+4. Implement the storage-level read-only Turso core facade, typed SQLite adapter, source-query compiler, and limited incremental store.
 5. Integrate view transforms, batch output, reload, identity behavior, SQL output, status, and errors.
-6. Run logical read-only, query-layer, boundedness, adapter, interactive, batch-output, and platform verification.
+6. Run physical and logical read-only, query-layer, boundedness, adapter, interactive, batch-output, and platform verification.
 
 Rollback removes SQLite dispatch and dependencies. The generic source/view query split and nested saved-view structure remain useful for file and future external sources.

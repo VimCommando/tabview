@@ -1,7 +1,21 @@
 ## ADDED Requirements
 
+### Requirement: SQLite compile feature
+The system SHALL place SQLite support and its Turso/Tokio dependency graph
+behind a default-enabled `sqlite` Cargo feature.
+
+#### Scenario: Default build
+- **WHEN** Tabview is compiled with its default features
+- **THEN** SQLite format selection, signature detection, and table selection are available
+
+#### Scenario: SQLite feature is disabled
+- **WHEN** Tabview is compiled without the `sqlite` feature
+- **THEN** Turso and Tokio are absent from the normal dependency graph and the binary does not accept `--format sqlite`, expose `--table`, or dispatch the SQLite signature
+
 ### Requirement: SQLite source resolution
-The system SHALL open local SQLite-format path inputs through Turso when SQLite is selected explicitly or detected from the strong database signature before text decoding.
+When compiled with the `sqlite` feature, the system SHALL open local
+SQLite-format path inputs through Turso when SQLite is selected explicitly or
+detected from the strong database signature before text decoding.
 
 #### Scenario: SQLite file with arbitrary extension
 - **WHEN** a seekable path begins with the `SQLite format 3\0` signature in automatic format mode
@@ -189,11 +203,23 @@ SQLite result rows SHALL use a stable database identity when available and SHALL
 - **THEN** cursor and mark state are reset rather than mapped by result position
 
 ### Requirement: Tabview-enforced read-only behavior
-The SQLite adapter SHALL keep the raw Turso connection private, expose only typed discovery, schema, source-query, and row-fetch operations, enable and verify `PRAGMA query_only=ON`, and provide no production path for arbitrary or mutating SQL.
+The SQLite adapter SHALL open the database through Turso core with `OpenFlags::ReadOnly` before creating a connection, keep the raw connection private, expose only typed discovery, schema, source-query, and row-fetch operations, enable and verify `PRAGMA query_only=ON` as defense in depth, and provide no production path for arbitrary or mutating SQL.
 
-#### Scenario: User actions preserve logical database contents
+#### Scenario: Sidecar-free rollback database remains unchanged
+- **WHEN** Tabview opens and queries a rollback-journal database that has no engine sidecars
+- **THEN** the main database bytes remain unchanged and no journal, WAL, shared-memory, coordination, or logical-log sidecar is created
+
+#### Scenario: Existing WAL database remains unchanged
+- **WHEN** Tabview opens and queries a WAL database with existing WAL and shared-memory files
+- **THEN** it reads the current logical contents without changing the main database, WAL, or shared-memory bytes and without creating another sidecar
+
+#### Scenario: Non-writable source remains readable
+- **WHEN** the database file and its containing directory are readable but not writable
+- **THEN** supported SQLite viewing operations succeed without requesting write access
+
+#### Scenario: User actions preserve physical and logical database contents
 - **WHEN** a user opens, selects, filters, sorts, navigates, displays SQL, reloads, and closes a SQLite relation
-- **THEN** the database's persistent schema and table contents remain unchanged
+- **THEN** the database's persistent schema, table contents, database bytes, and existing sidecar bytes remain unchanged
 
 #### Scenario: Production code requests database access
 - **WHEN** UI or table-store code accesses SQLite
@@ -205,11 +231,7 @@ The SQLite adapter SHALL keep the raw Turso connection private, expose only type
 
 #### Scenario: Mutation is attempted in a regression test
 - **WHEN** a mutation is submitted through the configured low-level test connection
-- **THEN** Turso rejects it as read-only
-
-#### Scenario: Turso performs file bookkeeping
-- **WHEN** Turso changes file metadata or engine-managed journal, WAL, or shared-memory state while reading
-- **THEN** the guarantee remains scoped to persistent logical schema and data rather than byte-for-byte file identity
+- **THEN** Turso rejects it through both storage-level read-only enforcement and query-only confinement
 
 ### Requirement: Incremental limited SQLite store
 The system SHALL fetch and cache the bounded SQLite source result incrementally through `TableStore`.

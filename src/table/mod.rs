@@ -12,6 +12,7 @@ use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 use csv::ReaderBuilder;
@@ -22,7 +23,10 @@ use crate::ingest::{decode_input, parse_rows, sniff_delimiter, ParseOptions, Quo
 const LAZY_FILE_SAMPLE_BYTES: u64 = 64 * 1024;
 const LAZY_FORWARD_SCAN_BATCH_ROWS: usize = 256;
 
-pub trait TableStore {
+pub type SourceQueryTask =
+    Box<dyn FnOnce() -> anyhow::Result<Box<dyn TableStore>> + Send + 'static>;
+
+pub trait TableStore: Send {
     fn generation(&self) -> SourceGeneration;
     fn row_count(&self) -> RowCount;
     fn column_count(&self) -> usize;
@@ -44,8 +48,37 @@ pub trait TableStore {
         visitor: &mut dyn RowVisitor,
     ) -> anyhow::Result<ScanProgress>;
     fn materialize(&mut self) -> anyhow::Result<InMemoryTable>;
-    fn try_execute_query(&mut self, _query: &TableQuery) -> anyhow::Result<QueryExecution> {
-        Ok(QueryExecution::Unsupported)
+    fn source_capabilities(&self) -> SourceOperationCapabilities {
+        SourceOperationCapabilities::default()
+    }
+    fn active_source_query(&self) -> Option<&SourceQuery> {
+        None
+    }
+    fn execute_source_query(
+        &mut self,
+        _query: &SourceQuery,
+    ) -> anyhow::Result<SourceQueryExecution> {
+        Ok(SourceQueryExecution::Unsupported {
+            reason: "this source does not execute source-native queries".to_owned(),
+        })
+    }
+    fn source_query_task(&self, _query: SourceQuery) -> anyhow::Result<SourceQueryTask> {
+        anyhow::bail!("asynchronous source-query replacement is unavailable for this source")
+    }
+    fn result_extent(&self) -> Option<ResultExtent> {
+        match self.row_count() {
+            RowCount::Exact(source_rows) => Some(ResultExtent::Complete { source_rows }),
+            RowCount::AtLeast(_) | RowCount::Unknown => None,
+        }
+    }
+    fn query_provenance(&self) -> Option<&QueryProvenance> {
+        None
+    }
+    fn stable_row_identity(
+        &mut self,
+        _index: RowIndex,
+    ) -> anyhow::Result<Option<StableRowIdentity>> {
+        Ok(None)
     }
 }
 
@@ -120,7 +153,7 @@ pub struct ReductionResult<T> {
 }
 
 /// Fold rows without materializing or cloning the table. This is deliberately
-/// separate from `TableQuery`: widths, profiles and color metadata must not
+/// separate from `ViewTransform`: widths, profiles and color metadata must not
 /// change source order or activate a derived result store.
 pub fn scan_fold<T, F>(
     store: &mut dyn TableStore,
@@ -240,9 +273,378 @@ fn observe_profile(profile: &mut ColumnReductionProfile, value: &CellValue) {
     }
 }
 
-pub enum QueryExecution {
-    Executed(Box<dyn TableStore>),
-    Unsupported,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResultExtent {
+    Complete { source_rows: usize },
+    Truncated { source_rows: usize, limit: usize },
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct QueryProvenance {
+    pub logical_sql: String,
+    pub parameters: Vec<SourceOperand>,
+    pub copyable_sql: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum StableRowIdentity {
+    SqliteRowId(i64),
+    PrimaryKey(Vec<CellValue>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdentityTransition {
+    Preserved,
+    ResetUnavailable,
+}
+
+pub enum SourceQueryExecution {
+    SourceExecuted(Box<dyn TableStore>),
+    BoundedLocal(Box<dyn TableStore>),
+    Unsupported { reason: String },
+}
+
+pub struct FileSourceQueryStore {
+    base: Arc<Mutex<Box<dyn TableStore>>>,
+    definition: TableDefinition,
+    active_query: SourceQuery,
+    result: Option<InMemoryTable>,
+    extent: Option<ResultExtent>,
+}
+
+impl FileSourceQueryStore {
+    pub fn passthrough(
+        base: Box<dyn TableStore>,
+        definition: TableDefinition,
+        query: SourceQuery,
+    ) -> Self {
+        Self {
+            base: Arc::new(Mutex::new(base)),
+            definition,
+            active_query: query,
+            result: None,
+            extent: None,
+        }
+    }
+
+    pub fn execute_initial(
+        base: Box<dyn TableStore>,
+        definition: &mut TableDefinition,
+        query: SourceQuery,
+    ) -> anyhow::Result<Self> {
+        let base = Arc::new(Mutex::new(base));
+        let result = Self::execute_shared(base, definition.clone(), query)?;
+        *definition = result.definition.clone();
+        Ok(result)
+    }
+
+    fn execute_shared(
+        base: Arc<Mutex<Box<dyn TableStore>>>,
+        mut definition: TableDefinition,
+        query: SourceQuery,
+    ) -> anyhow::Result<Self> {
+        validate_source_query(&definition, &query)?;
+        if !query.order_by.is_empty() {
+            anyhow::bail!(
+                "source sorting is unavailable for streaming delimited and structured files"
+            );
+        }
+        let (result, extent) = {
+            let mut store = base
+                .lock()
+                .map_err(|_| anyhow::anyhow!("file source query lock was poisoned"))?;
+            execute_streaming_file_query(store.as_mut(), &mut definition, &query)?
+        };
+        Ok(Self {
+            base,
+            definition,
+            active_query: query,
+            result: Some(result),
+            extent: Some(extent),
+        })
+    }
+}
+
+fn execute_streaming_file_query(
+    store: &mut dyn TableStore,
+    definition: &mut TableDefinition,
+    query: &SourceQuery,
+) -> anyhow::Result<(InMemoryTable, ResultExtent)> {
+    const CHUNK: usize = 1_024;
+    let limit = query.limit.get();
+    let mut matched = Vec::new();
+    let mut next = Some(RowIndex(0));
+    let mut reached_end = false;
+    while matched.len() <= limit {
+        let Some(start) = next else {
+            reached_end = true;
+            break;
+        };
+        let mut visitor = |_: RowIndex, row: &Row| {
+            if query
+                .filters
+                .iter()
+                .all(|filter| file_source_filter_matches(filter, row))
+            {
+                matched.push(row.clone());
+                if matched.len() > limit {
+                    return ControlFlow::Break(());
+                }
+            }
+            ControlFlow::Continue(())
+        };
+        let progress = store.index_and_scan_rows(
+            RowIndex(start.0.saturating_add(CHUNK.saturating_sub(1))),
+            ScanRequest {
+                start,
+                direction: ScanDirection::Forward,
+                max_rows: CHUNK,
+            },
+            &mut visitor,
+        )?;
+        definition.apply_delta(progress.index.schema_delta)?;
+        next = progress.scan.next;
+        if progress.scan.reached_end {
+            reached_end = true;
+            break;
+        }
+        if matched.len() > limit {
+            break;
+        }
+        if progress.scan.visited == 0 || next == Some(start) {
+            anyhow::bail!("file source filter made no forward progress");
+        }
+    }
+    let truncated = matched.len() > limit;
+    matched.truncate(limit);
+    let source_rows = matched.len();
+    let extent = if truncated || !reached_end {
+        ResultExtent::Truncated { source_rows, limit }
+    } else {
+        ResultExtent::Complete { source_rows }
+    };
+    Ok((InMemoryTable::from_rows(query.generation, matched)?, extent))
+}
+
+fn file_source_filter_matches(filter: &SourceFilter, row: &Row) -> bool {
+    if matches!(filter.scope, SourceFilterScope::WholeRecord) {
+        let record = CellValue::Text(
+            row.cells
+                .iter()
+                .map(|value| value.display())
+                .collect::<Vec<_>>()
+                .join("\t"),
+        );
+        return match filter.operator {
+            SourceFilterOperator::IsNull => false,
+            SourceFilterOperator::IsNotNull => true,
+            operator => filter
+                .operand
+                .as_ref()
+                .is_some_and(|operand| file_value_matches(&record, operator, operand)),
+        };
+    }
+    let SourceFilterScope::Column(column) = filter.scope else {
+        unreachable!("whole-record scope handled above");
+    };
+    let values = row
+        .cells
+        .get(column.ordinal as usize)
+        .into_iter()
+        .collect::<Vec<_>>();
+    match filter.operator {
+        SourceFilterOperator::IsNull => values.iter().any(|value| matches!(value, CellValue::Null)),
+        SourceFilterOperator::IsNotNull => {
+            values.iter().any(|value| !matches!(value, CellValue::Null))
+        }
+        operator => {
+            let Some(operand) = filter.operand.as_ref() else {
+                return false;
+            };
+            values
+                .iter()
+                .any(|value| file_value_matches(value, operator, operand))
+        }
+    }
+}
+
+fn file_value_matches(
+    value: &CellValue,
+    operator: SourceFilterOperator,
+    operand: &SourceOperand,
+) -> bool {
+    use std::cmp::Ordering;
+    let ordering = match (value, operand) {
+        (CellValue::Null, SourceOperand::Null) => Some(Ordering::Equal),
+        (CellValue::Boolean(left), SourceOperand::Boolean(right)) => Some(left.cmp(right)),
+        (CellValue::Integer(left), SourceOperand::Integer(right)) => Some(left.cmp(right)),
+        (CellValue::Integer(left), SourceOperand::Float(right)) => {
+            (*left as f64).partial_cmp(right)
+        }
+        (CellValue::Float(left), SourceOperand::Integer(right)) => {
+            left.partial_cmp(&(*right as f64))
+        }
+        (CellValue::Float(left), SourceOperand::Float(right)) => left.partial_cmp(right),
+        (CellValue::Text(left), SourceOperand::Text(right))
+        | (CellValue::Json(left), SourceOperand::Text(right)) => Some(left.cmp(right)),
+        (CellValue::Binary(left), SourceOperand::Binary(right)) => Some(left.cmp(right)),
+        _ => None,
+    };
+    match operator {
+        SourceFilterOperator::Equal => ordering == Some(Ordering::Equal),
+        SourceFilterOperator::NotEqual => ordering.is_some_and(|value| value != Ordering::Equal),
+        SourceFilterOperator::LessThan => ordering == Some(Ordering::Less),
+        SourceFilterOperator::LessThanOrEqual => {
+            ordering.is_some_and(|value| value != Ordering::Greater)
+        }
+        SourceFilterOperator::GreaterThan => ordering == Some(Ordering::Greater),
+        SourceFilterOperator::GreaterThanOrEqual => {
+            ordering.is_some_and(|value| value != Ordering::Less)
+        }
+        SourceFilterOperator::Contains => value
+            .display()
+            .contains(source_operand_display(operand).as_ref()),
+        SourceFilterOperator::Prefix => value
+            .display()
+            .starts_with(source_operand_display(operand).as_ref()),
+        SourceFilterOperator::IsNull | SourceFilterOperator::IsNotNull => false,
+    }
+}
+
+fn source_operand_display(value: &SourceOperand) -> std::borrow::Cow<'_, str> {
+    match value {
+        SourceOperand::Null => std::borrow::Cow::Borrowed(""),
+        SourceOperand::Boolean(value) => {
+            std::borrow::Cow::Borrowed(if *value { "true" } else { "false" })
+        }
+        SourceOperand::Integer(value) => std::borrow::Cow::Owned(value.to_string()),
+        SourceOperand::Float(value) => std::borrow::Cow::Owned(value.to_string()),
+        SourceOperand::Text(value) => std::borrow::Cow::Borrowed(value),
+        SourceOperand::Binary(value) => String::from_utf8_lossy(value),
+    }
+}
+
+impl TableStore for FileSourceQueryStore {
+    fn generation(&self) -> SourceGeneration {
+        self.definition.generation
+    }
+
+    fn row_count(&self) -> RowCount {
+        if let Some(result) = &self.result {
+            result.row_count()
+        } else {
+            self.base
+                .try_lock()
+                .map(|store| store.row_count())
+                .unwrap_or(RowCount::Unknown)
+        }
+    }
+
+    fn column_count(&self) -> usize {
+        self.result
+            .as_ref()
+            .map(TableStore::column_count)
+            .unwrap_or(self.definition.columns.len())
+    }
+
+    fn row(&mut self, index: RowIndex) -> anyhow::Result<Option<Row>> {
+        if let Some(result) = &mut self.result {
+            result.row(index)
+        } else {
+            self.base
+                .lock()
+                .map_err(|_| anyhow::anyhow!("file source query lock was poisoned"))?
+                .row(index)
+        }
+    }
+
+    fn ensure_indexed_through(&mut self, index: RowIndex) -> anyhow::Result<IndexProgress> {
+        if let Some(result) = &mut self.result {
+            return result.ensure_indexed_through(index);
+        }
+        let progress = self
+            .base
+            .lock()
+            .map_err(|_| anyhow::anyhow!("file source query lock was poisoned"))?
+            .ensure_indexed_through(index)?;
+        self.definition.apply_delta(progress.schema_delta.clone())?;
+        Ok(progress)
+    }
+
+    fn scan_rows(
+        &mut self,
+        request: ScanRequest,
+        visitor: &mut dyn RowVisitor,
+    ) -> anyhow::Result<ScanProgress> {
+        if let Some(result) = &mut self.result {
+            result.scan_rows(request, visitor)
+        } else {
+            self.base
+                .lock()
+                .map_err(|_| anyhow::anyhow!("file source query lock was poisoned"))?
+                .scan_rows(request, visitor)
+        }
+    }
+
+    fn materialize(&mut self) -> anyhow::Result<InMemoryTable> {
+        if let Some(result) = &mut self.result {
+            result.materialize()
+        } else {
+            self.base
+                .lock()
+                .map_err(|_| anyhow::anyhow!("file source query lock was poisoned"))?
+                .materialize()
+        }
+    }
+
+    fn source_capabilities(&self) -> SourceOperationCapabilities {
+        SourceOperationCapabilities {
+            filters: vec![
+                SourceFilterOperator::Equal,
+                SourceFilterOperator::NotEqual,
+                SourceFilterOperator::LessThan,
+                SourceFilterOperator::LessThanOrEqual,
+                SourceFilterOperator::GreaterThan,
+                SourceFilterOperator::GreaterThanOrEqual,
+                SourceFilterOperator::Contains,
+                SourceFilterOperator::Prefix,
+                SourceFilterOperator::IsNull,
+                SourceFilterOperator::IsNotNull,
+            ],
+            sorting: CapabilityStatus::Unavailable {
+                reason: "source sorting would require an unbounded file materialization".to_owned(),
+            },
+            configurable_limit: true,
+        }
+    }
+
+    fn active_source_query(&self) -> Option<&SourceQuery> {
+        Some(&self.active_query)
+    }
+
+    fn execute_source_query(
+        &mut self,
+        query: &SourceQuery,
+    ) -> anyhow::Result<SourceQueryExecution> {
+        Ok(SourceQueryExecution::BoundedLocal(Box::new(
+            Self::execute_shared(self.base.clone(), self.definition.clone(), query.clone())?,
+        )))
+    }
+
+    fn source_query_task(&self, query: SourceQuery) -> anyhow::Result<SourceQueryTask> {
+        let base = self.base.clone();
+        let definition = self.definition.clone();
+        Ok(Box::new(move || {
+            Ok(Box::new(Self::execute_shared(base, definition, query)?) as Box<dyn TableStore>)
+        }))
+    }
+
+    fn result_extent(&self) -> Option<ResultExtent> {
+        self.extent.or_else(|| match self.row_count() {
+            RowCount::Exact(source_rows) => Some(ResultExtent::Complete { source_rows }),
+            RowCount::AtLeast(_) | RowCount::Unknown => None,
+        })
+    }
 }
 
 pub struct OffsetTableStore {
@@ -556,6 +958,7 @@ impl LazyFileTable {
                         name: None,
                     },
                     display_name: format!("Column {}", ordinal + 1),
+                    source_declared_type: None,
                     source_type: LogicalType::Text,
                     type_origin: TypeOrigin::Declared,
                 })
@@ -1529,18 +1932,15 @@ mod tests {
     }
 
     #[test]
-    fn lazy_store_reports_query_as_unsupported_without_mutating_order() {
+    fn lazy_store_reports_source_query_as_unsupported_without_mutating_order() {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("data.csv");
         std::fs::write(&path, "a\nb\n").expect("write");
         let mut table = LazyFileTable::open(&path, ParseOptions::default()).expect("lazy table");
-        let query = TableQuery {
-            generation: table.generation(),
-            ..TableQuery::default()
-        };
+        let query = SourceQuery::new(table.generation(), std::num::NonZeroUsize::new(10).unwrap());
         assert!(matches!(
-            table.try_execute_query(&query).expect("capability"),
-            QueryExecution::Unsupported
+            table.execute_source_query(&query).expect("capability"),
+            SourceQueryExecution::Unsupported { .. }
         ));
         assert_eq!(text_row(&mut table, 0), ["a"]);
     }
