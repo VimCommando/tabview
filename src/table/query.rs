@@ -370,9 +370,10 @@ impl Drop for SourceQueryCoordinator {
         state.shutdown = true;
         state.pending = None;
         wake.notify_one();
-        // Do not block application shutdown on an active source query. The one
-        // worker exits as soon as its current task returns.
-        self.worker_handle.take();
+        drop(state);
+        if let Some(worker) = self.worker_handle.take() {
+            let _ = worker.join();
+        }
     }
 }
 
@@ -572,5 +573,42 @@ mod tests {
         ));
         assert!(!superseded_ran.load(std::sync::atomic::Ordering::SeqCst));
         assert!(coordinator.poll().is_none());
+    }
+
+    #[test]
+    fn dropping_coordinator_joins_its_active_worker() {
+        let generation = SourceGeneration::new();
+        let mut coordinator = SourceQueryCoordinator::default();
+        let (started, wait_for_start) = std::sync::mpsc::channel();
+        let (release, wait_for_release) = std::sync::mpsc::channel();
+        coordinator.request(Box::new(move || {
+            started.send(()).expect("worker started");
+            wait_for_release.recv().expect("release worker");
+            Ok(Box::new(super::super::InMemoryTable::from_text_rows(
+                generation,
+                Vec::new(),
+            )))
+        }));
+        wait_for_start
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("active worker");
+
+        let (dropped, wait_for_drop) = std::sync::mpsc::channel();
+        let drop_thread = std::thread::spawn(move || {
+            drop(coordinator);
+            dropped.send(()).expect("drop completed");
+        });
+        assert!(
+            wait_for_drop
+                .recv_timeout(std::time::Duration::from_millis(25))
+                .is_err(),
+            "coordinator detached its active worker"
+        );
+
+        release.send(()).expect("release active worker");
+        wait_for_drop
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("worker joined");
+        drop_thread.join().expect("drop thread");
     }
 }
