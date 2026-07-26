@@ -181,7 +181,7 @@ pub fn open_source(source: InputSource, options: &OpenOptions) -> anyhow::Result
             std::fs::File::open(path)?
                 .take(64 * 1024)
                 .read_to_end(&mut sample)?;
-            FormatResolver::resolve(options.format, &source, &sample)
+            resolve_format(options, &source, &sample)
         }
         InputSource::Stdin => {
             // Stdin is consumed exactly once by the selected adapter. With no
@@ -200,7 +200,7 @@ pub fn open_source(source: InputSource, options: &OpenOptions) -> anyhow::Result
                 input.wait_for_probe_sample()?;
                 let snapshot = input.snapshot(false)?;
                 let sample_len = snapshot.bytes.len().min(64 * 1024);
-                FormatResolver::resolve(options.format, &source, &snapshot.bytes[..sample_len])
+                resolve_format(options, &source, &snapshot.bytes[..sample_len])
             }
         }
     };
@@ -214,11 +214,7 @@ pub fn open_source(source: InputSource, options: &OpenOptions) -> anyhow::Result
         anyhow::bail!("table selection requires SQLite input");
     }
     if sqlite {
-        if options.delimited.encoding.is_some()
-            || options.delimited.delimiter.is_some()
-            || options.delimited.quoting.is_some()
-            || options.delimited.quote_char != b'"'
-        {
+        if has_delimited_options(options) {
             anyhow::bail!(
                 "encoding, delimiter, quoting, and quote-character options cannot be used with SQLite input"
             );
@@ -368,6 +364,36 @@ fn resolve_structured_options(detected: InputFormat, options: &OpenOptions) -> I
     }
 }
 
+fn resolve_format(options: &OpenOptions, source: &InputSource, sample: &[u8]) -> InputFormat {
+    if options.format == InputFormat::Auto && has_delimited_options(options) {
+        if has_sqlite_signature(sample) {
+            #[cfg(feature = "sqlite")]
+            return InputFormat::Sqlite;
+        }
+        return InputFormat::Delimited;
+    }
+    FormatResolver::resolve(options.format, source, sample)
+}
+
+fn has_delimited_options(options: &OpenOptions) -> bool {
+    options.delimited.encoding.is_some()
+        || options.delimited.delimiter.is_some()
+        || options.delimited.quoting.is_some()
+        || options.delimited.quote_char != b'"'
+}
+
+fn has_sqlite_signature(sample: &[u8]) -> bool {
+    #[cfg(feature = "sqlite")]
+    {
+        sample.starts_with(b"SQLite format 3\0")
+    }
+    #[cfg(not(feature = "sqlite"))]
+    {
+        let _ = sample;
+        false
+    }
+}
+
 fn is_sqlite_format(format: InputFormat) -> bool {
     #[cfg(feature = "sqlite")]
     {
@@ -391,7 +417,7 @@ fn format_from_extension(path: &Path) -> Option<InputFormat> {
 
 fn probe_content(sample: &[u8]) -> InputFormat {
     #[cfg(feature = "sqlite")]
-    if sample.starts_with(b"SQLite format 3\0") {
+    if has_sqlite_signature(sample) {
         return InputFormat::Sqlite;
     }
     let Ok(text) = std::str::from_utf8(sample) else {
@@ -497,6 +523,66 @@ mod tests {
 
         let resolved = resolve_structured_options(detected, &options);
         assert_eq!(resolved, InputFormat::Json);
+    }
+
+    #[test]
+    fn delimited_options_override_auto_extension_and_content_detection() {
+        let options = OpenOptions {
+            delimited: super::super::ParseOptions {
+                delimiter: Some(b'|'),
+                ..super::super::ParseOptions::default()
+            },
+            ..OpenOptions::default()
+        };
+
+        assert_eq!(
+            resolve_format(
+                &options,
+                &InputSource::Path(PathBuf::from("data.json")),
+                br#"[{"a":1}]"#
+            ),
+            InputFormat::Delimited
+        );
+        assert_eq!(
+            resolve_format(
+                &options,
+                &InputSource::StreamingStdin(
+                    crate::ingest::source::StreamingInput::pending_for_test()
+                ),
+                b"{\"a\":1}\n{\"a\":2}\n"
+            ),
+            InputFormat::Delimited
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_signature_precedes_delimited_options_under_auto() {
+        let options = OpenOptions {
+            delimited: super::super::ParseOptions {
+                delimiter: Some(b'|'),
+                ..super::super::ParseOptions::default()
+            },
+            ..OpenOptions::default()
+        };
+
+        assert_eq!(
+            resolve_format(
+                &options,
+                &InputSource::Path(PathBuf::from("database.data")),
+                b"SQLite format 3\0"
+            ),
+            InputFormat::Sqlite
+        );
+
+        let file = tempfile::NamedTempFile::new().expect("SQLite signature fixture");
+        std::fs::write(file.path(), b"SQLite format 3\0").expect("write signature");
+        let error = open_source(InputSource::Path(file.path().to_path_buf()), &options)
+            .err()
+            .expect("delimited options must be rejected");
+        assert!(error
+            .to_string()
+            .contains("options cannot be used with SQLite input"));
     }
 
     #[test]
