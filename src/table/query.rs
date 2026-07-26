@@ -171,7 +171,10 @@ impl SourceFilter {
                 operator: self.operator,
             });
         }
-        if matches!(self.operand, Some(SourceOperand::Float(value)) if !value.is_finite()) {
+        if matches!(
+            self.operand.as_ref(),
+            Some(SourceOperand::Float(value)) if !value.is_finite()
+        ) {
             return Err(SourceQueryValidationError::NonFiniteOperand);
         }
         Ok(())
@@ -521,6 +524,32 @@ mod tests {
         }
         .validate()
         .is_err());
+    }
+
+    #[test]
+    fn source_filter_validation_borrows_operands_and_rejects_non_finite_floats() {
+        let generation = SourceGeneration::new();
+        let column = ColumnId {
+            generation,
+            ordinal: 0,
+        };
+        let text = SourceFilter {
+            scope: SourceFilterScope::Column(column),
+            operator: SourceFilterOperator::Equal,
+            operand: Some(SourceOperand::Text("value".to_owned())),
+        };
+        assert!(text.validate().is_ok());
+        assert_eq!(text.operand, Some(SourceOperand::Text("value".to_owned())));
+
+        let non_finite = SourceFilter {
+            scope: SourceFilterScope::Column(column),
+            operator: SourceFilterOperator::Equal,
+            operand: Some(SourceOperand::Float(f64::NAN)),
+        };
+        assert_eq!(
+            non_finite.validate(),
+            Err(SourceQueryValidationError::NonFiniteOperand)
+        );
     }
 
     #[test]
