@@ -447,23 +447,17 @@ fn file_source_filter_matches(filter: &SourceFilter, row: &Row) -> bool {
     let SourceFilterScope::Column(column) = filter.scope else {
         unreachable!("whole-record scope handled above");
     };
-    let values = row
-        .cells
-        .get(column.ordinal as usize)
-        .into_iter()
-        .collect::<Vec<_>>();
+    let value = row.cells.get(column.ordinal as usize);
     match filter.operator {
-        SourceFilterOperator::IsNull => values.iter().any(|value| matches!(value, CellValue::Null)),
+        SourceFilterOperator::IsNull => value.is_none() || matches!(value, Some(CellValue::Null)),
         SourceFilterOperator::IsNotNull => {
-            values.iter().any(|value| !matches!(value, CellValue::Null))
+            matches!(value, Some(value) if !matches!(value, CellValue::Null))
         }
         operator => {
             let Some(operand) = filter.operand.as_ref() else {
                 return false;
             };
-            values
-                .iter()
-                .any(|value| file_value_matches(value, operator, operand))
+            value.is_some_and(|value| file_value_matches(value, operator, operand))
         }
     }
 }
@@ -1430,6 +1424,35 @@ mod tests {
         assert_eq!(table.row_count(), RowCount::Exact(1));
         assert_eq!(table.column_count(), 2);
         assert_eq!(text_row(&mut table, 0), ["a", "b"]);
+    }
+
+    #[test]
+    fn file_source_null_filters_treat_missing_late_cells_as_null() {
+        let generation = SourceGeneration::new();
+        let row = Row::new(
+            RowId {
+                generation,
+                ordinal: 0,
+            },
+            vec![CellValue::Text("early row".to_owned())],
+        );
+        let filter = |operator| SourceFilter {
+            scope: SourceFilterScope::Column(ColumnId {
+                generation,
+                ordinal: 1,
+            }),
+            operator,
+            operand: None,
+        };
+
+        assert!(file_source_filter_matches(
+            &filter(SourceFilterOperator::IsNull),
+            &row
+        ));
+        assert!(!file_source_filter_matches(
+            &filter(SourceFilterOperator::IsNotNull),
+            &row
+        ));
     }
 
     #[test]
