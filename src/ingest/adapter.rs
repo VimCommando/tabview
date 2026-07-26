@@ -105,10 +105,10 @@ impl OpenedSource {
             .iter()
             .find(|entry| entry.metadata.name == name)
         else {
-            anyhow::bail!("table '{name}' was not found");
+            anyhow::bail!("relation '{name}' was not found");
         };
         if let RelationAvailability::Unavailable { reason } = &entry.availability {
-            anyhow::bail!("table '{name}' is unavailable: {reason}");
+            anyhow::bail!("relation '{name}' is unavailable: {reason}");
         }
         let opener = self
             .relation_opener
@@ -128,14 +128,14 @@ impl OpenedSource {
                 .collect::<Vec<_>>();
             if selectable.len() > 1 {
                 anyhow::bail!(
-                    "SQLite database has multiple selectable tables ({}); select one with --table or saved source.table",
+                    "SQLite database has multiple selectable relations ({}); select one with --table or saved source.table",
                     selectable.join(", ")
                 );
             }
-            anyhow::bail!("source has no selected table");
+            anyhow::bail!("source has no selected relation");
         }
         if self.tables.len() != 1 {
-            anyhow::bail!("source contains more than one opened table");
+            anyhow::bail!("source contains more than one opened relation");
         }
         Ok(self.tables.remove(0))
     }

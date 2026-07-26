@@ -74,17 +74,17 @@ impl SourceAdapter for SqliteAdapter {
             let relation = discovered
                 .iter()
                 .find(|relation| relation.name.eq_ignore_ascii_case(requested))
-                .ok_or_else(|| anyhow::anyhow!("table '{requested}' was not found"))?;
+                .ok_or_else(|| anyhow::anyhow!("relation '{requested}' was not found"))?;
             match &relation.classification {
                 RelationClassification::Selectable(_) => Some(relation.name.clone()),
                 RelationClassification::Unavailable(reason) => {
-                    anyhow::bail!("table '{requested}' is unavailable: {reason}")
+                    anyhow::bail!("relation '{requested}' is unavailable: {reason}")
                 }
                 RelationClassification::Virtual => {
-                    anyhow::bail!("table '{requested}' is a virtual table and is unsupported")
+                    anyhow::bail!("relation '{requested}' is a virtual table and is unsupported")
                 }
                 RelationClassification::Hidden => {
-                    anyhow::bail!("table '{requested}' is not a user-selectable SQLite object")
+                    anyhow::bail!("relation '{requested}' is not a user-selectable SQLite object")
                 }
             }
         } else if selectable.len() == 1 {
@@ -430,18 +430,18 @@ impl RelationOpener for SqliteRelationOpener {
             .discovered
             .iter()
             .find(|relation| relation.name == name)
-            .ok_or_else(|| anyhow::anyhow!("table '{name}' was not found"))?
+            .ok_or_else(|| anyhow::anyhow!("relation '{name}' was not found"))?
             .clone();
         let kind = match relation.classification {
             RelationClassification::Selectable(kind) => kind,
             RelationClassification::Unavailable(reason) => {
-                anyhow::bail!("table '{name}' is unavailable: {reason}")
+                anyhow::bail!("relation '{name}' is unavailable: {reason}")
             }
             RelationClassification::Virtual => {
-                anyhow::bail!("table '{name}' is a virtual table and is unsupported")
+                anyhow::bail!("relation '{name}' is a virtual table and is unsupported")
             }
             RelationClassification::Hidden => {
-                anyhow::bail!("table '{name}' is not selectable")
+                anyhow::bail!("relation '{name}' is not selectable")
             }
         };
         open_sqlite_relation(self.session.clone(), relation.name, kind, &self.options)
@@ -1381,6 +1381,11 @@ mod tests {
             entry.metadata.name == "incompatible"
                 && matches!(entry.availability, RelationAvailability::Unavailable { .. })
         }));
+        let error = source
+            .into_implicit_table()
+            .err()
+            .expect("ambiguous relation selection must fail");
+        assert!(error.to_string().contains("multiple selectable relations"));
 
         let mut options = OpenOptions {
             table: Some("users".to_owned()),
@@ -1415,10 +1420,33 @@ mod tests {
             InputSource::Path(directory.path().join("catalog.db")),
             &options,
         ) {
-            Ok(_) => panic!("missing table unexpectedly opened"),
+            Ok(_) => panic!("missing relation unexpectedly opened"),
             Err(error) => error,
         };
-        assert!(error.to_string().contains("not found"));
+        assert_eq!(error.to_string(), "relation 'missing' was not found");
+
+        options.table = Some("incompatible".to_owned());
+        let error = SqliteAdapter
+            .open(
+                InputSource::Path(directory.path().join("catalog.db")),
+                &options,
+            )
+            .err()
+            .expect("unavailable view unexpectedly opened");
+        assert!(error
+            .to_string()
+            .starts_with("relation 'incompatible' is unavailable:"));
+
+        options.table = Some("user_names".to_owned());
+        let mut view = SqliteAdapter
+            .open(
+                InputSource::Path(directory.path().join("catalog.db")),
+                &options,
+            )
+            .expect("selectable view")
+            .into_implicit_table()
+            .expect("selected view");
+        assert_eq!(view.store.materialize().unwrap().rows().len(), 1);
     }
 
     #[test]
