@@ -168,14 +168,12 @@ impl FormatResolver {
 pub fn open_source(source: InputSource, options: &OpenOptions) -> anyhow::Result<OpenedSource> {
     let detected = match &source {
         InputSource::Path(path) => {
-            #[cfg(feature = "sqlite")]
             let path_text = path.to_string_lossy();
-            #[cfg(feature = "sqlite")]
             if path_text.starts_with("libsql://")
                 || path_text.starts_with("http://")
                 || path_text.starts_with("https://")
             {
-                anyhow::bail!("remote database URLs are unsupported; provide a local SQLite path");
+                anyhow::bail!("remote URLs are unsupported; provide a local file path");
             }
             let mut sample = Vec::new();
             std::fs::File::open(path)?
@@ -506,6 +504,26 @@ mod tests {
             FormatResolver::resolve(InputFormat::Delimited, &source, sample),
             InputFormat::Delimited
         );
+    }
+
+    #[test]
+    fn remote_url_error_is_not_format_specific() {
+        for url in [
+            "https://example.com/data.json",
+            "http://example.com/data.csv",
+            "libsql://example.turso.io",
+        ] {
+            let error = open_source(
+                InputSource::Path(PathBuf::from(url)),
+                &OpenOptions::default(),
+            )
+            .err()
+            .expect("remote URL must be rejected");
+            assert_eq!(
+                error.to_string(),
+                "remote URLs are unsupported; provide a local file path"
+            );
+        }
     }
 
     #[test]

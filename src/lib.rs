@@ -826,7 +826,7 @@ impl App {
             .unwrap_or_default();
         let editor = if modal.editing_filter {
             format!(
-                "\n\nFilter editor: {} {:?} {}\nTab: operator  Enter: add  Esc: cancel editor",
+                "\n\nFilter editor: {} {} {}\nTab: operator  Enter: add  Esc: cancel editor",
                 column, modal.operator, modal.filter_input
             )
         } else {
@@ -2892,6 +2892,22 @@ mod tests {
             .as_ref()
             .and_then(|modal| modal.error.as_deref())
             .is_some_and(|error| error.contains("unavailable")));
+    }
+
+    #[test]
+    fn source_filter_editor_uses_human_readable_operator_names() {
+        let file = tempfile::NamedTempFile::new().expect("csv fixture");
+        std::fs::write(file.path(), "name,value\nalpha,1\n").expect("csv");
+        let mut app = app_for_source(file.path().to_path_buf(), ingest::OpenOptions::default());
+        app.open_source_config_modal();
+        let modal = app.source_modal.as_mut().expect("source modal");
+        modal.editing_filter = true;
+        modal.operator = crate::table::SourceFilterOperator::LessThanOrEqual;
+
+        let body = app.source_modal_body();
+
+        assert!(body.contains("less than or equal"));
+        assert!(!body.contains("LessThanOrEqual"));
     }
 
     #[test]
