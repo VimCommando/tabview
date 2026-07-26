@@ -173,7 +173,11 @@ impl Config {
         let table = args.table;
         #[cfg(not(feature = "sqlite"))]
         let table = None;
-        let resolved_cli_format = explicit_format;
+        // Explicit delimited parsing options must outrank a saved structured
+        // format. Keep the format automatic so SQLite signatures still win
+        // during source probing.
+        let resolved_cli_format =
+            explicit_format.or_else(|| delimited_option_selected.then_some(InputFormat::Auto));
         Ok(Self {
             filename: args.filename,
             interactive: args.interactive,
@@ -549,7 +553,7 @@ mod tests {
         assert_eq!(config.filename, PathBuf::from("-"));
         assert_eq!(config.delimiter, Some(b'\t'));
         assert_eq!(config.quoting, Some(Quoting::None));
-        assert_eq!(config.source_options.format, None);
+        assert_eq!(config.source_options.format, Some(InputFormat::Auto));
     }
 
     #[test]
@@ -739,9 +743,19 @@ mod tests {
     }
 
     #[test]
-    fn explicit_delimited_options_remain_pending_until_source_resolution() {
+    fn explicit_delimited_options_override_saved_format_with_auto_resolution() {
         let config = parse(&["tabview", "--delimiter", "|", "data.unknown"]);
-        assert_eq!(config.source_options.format, None);
+        assert_eq!(config.source_options.format, Some(InputFormat::Auto));
+
+        let options = crate::ingest::OpenOptions::merge(
+            crate::ingest::OpenOptions::default(),
+            &crate::ingest::SourceOptionOverrides {
+                format: Some(InputFormat::Json),
+                ..crate::ingest::SourceOptionOverrides::default()
+            },
+            &config.source_options,
+        );
+        assert_eq!(options.format, InputFormat::Auto);
     }
 
     #[test]
