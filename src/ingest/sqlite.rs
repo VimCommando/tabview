@@ -1140,7 +1140,7 @@ impl TableStore for TursoTableStore {
     }
 
     fn source_query_task(
-        &self,
+        &mut self,
         query: SourceQuery,
     ) -> anyhow::Result<crate::table::SourceQueryTask> {
         validate_source_query(&self.definition, &query)?;

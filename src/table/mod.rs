@@ -62,7 +62,7 @@ pub trait TableStore: Send {
             reason: "this source does not execute source-native queries".to_owned(),
         })
     }
-    fn source_query_task(&self, _query: SourceQuery) -> anyhow::Result<SourceQueryTask> {
+    fn source_query_task(&mut self, _query: SourceQuery) -> anyhow::Result<SourceQueryTask> {
         anyhow::bail!("asynchronous source-query replacement is unavailable for this source")
     }
     fn result_extent(&self) -> Option<ResultExtent> {
@@ -305,7 +305,8 @@ pub enum SourceQueryExecution {
 }
 
 pub struct FileSourceQueryStore {
-    base: Arc<Mutex<Box<dyn TableStore>>>,
+    base: Option<Box<dyn TableStore>>,
+    shared_base: Option<Arc<Mutex<Box<dyn TableStore>>>>,
     definition: TableDefinition,
     active_query: SourceQuery,
     result: Option<InMemoryTable>,
@@ -319,7 +320,8 @@ impl FileSourceQueryStore {
         query: SourceQuery,
     ) -> Self {
         Self {
-            base: Arc::new(Mutex::new(base)),
+            base: Some(base),
+            shared_base: None,
             definition,
             active_query: query,
             result: None,
@@ -351,12 +353,26 @@ impl FileSourceQueryStore {
         }
         let (result, extent) = execute_streaming_file_query(&base, &mut definition, &query)?;
         Ok(Self {
-            base,
+            base: None,
+            shared_base: Some(base),
             definition,
             active_query: query,
             result: Some(result),
             extent: Some(extent),
         })
+    }
+
+    fn promote_base(&mut self) -> anyhow::Result<Arc<Mutex<Box<dyn TableStore>>>> {
+        if let Some(base) = &self.shared_base {
+            return Ok(base.clone());
+        }
+        let base = self
+            .base
+            .take()
+            .ok_or_else(|| anyhow::anyhow!("file source base store is unavailable"))?;
+        let shared = Arc::new(Mutex::new(base));
+        self.shared_base = Some(shared.clone());
+        Ok(shared)
     }
 }
 
@@ -544,8 +560,12 @@ impl TableStore for FileSourceQueryStore {
     fn row_count(&self) -> RowCount {
         if let Some(result) = &self.result {
             result.row_count()
+        } else if let Some(base) = &self.base {
+            base.row_count()
         } else {
-            self.base
+            self.shared_base
+                .as_ref()
+                .expect("file source has an owned or shared base")
                 .try_lock()
                 .map(|store| store.row_count())
                 .unwrap_or(RowCount::Unknown)
@@ -562,8 +582,12 @@ impl TableStore for FileSourceQueryStore {
     fn row(&mut self, index: RowIndex) -> anyhow::Result<Option<Row>> {
         if let Some(result) = &mut self.result {
             result.row(index)
+        } else if let Some(base) = &mut self.base {
+            base.row(index)
         } else {
-            self.base
+            self.shared_base
+                .as_ref()
+                .expect("file source has an owned or shared base")
                 .lock()
                 .map_err(|_| anyhow::anyhow!("file source query lock was poisoned"))?
                 .row(index)
@@ -574,11 +598,16 @@ impl TableStore for FileSourceQueryStore {
         if let Some(result) = &mut self.result {
             return result.ensure_indexed_through(index);
         }
-        let progress = self
-            .base
-            .lock()
-            .map_err(|_| anyhow::anyhow!("file source query lock was poisoned"))?
-            .ensure_indexed_through(index)?;
+        let progress = if let Some(base) = &mut self.base {
+            base.ensure_indexed_through(index)?
+        } else {
+            self.shared_base
+                .as_ref()
+                .expect("file source has an owned or shared base")
+                .lock()
+                .map_err(|_| anyhow::anyhow!("file source query lock was poisoned"))?
+                .ensure_indexed_through(index)?
+        };
         self.definition.apply_delta(progress.schema_delta.clone())?;
         Ok(progress)
     }
@@ -590,8 +619,12 @@ impl TableStore for FileSourceQueryStore {
     ) -> anyhow::Result<ScanProgress> {
         if let Some(result) = &mut self.result {
             result.scan_rows(request, visitor)
+        } else if let Some(base) = &mut self.base {
+            base.scan_rows(request, visitor)
         } else {
-            self.base
+            self.shared_base
+                .as_ref()
+                .expect("file source has an owned or shared base")
                 .lock()
                 .map_err(|_| anyhow::anyhow!("file source query lock was poisoned"))?
                 .scan_rows(request, visitor)
@@ -601,8 +634,12 @@ impl TableStore for FileSourceQueryStore {
     fn materialize(&mut self) -> anyhow::Result<InMemoryTable> {
         if let Some(result) = &mut self.result {
             result.materialize()
+        } else if let Some(base) = &mut self.base {
+            base.materialize()
         } else {
-            self.base
+            self.shared_base
+                .as_ref()
+                .expect("file source has an owned or shared base")
                 .lock()
                 .map_err(|_| anyhow::anyhow!("file source query lock was poisoned"))?
                 .materialize()
@@ -638,13 +675,14 @@ impl TableStore for FileSourceQueryStore {
         &mut self,
         query: &SourceQuery,
     ) -> anyhow::Result<SourceQueryExecution> {
+        let base = self.promote_base()?;
         Ok(SourceQueryExecution::BoundedLocal(Box::new(
-            Self::execute_shared(self.base.clone(), self.definition.clone(), query.clone())?,
+            Self::execute_shared(base, self.definition.clone(), query.clone())?,
         )))
     }
 
-    fn source_query_task(&self, query: SourceQuery) -> anyhow::Result<SourceQueryTask> {
-        let base = self.base.clone();
+    fn source_query_task(&mut self, query: SourceQuery) -> anyhow::Result<SourceQueryTask> {
+        let base = self.promote_base()?;
         let definition = self.definition.clone();
         Ok(Box::new(move || {
             Ok(Box::new(Self::execute_shared(base, definition, query)?) as Box<dyn TableStore>)
@@ -1623,6 +1661,50 @@ mod tests {
         .expect("query result");
 
         assert_eq!(observed_chunks, 2);
+    }
+
+    #[test]
+    fn passthrough_file_source_promotes_to_shared_storage_only_for_async_queries() {
+        let generation = SourceGeneration::new();
+        let definition = TableDefinition {
+            generation,
+            columns: vec![ColumnDefinition {
+                id: ColumnId {
+                    generation,
+                    ordinal: 0,
+                },
+                source_identity: ColumnSourceIdentity::Positional(0),
+                display_name: "value".to_owned(),
+                source_declared_type: None,
+                source_type: LogicalType::Text,
+                type_origin: TypeOrigin::Declared,
+            }],
+            schema_state: SchemaState::Complete,
+            relation: RelationMetadata::implicit("test", true),
+        };
+        let query = SourceQuery::new(
+            generation,
+            std::num::NonZeroUsize::new(10).expect("non-zero limit"),
+        );
+        let base = Box::new(InMemoryTable::from_text_rows(
+            generation,
+            vec![vec!["value".to_owned()]],
+        ));
+        let mut store = FileSourceQueryStore::passthrough(base, definition, query.clone());
+
+        assert!(store.base.is_some());
+        assert!(store.shared_base.is_none());
+        assert_eq!(
+            store.row(RowIndex(0)).expect("direct row").unwrap().cells[0],
+            CellValue::Text("value".to_owned())
+        );
+        assert!(store.base.is_some());
+
+        let _task = store
+            .source_query_task(query)
+            .expect("background source query");
+        assert!(store.base.is_none());
+        assert!(store.shared_base.is_some());
     }
 
     #[test]

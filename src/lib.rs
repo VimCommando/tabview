@@ -806,11 +806,10 @@ impl App {
             .and_then(|definition| definition.columns.get(modal.column))
             .map(|column| column.display_name.as_str())
             .unwrap_or("none");
-        let extent = self
-            .view
-            .source_result_extent()
-            .map(|extent| format!("{extent:?}"))
-            .unwrap_or_else(|| "pending".to_owned());
+        let extent = source_extent_label(
+            self.view.source_result_extent(),
+            self.view.source_query_is_pending(),
+        );
         let capabilities = self.view.source_capabilities();
         let sort_capability = match &capabilities.sorting {
             crate::table::CapabilityStatus::Supported => "supported".to_owned(),
@@ -2250,6 +2249,14 @@ fn footer_status<'a>(
     source_status.or(message).unwrap_or(count_status)
 }
 
+fn source_extent_label(extent: Option<crate::table::ResultExtent>, pending: bool) -> String {
+    match extent {
+        Some(extent) => format!("{extent:?}"),
+        None if pending => "pending".to_owned(),
+        None => "unknown".to_owned(),
+    }
+}
+
 fn table_area(area: ratatui::layout::Rect) -> ratatui::layout::Rect {
     ratatui::layout::Rect::new(area.x, area.y, area.width, area.height.saturating_sub(1))
 }
@@ -2304,6 +2311,12 @@ mod tests {
             "Indexed 4096 rows"
         );
         assert_eq!(footer_status(None, None, "4096+ rows"), "4096+ rows");
+    }
+
+    #[test]
+    fn missing_source_extent_is_pending_only_while_a_query_runs() {
+        assert_eq!(source_extent_label(None, true), "pending");
+        assert_eq!(source_extent_label(None, false), "unknown");
     }
 
     #[test]
@@ -2900,6 +2913,7 @@ mod tests {
             .expect("source modal");
         let body = app.source_modal_body();
         assert!(body.contains("Limit: unbounded"));
+        assert!(!body.contains("Extent: pending"));
         assert!(body.contains("Source sorting: unavailable"));
         app.handle_key(key(KeyCode::Char('s')))
             .expect("unavailable source sort");

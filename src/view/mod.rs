@@ -669,7 +669,7 @@ impl TableView {
             self.source_status = Some("Source query replacement is unavailable".to_owned());
             return false;
         };
-        let task = match source.0.borrow().source_query_task(query.clone()) {
+        let task = match source.0.borrow_mut().source_query_task(query.clone()) {
             Ok(task) => task,
             Err(error) => {
                 self.source_status = Some(error.to_string());
