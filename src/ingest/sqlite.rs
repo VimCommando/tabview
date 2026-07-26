@@ -50,7 +50,7 @@ impl SourceAdapter for SqliteAdapter {
                 anyhow::bail!("SQLite input from stdin is not supported; provide a local path")
             }
         };
-        let path_text = path.to_string_lossy();
+        let path_text = path.to_string_lossy().to_ascii_lowercase();
         if ["libsql://", "http://", "https://"]
             .iter()
             .any(|prefix| path_text.starts_with(prefix))

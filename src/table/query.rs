@@ -166,7 +166,12 @@ pub struct SourceFilter {
 
 impl SourceFilter {
     pub fn validate(&self) -> Result<(), SourceQueryValidationError> {
-        if self.operator.requires_operand() != self.operand.is_some() {
+        let valid_operand_shape = if self.operator.requires_operand() {
+            matches!(self.operand, Some(ref operand) if !matches!(operand, SourceOperand::Null))
+        } else {
+            self.operand.is_none()
+        };
+        if !valid_operand_shape {
             return Err(SourceQueryValidationError::OperandMismatch {
                 operator: self.operator,
             });
@@ -524,6 +529,17 @@ mod tests {
         }
         .validate()
         .is_err());
+        assert_eq!(
+            SourceFilter {
+                scope: SourceFilterScope::Column(column),
+                operator: SourceFilterOperator::Equal,
+                operand: Some(SourceOperand::Null),
+            }
+            .validate(),
+            Err(SourceQueryValidationError::OperandMismatch {
+                operator: SourceFilterOperator::Equal,
+            })
+        );
     }
 
     #[test]

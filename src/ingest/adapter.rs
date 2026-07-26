@@ -168,7 +168,7 @@ impl FormatResolver {
 pub fn open_source(source: InputSource, options: &OpenOptions) -> anyhow::Result<OpenedSource> {
     let detected = match &source {
         InputSource::Path(path) => {
-            let path_text = path.to_string_lossy();
+            let path_text = path.to_string_lossy().to_ascii_lowercase();
             if path_text.starts_with("libsql://")
                 || path_text.starts_with("http://")
                 || path_text.starts_with("https://")
@@ -510,6 +510,8 @@ mod tests {
             "https://example.com/data.json",
             "http://example.com/data.csv",
             "libsql://example.turso.io",
+            "HTTPS://example.com/data.json",
+            "LibSQL://example.turso.io",
         ] {
             let error = open_source(
                 InputSource::Path(PathBuf::from(url)),

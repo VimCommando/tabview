@@ -75,7 +75,6 @@ pub enum SourceFilterOperator {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum SourceFilterValue {
-    Null,
     Boolean(bool),
     Integer(i64),
     Float(f64),
@@ -1603,36 +1602,39 @@ fn validate_source_filter(
         ));
         None
     })?;
-    let value = raw.value.and_then(|value| {
-        source_filter_value(value).or_else(|| {
-            warnings.push(warning(
-                "source.filters.value",
-                "source filter value must be a scalar",
-            ));
-            None
-        })
-    });
     let expects_value = !matches!(
         operator,
         SourceFilterOperator::IsNull | SourceFilterOperator::IsNotNull
     );
-    if expects_value && value.is_none() {
-        warnings.push(warning(
-            "source.filters.value",
-            "source filter operator requires a value",
-        ));
-        return None;
-    }
-    if !expects_value && value.is_some() {
-        warnings.push(warning(
-            "source.filters.value",
-            "null-test source filter ignores its value",
-        ));
-    }
+    let value = if expects_value {
+        let Some(value) = raw.value else {
+            warnings.push(warning(
+                "source.filters.value",
+                "source filter operator requires a non-null scalar value",
+            ));
+            return None;
+        };
+        let Some(value) = source_filter_value(value) else {
+            warnings.push(warning(
+                "source.filters.value",
+                "source filter value must be a non-null scalar",
+            ));
+            return None;
+        };
+        Some(value)
+    } else {
+        if raw.value.is_some() {
+            warnings.push(warning(
+                "source.filters.value",
+                "null-test source filter ignores its value",
+            ));
+        }
+        None
+    };
     Some(SavedSourceFilter {
         column: raw.column,
         operator,
-        value: expects_value.then_some(value).flatten(),
+        value,
     })
 }
 
@@ -1662,7 +1664,7 @@ fn validate_source_sort(
 
 fn source_filter_value(value: Value) -> Option<SourceFilterValue> {
     match value {
-        Value::Null => Some(SourceFilterValue::Null),
+        Value::Null => None,
         Value::Bool(value) => Some(SourceFilterValue::Boolean(value)),
         Value::Number(value) => value
             .as_i64()
@@ -1792,7 +1794,6 @@ impl SavedView {
                             SourceFilterOperator::IsNotNull => TableSourceFilterOperator::IsNotNull,
                         },
                         operand: filter.value.as_ref().map(|value| match value {
-                            SourceFilterValue::Null => SourceOperand::Null,
                             SourceFilterValue::Boolean(value) => SourceOperand::Boolean(*value),
                             SourceFilterValue::Integer(value) => SourceOperand::Integer(*value),
                             SourceFilterValue::Float(value) => SourceOperand::Float(*value),
@@ -2004,7 +2005,7 @@ view:
     }
 
     #[test]
-    fn explicit_null_source_operand_matches_the_saved_view_schema() {
+    fn explicit_null_source_operand_is_rejected_by_runtime_and_schema() {
         let parsed = parse_saved_view_yaml(
             r#"
 name: null-operand
@@ -2019,24 +2020,18 @@ view: {}
         )
         .expect("parse");
 
-        assert!(parsed.warnings.is_empty());
-        assert_eq!(
-            parsed.view.source.filters[0].value,
-            Some(SourceFilterValue::Null)
-        );
-        assert!(matches!(
-            parsed.view.source_options().source_filters.unwrap()[0].operand,
-            Some(SourceOperand::Null)
-        ));
+        assert!(parsed.view.source.filters.is_empty());
+        assert!(parsed.warnings.iter().any(|warning| {
+            warning.field == "source.filters.value" && warning.message.contains("non-null scalar")
+        }));
 
         let schema: serde_json::Value =
             serde_json::from_str(include_str!("../../schemas/view.schema.json"))
                 .expect("saved view schema");
-        let value_types = schema
-            .pointer("/$defs/sourceFilter/properties/value/type")
-            .and_then(serde_json::Value::as_array)
-            .expect("source filter value types");
-        assert!(value_types.iter().any(|value| value == "null"));
+        assert_eq!(
+            schema.pointer("/$defs/sourceFilter/allOf/0/else/properties/value/not/type"),
+            Some(&serde_json::Value::String("null".to_owned()))
+        );
     }
 
     #[test]

@@ -391,6 +391,13 @@
             }
           },
           "else": {
+            "properties": {
+              "value": {
+                "not": {
+                  "type": "null"
+                }
+              }
+            },
             "required": ["value"]
           }
         }
