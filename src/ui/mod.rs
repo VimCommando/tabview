@@ -653,7 +653,13 @@ pub fn render_relation_picker_with_theme(
     }
     let width = area.width.saturating_sub(4) as usize;
     let height = area.height.saturating_sub(4) as usize;
-    for (offset, relation) in relations.iter().take(height).enumerate() {
+    let selected = selected.min(relations.len().saturating_sub(1));
+    let start = selected
+        .saturating_add(1)
+        .saturating_sub(height)
+        .min(relations.len().saturating_sub(height));
+    for (row, relation) in relations.iter().skip(start).take(height).enumerate() {
+        let offset = start + row;
         let (suffix, style) = match &relation.availability {
             RelationAvailability::Selectable if offset == selected => {
                 ("".to_owned(), theme.style("popup.active"))
@@ -670,7 +676,7 @@ pub fn render_relation_picker_with_theme(
         };
         buffer.set_stringn(
             area.x + 2,
-            area.y + 2 + offset as u16,
+            area.y + 2 + row as u16,
             format!("{prefix}{}{}", relation.metadata.display_name, suffix),
             width,
             style,
@@ -1887,6 +1893,32 @@ view:
         assert!(text.contains("search — virtual tables are unsupported"));
         assert_eq!(buffer[(2, 3)].style().fg, theme.style("popup.disabled").fg);
         assert_eq!(buffer[(2, 3)].style().bg, theme.style("popup.disabled").bg);
+    }
+
+    #[test]
+    fn relation_picker_scrolls_to_keep_the_selection_visible() {
+        let relations = (0..8)
+            .map(|index| RelationCatalogEntry {
+                metadata: crate::table::RelationMetadata {
+                    name: format!("table-{index}"),
+                    display_name: format!("table-{index}"),
+                    header_visible: true,
+                },
+                kind: crate::ingest::RelationKind::Table,
+                availability: RelationAvailability::Selectable,
+            })
+            .collect::<Vec<_>>();
+        let area = Rect::new(0, 0, 32, 10);
+        let mut buffer = Buffer::empty(area);
+        let theme = default_theme();
+
+        render_relation_picker_with_theme(&relations, 7, area, &mut buffer, &theme);
+
+        let text = buffer_text(&buffer);
+        assert!(!text.contains("table-0"));
+        assert!(text.contains("> table-7"));
+        assert_eq!(buffer[(2, 7)].style().fg, theme.style("popup.active").fg);
+        assert_eq!(buffer[(2, 7)].style().bg, theme.style("popup.active").bg);
     }
 
     #[test]

@@ -161,12 +161,7 @@ impl Config {
         if args.table.is_some()
             && matches!(
                 explicit_format,
-                Some(
-                    InputFormat::Delimited
-                        | InputFormat::Json
-                        | InputFormat::Ndjson
-                        | InputFormat::Auto
-                )
+                Some(InputFormat::Delimited | InputFormat::Json | InputFormat::Ndjson)
             )
         {
             return Err(CliError::IncompatibleOptions {
@@ -632,6 +627,22 @@ mod tests {
         let help = Args::command().render_long_help().to_string();
         assert!(help.contains("--table <TABLE>"));
         assert!(help.contains("local SQLite"));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn table_can_be_combined_with_explicit_auto_format() {
+        let config = parse(&[
+            "tabview",
+            "--format",
+            "auto",
+            "--table",
+            "users",
+            "application.db",
+        ]);
+
+        assert_eq!(config.source_options.format, Some(InputFormat::Auto));
+        assert_eq!(config.source_options.table.as_deref(), Some("users"));
     }
 
     #[cfg(not(feature = "sqlite"))]
