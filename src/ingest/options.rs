@@ -154,6 +154,8 @@ pub enum InputFormat {
     Ndjson,
     #[cfg(feature = "sqlite")]
     Sqlite,
+    #[cfg(feature = "elasticsearch")]
+    Elasticsearch,
 }
 
 impl FromStr for InputFormat {
@@ -167,6 +169,8 @@ impl FromStr for InputFormat {
             "ndjson" => Ok(Self::Ndjson),
             #[cfg(feature = "sqlite")]
             "sqlite" => Ok(Self::Sqlite),
+            #[cfg(feature = "elasticsearch")]
+            "elasticsearch" => Ok(Self::Elasticsearch),
             _ => Err(SourceOptionError::InvalidFormat(value.to_owned())),
         }
     }
@@ -181,6 +185,8 @@ impl fmt::Display for InputFormat {
             Self::Ndjson => "ndjson",
             #[cfg(feature = "sqlite")]
             Self::Sqlite => "sqlite",
+            #[cfg(feature = "elasticsearch")]
+            Self::Elasticsearch => "elasticsearch",
         })
     }
 }
@@ -293,6 +299,7 @@ pub struct OpenOptions {
     pub object_mode_origin: ObjectModeOrigin,
     pub schema_scan: SchemaScan,
     pub table: Option<String>,
+    pub native_query: Option<String>,
     pub limit: Option<NonZeroUsize>,
     pub source_filters: Vec<SourceFilterRequest>,
     pub source_sort: Vec<SourceSortRequest>,
@@ -310,6 +317,7 @@ impl Default for OpenOptions {
             object_mode_origin: ObjectModeOrigin::Default,
             schema_scan: SchemaScan::Default,
             table: None,
+            native_query: None,
             limit: None,
             source_filters: Vec::new(),
             source_sort: Vec::new(),
@@ -326,6 +334,7 @@ pub struct SourceOptionOverrides {
     pub object_mode: Option<ObjectMode>,
     pub schema_scan: Option<SchemaScan>,
     pub table: Option<String>,
+    pub native_query: Option<String>,
     pub limit: Option<NonZeroUsize>,
     pub source_filters: Option<Vec<SourceFilterRequest>>,
     pub source_sort: Option<Vec<SourceSortRequest>>,
@@ -344,6 +353,15 @@ impl OpenOptions {
         } else {
             (defaults.object_mode, defaults.object_mode_origin)
         };
+        let (table, native_query) = if let Some(query) = &cli.native_query {
+            (None, Some(query.clone()))
+        } else if let Some(table) = &cli.table {
+            (Some(table.clone()), None)
+        } else if saved.native_query.is_some() || saved.table.is_some() {
+            (saved.table.clone(), saved.native_query.clone())
+        } else {
+            (defaults.table.clone(), defaults.native_query.clone())
+        };
         Self {
             format: cli.format.or(saved.format).unwrap_or(defaults.format),
             json_path: cli
@@ -357,11 +375,8 @@ impl OpenOptions {
                 .schema_scan
                 .or(saved.schema_scan)
                 .unwrap_or(defaults.schema_scan),
-            table: cli
-                .table
-                .clone()
-                .or_else(|| saved.table.clone())
-                .or(defaults.table),
+            table,
+            native_query,
             limit: cli.limit.or(saved.limit).or(defaults.limit),
             source_filters: cli
                 .source_filters
@@ -380,6 +395,9 @@ impl OpenOptions {
     pub fn validate(&self) -> Result<(), SourceOptionError> {
         if self.format == InputFormat::Delimited && self.json_path.is_some() {
             return Err(SourceOptionError::JsonPathRequiresStructuredFormat);
+        }
+        if self.table.is_some() && self.native_query.is_some() {
+            return Err(SourceOptionError::TableQueryConflict);
         }
         Ok(())
     }
@@ -401,6 +419,8 @@ pub enum SourceOptionError {
     InvalidJsonPointer(String),
     #[error("JSON starting paths require JSON or NDJSON input")]
     JsonPathRequiresStructuredFormat,
+    #[error("source table and native query are mutually exclusive")]
+    TableQueryConflict,
     #[error("object mode '{mode}' requires an input with a selected object/map")]
     ObjectModeRequiresObject { mode: ObjectMode },
 }

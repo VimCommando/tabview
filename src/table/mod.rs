@@ -8,10 +8,12 @@ pub use query::*;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
+use std::future::Future;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::io::{Read, Seek, SeekFrom};
 use std::ops::ControlFlow;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
@@ -23,8 +25,22 @@ use crate::ingest::{decode_input, parse_rows, sniff_delimiter, ParseOptions, Quo
 const LAZY_FILE_SAMPLE_BYTES: u64 = 64 * 1024;
 const LAZY_FORWARD_SCAN_BATCH_ROWS: usize = 256;
 
-pub type SourceQueryTask =
-    Box<dyn FnOnce() -> anyhow::Result<Box<dyn TableStore>> + Send + 'static>;
+pub enum SourceQueryTask {
+    Blocking(Box<dyn FnOnce() -> anyhow::Result<SourceResult> + Send + 'static>),
+    Async(Pin<Box<dyn Future<Output = anyhow::Result<SourceResult>> + Send + 'static>>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceFieldMetadata {
+    pub name: String,
+    pub source_types: Vec<String>,
+    pub searchable: bool,
+    pub aggregatable: bool,
+    pub conflict: bool,
+    pub runtime: bool,
+    pub nested: bool,
+    pub multifield: bool,
+}
 
 pub trait TableStore: Send {
     fn generation(&self) -> SourceGeneration;
@@ -71,8 +87,17 @@ pub trait TableStore: Send {
             RowCount::AtLeast(_) | RowCount::Unknown => None,
         }
     }
-    fn query_provenance(&self) -> Option<&QueryProvenance> {
+    fn query_provenance(&self) -> Option<&NativeQueryArtifact> {
         None
+    }
+    fn result_is_partial(&self) -> bool {
+        false
+    }
+    fn result_warnings(&self) -> &[String] {
+        &[]
+    }
+    fn source_field_catalog(&self) -> Vec<SourceFieldMetadata> {
+        Vec::new()
     }
     fn stable_row_identity(
         &mut self,
@@ -280,16 +305,71 @@ pub enum ResultExtent {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct QueryProvenance {
-    pub logical_sql: String,
-    pub parameters: Vec<SourceOperand>,
-    pub copyable_sql: String,
+pub enum NativeQueryLanguage {
+    Sql,
+    Esql,
+}
+
+impl std::fmt::Display for NativeQueryLanguage {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Sql => "SQL",
+            Self::Esql => "ES|QL",
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum NativeQueryParameter {
+    Value(SourceOperand),
+    Identifier(String),
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct NativeQueryArtifact {
+    pub language: NativeQueryLanguage,
+    pub base: Option<String>,
+    pub logical: String,
+    pub parameters: Vec<NativeQueryParameter>,
+    pub copyable: String,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct SourceResultMetadata {
+    pub extent: Option<ResultExtent>,
+    pub is_partial: bool,
+    pub warnings: Vec<String>,
+}
+
+pub struct SourceResult {
+    pub definition: TableDefinition,
+    pub store: Box<dyn TableStore>,
+    pub metadata: SourceResultMetadata,
+    pub query: Option<NativeQueryArtifact>,
+}
+
+impl SourceResult {
+    pub fn from_store(definition: TableDefinition, store: Box<dyn TableStore>) -> Self {
+        let metadata = SourceResultMetadata {
+            extent: store.result_extent(),
+            is_partial: store.result_is_partial(),
+            warnings: store.result_warnings().to_vec(),
+        };
+        let query = store.query_provenance().cloned();
+        Self {
+            definition,
+            store,
+            metadata,
+            query,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum StableRowIdentity {
     SqliteRowId(i64),
     PrimaryKey(Vec<CellValue>),
+    ElasticsearchDocument { index: String, id: String },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -299,8 +379,8 @@ pub enum IdentityTransition {
 }
 
 pub enum SourceQueryExecution {
-    SourceExecuted(Box<dyn TableStore>),
-    BoundedLocal(Box<dyn TableStore>),
+    SourceExecuted(SourceResult),
+    BoundedLocal(SourceResult),
     Unsupported { reason: String },
 }
 
@@ -676,17 +756,25 @@ impl TableStore for FileSourceQueryStore {
         query: &SourceQuery,
     ) -> anyhow::Result<SourceQueryExecution> {
         let base = self.promote_base()?;
-        Ok(SourceQueryExecution::BoundedLocal(Box::new(
-            Self::execute_shared(base, self.definition.clone(), query.clone())?,
-        )))
+        let definition = self.definition.clone();
+        let store = Box::new(Self::execute_shared(
+            base,
+            definition.clone(),
+            query.clone(),
+        )?) as Box<dyn TableStore>;
+        Ok(SourceQueryExecution::BoundedLocal(
+            SourceResult::from_store(definition, store),
+        ))
     }
 
     fn source_query_task(&mut self, query: SourceQuery) -> anyhow::Result<SourceQueryTask> {
         let base = self.promote_base()?;
         let definition = self.definition.clone();
-        Ok(Box::new(move || {
-            Ok(Box::new(Self::execute_shared(base, definition, query)?) as Box<dyn TableStore>)
-        }))
+        Ok(SourceQueryTask::Blocking(Box::new(move || {
+            let store = Box::new(Self::execute_shared(base, definition.clone(), query)?)
+                as Box<dyn TableStore>;
+            Ok(SourceResult::from_store(definition, store))
+        })))
     }
 
     fn result_extent(&self) -> Option<ResultExtent> {

@@ -5,7 +5,7 @@ use std::sync::{
     mpsc, Arc, OnceLock,
 };
 
-use super::{CellValue, ColumnId, SourceGeneration, SourceQueryTask, TableStore};
+use super::{CellValue, ColumnId, SourceGeneration, SourceQueryTask, SourceResult};
 
 #[cfg(feature = "sqlite")]
 pub const DEFAULT_SQLITE_SOURCE_LIMIT: usize = 1_000;
@@ -198,6 +198,7 @@ pub struct SourceSort {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceQuery {
     pub generation: SourceGeneration,
+    pub native_query: Option<String>,
     pub filters: Vec<SourceFilter>,
     pub order_by: Vec<SourceSort>,
     pub limit: NonZeroUsize,
@@ -207,6 +208,7 @@ impl SourceQuery {
     pub fn new(generation: SourceGeneration, limit: NonZeroUsize) -> Self {
         Self {
             generation,
+            native_query: None,
             filters: Vec::new(),
             order_by: Vec::new(),
             limit,
@@ -250,7 +252,7 @@ pub enum SourceQueryProgress {
 pub enum SourceQueryCoordinatorEvent {
     Ready {
         revision: u64,
-        store: Box<dyn TableStore>,
+        result: Box<SourceResult>,
     },
     Failed {
         revision: u64,
@@ -260,7 +262,7 @@ pub enum SourceQueryCoordinatorEvent {
 
 struct SourceQueryJobResult {
     revision: u64,
-    result: anyhow::Result<Box<dyn TableStore>>,
+    result: anyhow::Result<SourceResult>,
 }
 
 struct SourceQueryJob {
@@ -347,24 +349,22 @@ impl SourceQueryCoordinator {
             }
         }
         let result = latest?;
+        let revision = result.revision;
         match result.result {
-            Ok(store) => {
+            Ok(result) => {
                 self.progress = SourceQueryProgress::Idle;
                 Some(SourceQueryCoordinatorEvent::Ready {
-                    revision: result.revision,
-                    store,
+                    revision,
+                    result: Box::new(result),
                 })
             }
             Err(error) => {
                 let error = error.to_string();
                 self.progress = SourceQueryProgress::Failed {
-                    revision: result.revision,
+                    revision,
                     error: error.clone(),
                 };
-                Some(SourceQueryCoordinatorEvent::Failed {
-                    revision: result.revision,
-                    error,
-                })
+                Some(SourceQueryCoordinatorEvent::Failed { revision, error })
             }
         }
     }
@@ -386,6 +386,7 @@ fn source_runtime_handle() -> tokio::runtime::Handle {
                 tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)
                     .thread_name("tabview-runtime")
+                    .enable_all()
                     .build()
                     .expect("fallback Tokio runtime")
             })
@@ -401,28 +402,49 @@ async fn source_query_worker(
     worker_done: mpsc::Sender<()>,
 ) {
     while let Some(mut job) = worker.recv().await {
-        while let Ok(replacement) = worker.try_recv() {
-            job = replacement;
-        }
-        tokio::task::yield_now().await;
-        if job.revision != latest_requested.load(Ordering::Acquire) {
-            continue;
-        }
-        let result = match tokio::task::spawn_blocking(job.task).await {
-            Ok(result) => result,
-            Err(error) => Err(anyhow::anyhow!("source query task failed: {error}")),
-        };
-        if sender
-            .send(SourceQueryJobResult {
-                revision: job.revision,
-                result,
-            })
-            .is_err()
-        {
-            break;
+        'run: loop {
+            while let Ok(replacement) = worker.try_recv() {
+                job = replacement;
+            }
+            if job.revision != latest_requested.load(Ordering::Acquire) {
+                break 'run;
+            }
+            let revision = job.revision;
+            let mut running = Box::pin(run_source_query_task(job.task));
+            tokio::select! {
+                result = &mut running => {
+                    if sender.send(SourceQueryJobResult { revision, result }).is_err() {
+                        let _ = worker_done.send(());
+                        return;
+                    }
+                    break 'run;
+                }
+                replacement = worker.recv() => {
+                    let Some(mut replacement) = replacement else {
+                        let result = running.await;
+                        let _ = sender.send(SourceQueryJobResult { revision, result });
+                        let _ = worker_done.send(());
+                        return;
+                    };
+                    while let Ok(newer) = worker.try_recv() {
+                        replacement = newer;
+                    }
+                    job = replacement;
+                }
+            }
         }
     }
     let _ = worker_done.send(());
+}
+
+async fn run_source_query_task(task: SourceQueryTask) -> anyhow::Result<SourceResult> {
+    match task {
+        SourceQueryTask::Blocking(task) => match tokio::task::spawn_blocking(task).await {
+            Ok(result) => result,
+            Err(error) => Err(anyhow::anyhow!("source query task failed: {error}")),
+        },
+        SourceQueryTask::Async(task) => task.await,
+    }
 }
 
 impl CapabilityStatus {
@@ -460,6 +482,34 @@ impl Default for SourceOperationCapabilities {
 mod tests {
     use super::*;
 
+    fn result(generation: SourceGeneration, rows: Vec<Vec<String>>) -> super::super::SourceResult {
+        let column_count = rows.first().map(Vec::len).unwrap_or(0);
+        let definition = super::super::TableDefinition {
+            generation,
+            columns: (0..column_count)
+                .map(|ordinal| super::super::ColumnDefinition {
+                    id: ColumnId {
+                        generation,
+                        ordinal: ordinal as u32,
+                    },
+                    source_identity: super::super::ColumnSourceIdentity::Positional(ordinal),
+                    display_name: format!("column {}", ordinal + 1),
+                    source_declared_type: None,
+                    source_type: super::super::LogicalType::Text,
+                    type_origin: super::super::TypeOrigin::Inferred,
+                })
+                .collect(),
+            schema_state: super::super::SchemaState::Complete,
+            relation: super::super::RelationMetadata::implicit("test", true),
+        };
+        super::super::SourceResult::from_store(
+            definition,
+            Box::new(super::super::InMemoryTable::from_text_rows(
+                generation, rows,
+            )),
+        )
+    }
+
     #[test]
     fn operation_layers_reference_generation_scoped_columns() {
         let generation = SourceGeneration::new();
@@ -486,6 +536,7 @@ mod tests {
         };
         let source = SourceQuery {
             generation,
+            native_query: None,
             filters: vec![SourceFilter {
                 scope: SourceFilterScope::Column(column),
                 operator: SourceFilterOperator::Equal,
@@ -571,31 +622,22 @@ mod tests {
         let (release, wait) = std::sync::mpsc::channel();
         let (started, first_started) = std::sync::mpsc::channel();
         let superseded_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        coordinator.request(Box::new(move || {
+        coordinator.request(SourceQueryTask::Blocking(Box::new(move || {
             started.send(()).unwrap();
             wait.recv().unwrap();
-            Ok(Box::new(super::super::InMemoryTable::from_text_rows(
-                generation,
-                vec![vec!["stale".to_owned()]],
-            )))
-        }));
+            Ok(result(generation, vec![vec!["stale".to_owned()]]))
+        })));
         first_started
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("first source query started");
         let ran = superseded_ran.clone();
-        coordinator.request(Box::new(move || {
+        coordinator.request(SourceQueryTask::Blocking(Box::new(move || {
             ran.store(true, std::sync::atomic::Ordering::SeqCst);
-            Ok(Box::new(super::super::InMemoryTable::from_text_rows(
-                generation,
-                vec![vec!["superseded".to_owned()]],
-            )))
-        }));
-        let latest = coordinator.request(Box::new(move || {
-            Ok(Box::new(super::super::InMemoryTable::from_text_rows(
-                generation,
-                vec![vec!["latest".to_owned()]],
-            )))
-        }));
+            Ok(result(generation, vec![vec!["superseded".to_owned()]]))
+        })));
+        let latest = coordinator.request(SourceQueryTask::Blocking(Box::new(move || {
+            Ok(result(generation, vec![vec!["latest".to_owned()]]))
+        })));
         release.send(()).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let event = loop {
@@ -622,14 +664,11 @@ mod tests {
         let mut coordinator = SourceQueryCoordinator::default();
         let (started, wait_for_start) = std::sync::mpsc::channel();
         let (release, wait_for_release) = std::sync::mpsc::channel();
-        coordinator.request(Box::new(move || {
+        coordinator.request(SourceQueryTask::Blocking(Box::new(move || {
             started.send(()).expect("worker started");
             wait_for_release.recv().expect("release worker");
-            Ok(Box::new(super::super::InMemoryTable::from_text_rows(
-                generation,
-                Vec::new(),
-            )))
-        }));
+            Ok(result(generation, Vec::new()))
+        })));
         wait_for_start
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("active worker");
@@ -657,13 +696,10 @@ mod tests {
     async fn source_query_tasks_run_on_the_active_tokio_runtime() {
         let generation = SourceGeneration::new();
         let mut coordinator = SourceQueryCoordinator::default();
-        coordinator.request(Box::new(move || {
+        coordinator.request(SourceQueryTask::Blocking(Box::new(move || {
             assert!(tokio::runtime::Handle::try_current().is_ok());
-            Ok(Box::new(super::super::InMemoryTable::from_text_rows(
-                generation,
-                vec![vec!["tokio".to_owned()]],
-            )))
-        }));
+            Ok(result(generation, vec![vec!["tokio".to_owned()]]))
+        })));
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         loop {

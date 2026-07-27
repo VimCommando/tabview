@@ -3,6 +3,21 @@ use predicates::prelude::*;
 use std::io::BufRead;
 use std::process::Stdio;
 
+#[cfg(feature = "elasticsearch")]
+mod support;
+#[cfg(feature = "elasticsearch")]
+use support::elasticsearch_mock::{
+    Response as ElasticsearchResponse, Server as ElasticsearchServer,
+};
+
+#[cfg(feature = "elasticsearch")]
+fn elasticsearch_test_lock() -> std::sync::MutexGuard<'static, ()> {
+    static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| std::sync::Mutex::new(()))
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 fn fixture(contents: &str, suffix: &str) -> tempfile::NamedTempFile {
     let file = tempfile::Builder::new()
         .suffix(suffix)
@@ -171,6 +186,103 @@ fn source_errors_leave_stdout_empty() {
         .failure()
         .stdout("")
         .stderr(predicate::str::is_empty().not());
+}
+
+#[cfg(feature = "elasticsearch")]
+#[test]
+fn elasticsearch_direct_native_query_waits_and_emits_only_table_bytes() {
+    let _guard = elasticsearch_test_lock();
+    let server = ElasticsearchServer::start(vec![ElasticsearchResponse::delayed(
+        r#"{"columns":[{"name":"level","type":"keyword"}],"values":[["error"]]}"#,
+        std::time::Duration::from_millis(40),
+    )]);
+    let started = std::time::Instant::now();
+    tabview_command()
+        .args([
+            "--format",
+            "elasticsearch",
+            "--query",
+            "FROM logs-* | KEEP level",
+            "--color",
+            "never",
+            server.endpoint(),
+        ])
+        .assert()
+        .success()
+        .stdout("level\nerror\n")
+        .stderr("");
+    assert!(started.elapsed() >= std::time::Duration::from_millis(35));
+    let requests = server.requests();
+    assert_eq!(requests.len(), 1);
+    assert!(requests[0].contains(r#""query":"FROM logs-* | KEEP level\n| LIMIT 1001""#));
+    assert!(!requests[0].contains("Authorization"));
+}
+
+#[cfg(feature = "elasticsearch")]
+#[test]
+fn elasticsearch_selected_target_preserves_multivalues_and_warns_partial_on_stderr() {
+    let _guard = elasticsearch_test_lock();
+    let server = ElasticsearchServer::start(vec![
+        ElasticsearchResponse::ok(
+            r#"{"logs-a":{"mappings":{"properties":{"tags":{"type":"keyword"}}}}}"#,
+        ),
+        ElasticsearchResponse::ok(
+            r#"{"fields":{"tags":{"keyword":{"searchable":true,"aggregatable":true}}}}"#,
+        ),
+        ElasticsearchResponse::ok(
+            r#"{"columns":[{"name":"tags","type":"keyword"}],"values":[[["prod","api"]]],"is_partial":true,"warnings":["fixture shard warning"]}"#,
+        ),
+    ]);
+    tabview_command()
+        .args([
+            "--format",
+            "elasticsearch",
+            "--table",
+            "logs-a",
+            "--color",
+            "never",
+            server.endpoint(),
+        ])
+        .assert()
+        .success()
+        .stdout("tags\n[\"prod\",\"api\"]\n")
+        .stderr(
+            predicate::str::contains("partial result")
+                .and(predicate::str::contains("fixture shard warning")),
+        );
+    assert_eq!(server.requests().len(), 3);
+}
+
+#[cfg(feature = "elasticsearch")]
+#[test]
+fn elasticsearch_direct_output_without_selection_and_query_failures_keep_stdout_clean() {
+    let _guard = elasticsearch_test_lock();
+    let discovery = ElasticsearchServer::start(vec![ElasticsearchResponse::ok(
+        r#"{"indices":[{"name":"logs-a","attributes":["open"]}],"aliases":[],"data_streams":[]}"#,
+    )]);
+    tabview_command()
+        .args(["--format", "elasticsearch", discovery.endpoint()])
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("--table or --query"));
+
+    let failure = ElasticsearchServer::start(vec![ElasticsearchResponse::error(
+        400,
+        r#"{"error":{"reason":"invalid ES|QL fixture"}}"#,
+    )]);
+    tabview_command()
+        .args([
+            "--format",
+            "elasticsearch",
+            "--query",
+            "FROM broken",
+            failure.endpoint(),
+        ])
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("invalid ES|QL fixture"));
 }
 
 #[cfg(feature = "sqlite")]

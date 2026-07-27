@@ -1,6 +1,6 @@
 # Tabview
 
-View delimited text, JSON, NDJSON, and local SQLite databases in a
+View delimited text, JSON, NDJSON, local SQLite databases, and Elasticsearch in a
 spreadsheet-like terminal interface.
 
 **This project is functional but future development will be sporadic and
@@ -29,6 +29,7 @@ contents of that cell are shown next to it.
 - Spreadsheet-like view for visualizing tabular data.
 - Automatic or explicit delimited, JSON, and NDJSON input selection.
 - Read-only browsing of local SQLite databases through Turso.
+- ES|QL browsing of Elasticsearch indices and data streams.
 - RFC 6901 JSON Pointer selection for tables embedded in response documents.
 - Incremental indexing for large seekable inputs and typed JSON scalar values.
 - Vim-like navigation, including `h`, `j`, `k`, `l`, `g`, `G`, marks, and
@@ -50,6 +51,7 @@ contents of that cell are shown next to it.
 - Optional clipboard support can be enabled with the `clipboard` Cargo feature.
 - Saved views and SQLite support are enabled by default through the
   `saved-views` and `sqlite` Cargo features.
+- Elasticsearch support is opt-in through the `elasticsearch` Cargo feature.
 - Build with `--no-default-features` to omit both optional capabilities, or
   enable either one explicitly (for example,
   `--no-default-features --features saved-views` builds without SQLite).
@@ -74,6 +76,7 @@ Build with clipboard support:
 
 ```sh
 cargo install tabview --features clipboard
+cargo install tabview --features elasticsearch
 ```
 
 ## Usage
@@ -98,6 +101,9 @@ tabview records.ndjson --format ndjson
 tabview response.data --format json --schema-scan full
 tabview sample/us-counties.sqlite3
 tabview sample/us-counties.sqlite3 --format sqlite --table counties
+tabview --format elasticsearch https://localhost:9200 --table logs-*
+tabview --format elasticsearch https://localhost:9200 \
+  --query 'FROM logs-* | WHERE log.level == "error" | SORT @timestamp DESC'
 tabview data.csv --output table
 tabview --interactive data.csv
 tabview --interactive --output table data.csv > edited.txt
@@ -135,7 +141,11 @@ syntax, so write it to a text destination rather than replacing the source.
 Future serializers such as CSV and Markdown can be added as new `--output`
 values without changing `--interactive`.
 
-`--format auto|delimited|json|ndjson|sqlite` defaults to `auto`. Filename
+`--format auto|delimited|json|ndjson|sqlite|elasticsearch` defaults to `auto`.
+An unambiguous URL scheme can select a source format: `libsql://` resolves to
+SQLite and `file://` resolves to a local path. HTTP(S) remains ambiguous and
+therefore requires `--format elasticsearch`; Tabview never probes arbitrary
+remote content to guess its type. Filename
 extensions are considered before bounded content probing; SQLite's
 `SQLite format 3` signature is recognized before any text decoding. An explicit
 format always wins. Delimited-only options imply delimited input under `auto`
@@ -150,7 +160,8 @@ automatically. If several are available, the interactive application presents
 a simple table picker; direct batch output instead requires
 `--table <name>` or saved `source.table` so it cannot choose silently or emit a
 partial result. SQLite data cannot be read from stdin, and Turso Cloud,
-`libsql://`, and other remote URLs are outside this feature's scope.
+`libsql://`, and other remote SQLite URLs are not connected yet (the scheme is
+reserved now so remote libSQL support can use the same target model).
 SQLite support is compiled by the default-enabled `sqlite` Cargo feature; a
 build without that feature omits Turso, `--format sqlite`, and `--table` while
 retaining the shared Tokio application runtime.
@@ -164,6 +175,12 @@ Configuration modal (`V`) manages source-independent local presentation, while
 Column Info (`i`) remains the quick current-column editor. Existing `f`/`F` and
 sort keybindings remain view-only.
 
+`--query` accepts one read-only, row-producing SQLite statement. SELECT and CTE
+queries are composed as a derived table so source filters, source sorting, and
+the hard limit remain enforced. Multiple statements, writes, state-changing
+pragmas, unbound parameters, and non-tabular statements are rejected while the
+database remains opened with storage-level read-only flags.
+
 The Query modal (`p`) shows the logical parameterized SQLite `SELECT`, typed
 parameters, and a safely rendered copyable statement. It also calls out active
 local view transforms, because they are intentionally absent from the SQL.
@@ -173,8 +190,8 @@ Tabview opens SQLite through Turso with storage-level read-only flags before
 creating a connection, so viewing does not convert a rollback-journal database
 to WAL, create journal/WAL/shared-memory sidecars, or modify existing database
 or sidecar bytes. The connection is confined behind a read-only facade,
-`PRAGMA query_only` is enabled and verified as defense in depth, all values are
-bound parameters, and Tabview exposes no arbitrary-SQL or mutation command.
+`PRAGMA query_only` is enabled and verified as defense in depth, and generated
+source predicates use bound parameters.
 Ordinary tables and capability-probed ordinary views are selectable. Virtual
 tables—including existing FTS5 and RTree tables—are reported as unsupported;
 shadow and SQLite-internal objects are hidden.
@@ -192,6 +209,63 @@ key reset identity-dependent state.
 A public-domain Census Bureau database with 1,000 county records is included at
 `sample/us-counties.sqlite3`; see `sample/README.md` for its provenance and
 column-selection details.
+
+### Elasticsearch sources
+
+Build with `--features elasticsearch`, then provide an HTTP(S) cluster endpoint:
+
+```sh
+tabview --format elasticsearch https://elastic.example:9200
+tabview --format elasticsearch https://elastic.example:9200 --table logs-*
+tabview --format elasticsearch https://elastic.example:9200 \
+  --query 'FROM logs-* | KEEP @timestamp, message | SORT @timestamp DESC'
+```
+
+Without `--table` or `--query`, interactive mode discovers visible, open
+non-dot indices and data streams and displays them in separate picker sections.
+Aliases are intentionally omitted from discovery, but an alias supplied
+explicitly through `--table` is passed to Elasticsearch and works normally.
+Direct non-interactive output requires `--table` or `--query`, because it
+cannot ask the user to choose a target.
+
+`--table` generates an ES|QL `FROM` query with `_index` and `_id` metadata.
+`--query` is a complete opaque ES|QL base query; Tabview does not parse or
+validate its `FROM` targets. Source Configuration can add safely quoted filters
+and sorts and change the hard limit (1,000 rows by default). Tabview privately
+requests one extra row to distinguish a complete result from a limited one;
+the reusable query shown by the Query popup retains the configured limit.
+
+For a selected index or data stream, Tabview reads mappings and field
+capabilities to build a catalog including nested fields, multifields, runtime
+fields, and cross-index conflicts. ES|QL response columns remain authoritative
+for the displayed result schema because commands such as `STATS`, `EVAL`, and
+`KEEP` can change it. Query-only startup skips mapping discovery. Successful
+schema-changing queries activate atomically; failed or superseded requests
+leave the prior result visible.
+
+Authentication and custom trust are environment-only:
+
+```sh
+ELASTIC_API_KEY=... tabview --format elasticsearch https://elastic.example:9200 --table logs-*
+ELASTIC_USERNAME=elastic ELASTIC_PASSWORD=... \
+  tabview --format elasticsearch https://elastic.example:9200 --table logs-*
+ELASTIC_CA_CERT=/path/to/ca.pem \
+  tabview --format elasticsearch https://elastic.example:9200 --table logs-*
+```
+
+API-key and username/password modes are mutually exclusive. Credentials in the
+endpoint URL are rejected, and URL query strings, fragments, and userinfo are
+never included in diagnostics or saved-view identities. The cluster principal
+needs permission to resolve index metadata and read mappings/field
+capabilities for picker/table mode, plus permission to run ES|QL and read the
+target data. Partial ES|QL results are labeled in the TUI and warned on stderr;
+stdout remains table data only.
+
+The optional adapter pins the official Rust client at `9.1.0-alpha.1`, uses its
+`native-tls` backend, and adds the client, HTTP, TLS, and URL dependency graph
+only when the feature is enabled. It is tested against the versioned
+Elasticsearch integration fixture. Server-side async-query progress,
+connection profiles, and aliases in the picker are outside this change.
 
 For structured formats, `--object-mode auto|record|entries` controls how a
 selected object becomes rows. `record` keeps compatibility behavior and opens
@@ -343,7 +417,10 @@ from `$XDG_CONFIG_HOME/tabview/views`, or `~/.config/tabview/views` when
 including macOS. Files ending in `.yml` and `.yaml` are accepted. If both
 `name.yml` and `name.yaml` exist, `.yml` wins and a footer warning is shown.
 
-Views match the opened input basename only. Filename entries are classified as
+Views match the opened input basename only. Remote endpoints use a sanitized
+non-secret basename such as `https_elastic.example_9200`; this avoids host
+collisions without persisting credentials, query strings, or fragments.
+Filename entries are classified as
 exact strings, globs containing `*`, `?`, or `[`, or regexes that start with
 `^` or end with `$`. Exact matches win before globs, then regexes. Use
 `--view <name>` to force a view by file stem, or `--no-view` to disable loading
@@ -415,6 +492,9 @@ explicit CLI options, then the selected saved view, then defaults. Supplying
 invocation. When a view is written for an object table, tabview saves the
 resolved explicit `source.object_mode` (`record` or `entries`) so later detector
 improvements do not change that view's shape. Non-object tables omit it.
+Native sources may persist either `source.table` or `source.query`, never both.
+For Elasticsearch, `source.query` stores only the configured ES|QL base text;
+composed predicates, sorting, and the private extent probe remain separate.
 
 For delimited, JSON, and NDJSON sources, saved source filters stream decoded
 logical records before the source limit. Use `column: "*"` for a grep-style

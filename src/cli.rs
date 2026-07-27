@@ -1,9 +1,8 @@
-use std::path::PathBuf;
-
 use clap::{ArgAction, Parser};
 
 use crate::ingest::{
-    InputFormat, JsonPointer, ObjectMode, Quoting, SchemaScan, SourceOptionOverrides,
+    source::SourceTarget, InputFormat, JsonPointer, ObjectMode, Quoting, SchemaScan,
+    SourceOptionOverrides,
 };
 use crate::output::{ColorOutput, OutputFormat};
 use crate::view::ColumnWidthMode;
@@ -11,16 +10,20 @@ use crate::view::ColumnWidthMode;
 #[derive(Debug, Clone, PartialEq, Eq, Parser)]
 #[command(name = "tabview", disable_help_subcommand = true)]
 #[cfg_attr(
-    feature = "sqlite",
+    all(feature = "sqlite", not(feature = "elasticsearch")),
     command(about = "View delimited, JSON, NDJSON, or local SQLite data.")
 )]
 #[cfg_attr(
-    not(feature = "sqlite"),
+    feature = "elasticsearch",
+    command(about = "View delimited, JSON, NDJSON, SQLite, or Elasticsearch data.")
+)]
+#[cfg_attr(
+    not(any(feature = "sqlite", feature = "elasticsearch")),
     command(about = "View delimited, JSON, or NDJSON data.")
 )]
 pub struct Args {
-    /// File to read. Use '-' to read from standard input.
-    pub filename: PathBuf,
+    /// Local file, standard input marker '-', or remote source URL.
+    pub filename: String,
 
     /// Run the interactive viewer. Combine with --output to serialize the final view on quit.
     #[arg(short = 'i', long = "interactive", action = ArgAction::SetTrue)]
@@ -78,10 +81,15 @@ pub struct Args {
     #[arg(long = "schema-scan", value_parser = parse_schema_scan)]
     pub schema_scan: Option<SchemaScan>,
 
-    /// SQLite table or compatible view to open.
-    #[cfg(feature = "sqlite")]
+    /// Source-native relation or target to open.
+    #[cfg(any(feature = "sqlite", feature = "elasticsearch"))]
     #[arg(long = "table")]
     pub table: Option<String>,
+
+    /// Complete native query in the language selected by the source format.
+    #[cfg(any(feature = "sqlite", feature = "elasticsearch"))]
+    #[arg(long = "query", conflicts_with = "table")]
+    pub query: Option<String>,
 
     /// Force a saved view by canonical name.
     #[cfg(feature = "saved-views")]
@@ -106,7 +114,7 @@ impl Args {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Config {
-    pub filename: PathBuf,
+    pub target: SourceTarget,
     pub interactive: bool,
     pub output: Option<OutputFormat>,
     pub color: ColorOutput,
@@ -157,7 +165,7 @@ impl Config {
                 option: "--object-mode",
             });
         }
-        #[cfg(feature = "sqlite")]
+        #[cfg(any(feature = "sqlite", feature = "elasticsearch"))]
         if args.table.is_some()
             && matches!(
                 explicit_format,
@@ -169,17 +177,33 @@ impl Config {
                 option: "--table",
             });
         }
-        #[cfg(feature = "sqlite")]
+        #[cfg(any(feature = "sqlite", feature = "elasticsearch"))]
+        if args.query.is_some()
+            && matches!(
+                explicit_format,
+                Some(InputFormat::Delimited | InputFormat::Json | InputFormat::Ndjson)
+            )
+        {
+            return Err(CliError::IncompatibleOptions {
+                format: explicit_format.expect("checked format"),
+                option: "--query",
+            });
+        }
+        #[cfg(any(feature = "sqlite", feature = "elasticsearch"))]
         let table = args.table;
-        #[cfg(not(feature = "sqlite"))]
+        #[cfg(not(any(feature = "sqlite", feature = "elasticsearch")))]
         let table = None;
+        #[cfg(any(feature = "sqlite", feature = "elasticsearch"))]
+        let native_query = args.query;
+        #[cfg(not(any(feature = "sqlite", feature = "elasticsearch")))]
+        let native_query = None;
         // Explicit delimited parsing options must outrank a saved structured
         // format. Keep the format automatic so SQLite signatures still win
         // during source probing.
         let resolved_cli_format =
             explicit_format.or_else(|| delimited_option_selected.then_some(InputFormat::Auto));
         Ok(Self {
-            filename: args.filename,
+            target: SourceTarget::from_cli_value(&args.filename),
             interactive: args.interactive,
             output: args.output,
             color: args.color,
@@ -196,6 +220,7 @@ impl Config {
                 object_mode: args.object_mode,
                 schema_scan: args.schema_scan,
                 table,
+                native_query,
                 ..SourceOptionOverrides::default()
             },
             #[cfg(feature = "saved-views")]
@@ -209,6 +234,8 @@ fn format_rejects_delimited_options(format: InputFormat) -> bool {
         InputFormat::Json | InputFormat::Ndjson => true,
         #[cfg(feature = "sqlite")]
         InputFormat::Sqlite => true,
+        #[cfg(feature = "elasticsearch")]
+        InputFormat::Elasticsearch => true,
         InputFormat::Auto | InputFormat::Delimited => false,
     }
 }
@@ -550,7 +577,7 @@ mod tests {
     #[test]
     fn parses_mysql_pager_shape() {
         let config = parse(&["tabview", "-d", r"\t", "--quoting", "QUOTE_NONE", "-"]);
-        assert_eq!(config.filename, PathBuf::from("-"));
+        assert_eq!(config.target, SourceTarget::Stdin);
         assert_eq!(config.delimiter, Some(b'\t'));
         assert_eq!(config.quoting, Some(Quoting::None));
         assert_eq!(config.source_options.format, Some(InputFormat::Auto));
@@ -627,10 +654,59 @@ mod tests {
         ]);
         assert_eq!(config.source_options.format, Some(InputFormat::Sqlite));
         assert_eq!(config.source_options.table.as_deref(), Some("users"));
+        let query = parse(&[
+            "tabview",
+            "--format",
+            "sqlite",
+            "--query",
+            "SELECT * FROM users",
+            "application.db",
+        ]);
+        assert_eq!(
+            query.source_options.native_query.as_deref(),
+            Some("SELECT * FROM users")
+        );
 
         let help = Args::command().render_long_help().to_string();
         assert!(help.contains("--table <TABLE>"));
-        assert!(help.contains("local SQLite"));
+        assert!(help.contains("--query <QUERY>"));
+        assert!(help.contains("SQLite"));
+    }
+
+    #[cfg(any(feature = "sqlite", feature = "elasticsearch"))]
+    #[test]
+    fn native_query_and_table_conflict_at_argument_parsing() {
+        assert!(Args::try_parse_from([
+            "tabview",
+            "--table",
+            "users",
+            "--query",
+            "SELECT * FROM users",
+            "application.db"
+        ])
+        .is_err());
+    }
+
+    #[cfg(feature = "elasticsearch")]
+    #[test]
+    fn elasticsearch_feature_exposes_remote_target_and_query() {
+        let config = parse(&[
+            "tabview",
+            "https://elastic.example:9200",
+            "--format",
+            "elasticsearch",
+            "--query",
+            "FROM logs-* | LIMIT 10",
+        ]);
+        assert!(config.target.as_url().is_some());
+        assert_eq!(
+            config.source_options.format,
+            Some(InputFormat::Elasticsearch)
+        );
+        assert_eq!(
+            config.source_options.native_query.as_deref(),
+            Some("FROM logs-* | LIMIT 10")
+        );
     }
 
     #[cfg(feature = "sqlite")]
@@ -649,11 +725,14 @@ mod tests {
         assert_eq!(config.source_options.table.as_deref(), Some("users"));
     }
 
-    #[cfg(not(feature = "sqlite"))]
+    #[cfg(not(any(feature = "sqlite", feature = "elasticsearch")))]
     #[test]
-    fn sqlite_feature_removes_its_cli_surface() {
+    fn native_source_features_remove_their_cli_surface() {
         assert!(Args::try_parse_from(["tabview", "--format", "sqlite", "application.db"]).is_err());
         assert!(Args::try_parse_from(["tabview", "--table", "users", "application.db"]).is_err());
+        assert!(
+            Args::try_parse_from(["tabview", "--query", "SELECT 1", "application.db"]).is_err()
+        );
 
         let help = Args::command().render_long_help().to_string();
         assert!(!help.contains("--table <TABLE>"));
@@ -663,7 +742,7 @@ mod tests {
     #[test]
     fn object_mode_does_not_imply_a_format_for_stdin() {
         let config = parse(&["tabview", "--object-mode", "entries", "-"]);
-        assert_eq!(config.filename, PathBuf::from("-"));
+        assert_eq!(config.target, SourceTarget::Stdin);
         assert_eq!(config.source_options.format, None);
         assert_eq!(config.source_options.object_mode, Some(ObjectMode::Entries));
     }

@@ -38,6 +38,7 @@ pub struct SavedSourceConfig {
     pub object_mode: Option<ObjectMode>,
     pub schema_scan: Option<SchemaScan>,
     pub table: Option<String>,
+    pub query: Option<String>,
     pub limit: Option<usize>,
     pub filters: Vec<SavedSourceFilter>,
     pub sort: Vec<SavedSourceSort>,
@@ -292,6 +293,7 @@ struct RawSavedSourceConfig {
     object_mode: Option<String>,
     schema_scan: Option<String>,
     table: Option<String>,
+    query: Option<String>,
     limit: Option<usize>,
     #[serde(default)]
     filters: Vec<RawSavedSourceFilter>,
@@ -793,6 +795,17 @@ fn validate_raw_view(raw: RawSavedView) -> ValidatedSavedView {
             Some(value)
         }
     });
+    let query = raw.source.query.and_then(|value| {
+        if value.trim().is_empty() {
+            warnings.push(warning("source.query", "query cannot be empty"));
+            None
+        } else {
+            Some(value)
+        }
+    });
+    if table.is_some() && query.is_some() {
+        warnings.push(warning("source", "table and query are mutually exclusive"));
+    }
     let limit = raw.source.limit.and_then(|value| {
         if value == 0 {
             warnings.push(warning("source.limit", "limit must be greater than zero"));
@@ -875,6 +888,7 @@ fn validate_raw_view(raw: RawSavedView) -> ValidatedSavedView {
                 object_mode,
                 schema_scan,
                 table,
+                query,
                 limit,
                 filters: source_filters,
                 sort: source_sort,
@@ -1768,6 +1782,7 @@ impl SavedView {
             object_mode: self.source.object_mode,
             schema_scan: self.source.schema_scan,
             table: self.source.table.clone(),
+            native_query: self.source.query.clone(),
             limit: self.source.limit.and_then(std::num::NonZeroUsize::new),
             source_filters: Some(
                 self.source
@@ -2002,6 +2017,88 @@ view:
         assert_eq!(parsed.view.source.sort.len(), 1);
         assert_eq!(parsed.view.view.filters.len(), 1);
         assert_eq!(parsed.view.view.sort.len(), 1);
+    }
+
+    #[cfg(feature = "elasticsearch")]
+    #[test]
+    fn elasticsearch_query_round_trips_and_cli_query_overrides_saved_query() {
+        let parsed = parse_saved_view_yaml(
+            r#"
+name: errors
+filenames: [https_elastic.example_9200]
+source:
+  format: elasticsearch
+  query: 'FROM logs-* | WHERE log.level == "error"'
+  limit: 25
+view: {}
+"#,
+        )
+        .expect("parse ES|QL saved view");
+        assert!(parsed.warnings.is_empty());
+        assert_eq!(
+            parsed.view.source.query.as_deref(),
+            Some(r#"FROM logs-* | WHERE log.level == "error""#)
+        );
+        let merged = parsed.view.merged_open_options(
+            OpenOptions::default(),
+            &SourceOptionOverrides {
+                native_query: Some("FROM audit-* | LIMIT 5".to_owned()),
+                ..SourceOptionOverrides::default()
+            },
+        );
+        assert_eq!(
+            merged.native_query.as_deref(),
+            Some("FROM audit-* | LIMIT 5")
+        );
+        assert_eq!(merged.limit.unwrap().get(), 25);
+    }
+
+    #[test]
+    fn saved_table_and_query_conflict_is_reported_without_choosing_one() {
+        let parsed = parse_saved_view_yaml(
+            r#"
+name: conflict
+filenames: [source]
+source:
+  table: logs
+  query: FROM logs
+view: {}
+"#,
+        )
+        .expect("parse conflict");
+        assert_eq!(parsed.view.source.table.as_deref(), Some("logs"));
+        assert_eq!(parsed.view.source.query.as_deref(), Some("FROM logs"));
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|warning| warning.message.contains("mutually exclusive")));
+        assert!(parsed
+            .view
+            .merged_open_options(OpenOptions::default(), &SourceOptionOverrides::default())
+            .validate()
+            .is_err());
+    }
+
+    #[cfg(not(feature = "elasticsearch"))]
+    #[test]
+    fn feature_disabled_saved_elasticsearch_format_is_compatible_but_unavailable() {
+        let parsed = parse_saved_view_yaml(
+            r#"
+name: errors
+filenames: [elastic]
+source:
+  format: elasticsearch
+  query: FROM logs-*
+view: {}
+"#,
+        )
+        .expect("parse");
+        assert_eq!(parsed.view.source.format, None);
+        assert_eq!(parsed.view.source.query.as_deref(), Some("FROM logs-*"));
+        assert!(parsed
+            .warnings
+            .iter()
+            .any(|warning| warning.field == "source.format"));
     }
 
     #[test]

@@ -1,20 +1,34 @@
+use std::fmt;
 use std::io::{self, Read};
 use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::{Arc, Condvar, Mutex};
 
+use url::Url;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum InputSource {
+pub enum SourceTarget {
     Path(PathBuf),
     Stdin,
+    Url(Url),
     StreamingStdin(StreamingInput),
 }
 
-impl InputSource {
+pub type InputSource = SourceTarget;
+
+impl SourceTarget {
     pub fn from_cli_value(value: &str) -> Self {
         if value == "-" {
             return Self::Stdin;
         }
-        Self::Path(parse_path(value))
+        match Url::parse(value) {
+            Ok(url) if url.scheme() == "file" => url
+                .to_file_path()
+                .map(Self::Path)
+                .unwrap_or_else(|_| Self::Path(PathBuf::from(value))),
+            Ok(url) => Self::Url(url),
+            Err(_) => Self::Path(PathBuf::from(value)),
+        }
     }
 
     pub fn display_name(&self) -> String {
@@ -25,6 +39,7 @@ impl InputSource {
                 .unwrap_or_else(|| path.to_str().unwrap_or("input"))
                 .to_owned(),
             Self::Stdin | Self::StreamingStdin(_) => "stdin".to_owned(),
+            Self::Url(_) => self.safe_identity(),
         }
     }
 
@@ -39,6 +54,81 @@ impl InputSource {
     pub fn is_streaming(&self) -> bool {
         matches!(self, Self::StreamingStdin(_))
     }
+
+    pub fn as_path(&self) -> Option<&std::path::Path> {
+        match self {
+            Self::Path(path) => Some(path),
+            Self::Stdin | Self::Url(_) | Self::StreamingStdin(_) => None,
+        }
+    }
+
+    pub fn as_url(&self) -> Option<&Url> {
+        match self {
+            Self::Url(url) => Some(url),
+            Self::Path(_) | Self::Stdin | Self::StreamingStdin(_) => None,
+        }
+    }
+
+    /// A stable, non-secret representation suitable for diagnostics and
+    /// saved-view matching. Query strings and fragments are intentionally
+    /// omitted because endpoint URLs must not become a credential channel.
+    pub fn safe_identity(&self) -> String {
+        match self {
+            Self::Path(path) => path.to_string_lossy().into_owned(),
+            Self::Stdin | Self::StreamingStdin(_) => "-".to_owned(),
+            Self::Url(url) => {
+                let mut safe = url.clone();
+                let _ = safe.set_username("");
+                let _ = safe.set_password(None);
+                safe.set_query(None);
+                safe.set_fragment(None);
+                safe.to_string()
+            }
+        }
+    }
+
+    /// A basename-safe identity for saved-view matching and generated YAML.
+    /// Remote targets use the complete non-secret endpoint rather than only
+    /// its final path segment so clusters on different hosts do not collide.
+    pub fn saved_view_filename(&self) -> String {
+        match self {
+            Self::Path(path) => path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("input")
+                .to_owned(),
+            Self::Stdin | Self::StreamingStdin(_) => "-".to_owned(),
+            Self::Url(_) => {
+                let identity = self.safe_identity();
+                let mut value = String::with_capacity(identity.len());
+                let mut separator = false;
+                for character in identity.chars() {
+                    if character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_') {
+                        value.push(character);
+                        separator = false;
+                    } else if !separator && !value.is_empty() {
+                        value.push('_');
+                        separator = true;
+                    }
+                }
+                value.trim_matches('_').to_owned()
+            }
+        }
+    }
+}
+
+impl fmt::Display for SourceTarget {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.safe_identity())
+    }
+}
+
+impl FromStr for SourceTarget {
+    type Err = std::convert::Infallible;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Ok(Self::from_cli_value(value))
+    }
 }
 
 pub fn read_stdin() -> io::Result<Vec<u8>> {
@@ -52,6 +142,13 @@ pub fn read_source(source: &InputSource) -> io::Result<Vec<u8>> {
         InputSource::Path(path) => std::fs::read(path),
         InputSource::Stdin => read_stdin(),
         InputSource::StreamingStdin(input) => input.snapshot(true).map(|snapshot| snapshot.bytes),
+        InputSource::Url(url) => Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!(
+                "remote target '{}' is not a byte-stream source",
+                safe_url(url)
+            ),
+        )),
     }
 }
 
@@ -251,14 +348,8 @@ pub fn stream_reader_for_interactive(mut reader: Box<dyn Read + Send>) -> InputS
     InputSource::StreamingStdin(input)
 }
 
-fn parse_path(value: &str) -> PathBuf {
-    if let Some(rest) = value.strip_prefix("file://") {
-        if let Some(path) = rest.strip_prefix("localhost/") {
-            return PathBuf::from(format!("/{path}"));
-        }
-        return PathBuf::from(rest);
-    }
-    PathBuf::from(value)
+fn safe_url(url: &Url) -> String {
+    SourceTarget::Url(url.clone()).safe_identity()
 }
 
 #[cfg(test)]
@@ -279,6 +370,30 @@ mod tests {
         assert_eq!(
             InputSource::from_cli_value("file://localhost/tmp/data.csv"),
             InputSource::Path(PathBuf::from("/tmp/data.csv"))
+        );
+    }
+
+    #[test]
+    fn parses_remote_urls_without_treating_them_as_paths() {
+        let target = InputSource::from_cli_value("https://elastic.example:9200/logs");
+        let url = target.as_url().expect("remote URL");
+        assert_eq!(url.scheme(), "https");
+        assert_eq!(url.host_str(), Some("elastic.example"));
+        assert_eq!(url.port(), Some(9200));
+        assert_eq!(url.path(), "/logs");
+    }
+
+    #[test]
+    fn safe_remote_identity_redacts_secret_bearing_url_parts() {
+        let target = InputSource::from_cli_value(
+            "https://elastic:secret@elastic.example:9200/base?api_key=hidden#fragment",
+        );
+        assert_eq!(target.safe_identity(), "https://elastic.example:9200/base");
+        assert!(!target.display_name().contains("secret"));
+        assert!(!target.to_string().contains("hidden"));
+        assert_eq!(
+            target.saved_view_filename(),
+            "https_elastic.example_9200_base"
         );
     }
 
