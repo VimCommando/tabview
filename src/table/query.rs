@@ -410,26 +410,47 @@ async fn source_query_worker(
                 break 'run;
             }
             let revision = job.revision;
-            let mut running = Box::pin(run_source_query_task(job.task));
-            tokio::select! {
-                result = &mut running => {
-                    if sender.send(SourceQueryJobResult { revision, result }).is_err() {
+            match job.task {
+                SourceQueryTask::Blocking(task) => {
+                    let result = run_blocking_source_query_task(task).await;
+                    if revision == latest_requested.load(Ordering::Acquire)
+                        && sender
+                            .send(SourceQueryJobResult { revision, result })
+                            .is_err()
+                    {
                         let _ = worker_done.send(());
                         return;
                     }
                     break 'run;
                 }
-                replacement = worker.recv() => {
-                    let Some(mut replacement) = replacement else {
-                        let result = running.await;
-                        let _ = sender.send(SourceQueryJobResult { revision, result });
-                        let _ = worker_done.send(());
-                        return;
-                    };
-                    while let Ok(newer) = worker.try_recv() {
-                        replacement = newer;
+                SourceQueryTask::Async(mut running) => {
+                    tokio::select! {
+                        result = &mut running => {
+                            if revision == latest_requested.load(Ordering::Acquire)
+                                && sender
+                                    .send(SourceQueryJobResult { revision, result })
+                                    .is_err()
+                            {
+                                let _ = worker_done.send(());
+                                return;
+                            }
+                            break 'run;
+                        }
+                        replacement = worker.recv() => {
+                            let Some(mut replacement) = replacement else {
+                                let result = running.await;
+                                if revision == latest_requested.load(Ordering::Acquire) {
+                                    let _ = sender.send(SourceQueryJobResult { revision, result });
+                                }
+                                let _ = worker_done.send(());
+                                return;
+                            };
+                            while let Ok(newer) = worker.try_recv() {
+                                replacement = newer;
+                            }
+                            job = replacement;
+                        }
                     }
-                    job = replacement;
                 }
             }
         }
@@ -437,13 +458,12 @@ async fn source_query_worker(
     let _ = worker_done.send(());
 }
 
-async fn run_source_query_task(task: SourceQueryTask) -> anyhow::Result<SourceResult> {
-    match task {
-        SourceQueryTask::Blocking(task) => match tokio::task::spawn_blocking(task).await {
-            Ok(result) => result,
-            Err(error) => Err(anyhow::anyhow!("source query task failed: {error}")),
-        },
-        SourceQueryTask::Async(task) => task.await,
+async fn run_blocking_source_query_task(
+    task: Box<dyn FnOnce() -> anyhow::Result<SourceResult> + Send + 'static>,
+) -> anyhow::Result<SourceResult> {
+    match tokio::task::spawn_blocking(task).await {
+        Ok(result) => result,
+        Err(error) => Err(anyhow::anyhow!("source query task failed: {error}")),
     }
 }
 
@@ -621,10 +641,13 @@ mod tests {
         let mut coordinator = SourceQueryCoordinator::default();
         let (release, wait) = std::sync::mpsc::channel();
         let (started, first_started) = std::sync::mpsc::channel();
+        let first_finished = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let finished = first_finished.clone();
         let superseded_ran = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         coordinator.request(SourceQueryTask::Blocking(Box::new(move || {
             started.send(()).unwrap();
             wait.recv().unwrap();
+            finished.store(true, std::sync::atomic::Ordering::SeqCst);
             Ok(result(generation, vec![vec!["stale".to_owned()]]))
         })));
         first_started
@@ -638,6 +661,15 @@ mod tests {
         let latest = coordinator.request(SourceQueryTask::Blocking(Box::new(move || {
             Ok(result(generation, vec![vec!["latest".to_owned()]]))
         })));
+        let non_cancellation_deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(50);
+        while std::time::Instant::now() < non_cancellation_deadline {
+            assert!(
+                coordinator.poll().is_none(),
+                "a newer query ran before the active blocking query completed"
+            );
+            std::thread::yield_now();
+        }
         release.send(()).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         let event = loop {
@@ -654,6 +686,7 @@ mod tests {
             event,
             SourceQueryCoordinatorEvent::Ready { revision, .. } if revision == latest
         ));
+        assert!(first_finished.load(std::sync::atomic::Ordering::SeqCst));
         assert!(!superseded_ran.load(std::sync::atomic::Ordering::SeqCst));
         assert!(coordinator.poll().is_none());
     }
