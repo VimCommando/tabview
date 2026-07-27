@@ -1,5 +1,7 @@
 mod adapter;
 mod delimited;
+#[cfg(feature = "elasticsearch")]
+mod elasticsearch;
 mod json;
 mod options;
 pub mod source;
@@ -12,6 +14,11 @@ pub use adapter::{
     RelationCatalogEntry, RelationKind, RelationOpener, SourceAdapter,
 };
 pub use delimited::DelimitedAdapter;
+#[cfg(feature = "elasticsearch")]
+pub use elasticsearch::{
+    ElasticsearchAdapter, ElasticsearchField, ElasticsearchFieldCatalog, ElasticsearchTarget,
+    ElasticsearchTargetKind, DEFAULT_ELASTICSEARCH_SOURCE_LIMIT,
+};
 pub use json::JsonAdapter;
 pub use options::{
     resolve_selected_shape, InputFormat, JsonPointer, ObjectMode, ObjectModeOrigin,

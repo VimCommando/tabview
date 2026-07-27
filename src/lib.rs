@@ -25,13 +25,14 @@ pub fn run(args: cli::Args) -> anyhow::Result<()> {
         std::io::stdout().is_terminal(),
     );
     let theme_load = theme::load_active_theme(None)?;
-    let source = ingest::source::InputSource::from_cli_value(&config.filename.to_string_lossy());
+    let source = config.target.clone();
     match execution {
         output::ExecutionMode::Batch(format) => {
             let Some(mut app) = prepare_app(&config, theme_load, source, |_| Ok(()), None)? else {
                 return Ok(());
             };
             emit_diagnostics(&app.diagnostics);
+            emit_source_result_warnings(&app.view);
             output::write_view_to_stdout(format, config.color, &mut app.view, &app.theme)
         }
         output::ExecutionMode::Interactive { emit_on_exit } => {
@@ -82,6 +83,7 @@ pub fn run(args: cli::Args) -> anyhow::Result<()> {
                     emit_diagnostics(&app.diagnostics);
                     if let Some(format) = emit_on_exit {
                         app.view.await_latest_source_query()?;
+                        emit_source_result_warnings(&app.view);
                         output::write_view_to_stdout(
                             format,
                             config.color,
@@ -161,6 +163,15 @@ fn emit_diagnostics(diagnostics: &[String]) {
     }
 }
 
+fn emit_source_result_warnings(view: &view::TableView) {
+    if view.source_result_is_partial() {
+        eprintln!("warning: source returned a partial result");
+    }
+    for warning in view.source_result_warnings() {
+        eprintln!("warning: {warning}");
+    }
+}
+
 type RelationSelector<'a> =
     dyn FnMut(&[ingest::RelationCatalogEntry]) -> anyhow::Result<Option<String>> + 'a;
 
@@ -193,7 +204,21 @@ fn prepare_app(
         report_status(&schema_status)?;
     }
     let mut opened_source = ingest::open_source(source.clone(), &open_options)?;
-    if !opened_source.has_selected_table() && opened_source.selectable_relations().count() > 1 {
+    #[cfg(feature = "elasticsearch")]
+    if !opened_source.has_selected_table()
+        && select_relation.is_none()
+        && open_options.format == ingest::InputFormat::Elasticsearch
+    {
+        anyhow::bail!("direct Elasticsearch output requires --table or --query");
+    }
+    #[cfg(feature = "elasticsearch")]
+    if !opened_source.has_selected_table()
+        && opened_source.selectable_relations().next().is_none()
+        && open_options.format == ingest::InputFormat::Elasticsearch
+    {
+        anyhow::bail!("no visible open Elasticsearch indices or data streams are available");
+    }
+    if !opened_source.has_selected_table() && opened_source.selectable_relations().count() > 0 {
         if let Some(selector) = select_relation.as_mut() {
             let Some(selected) = selector(opened_source.list_relations())? else {
                 return Ok(None);
@@ -407,6 +432,8 @@ fn full_schema_scan_status(
         ingest::InputFormat::Delimited => false,
         #[cfg(feature = "sqlite")]
         ingest::InputFormat::Sqlite => false,
+        #[cfg(feature = "elasticsearch")]
+        ingest::InputFormat::Elasticsearch => false,
         ingest::InputFormat::Auto => {
             options.json_path.is_some()
                 || matches!(
@@ -435,10 +462,11 @@ fn selected_saved_view_source_options(
     use crate::cli::SavedViewSelection as CliSavedViewSelection;
     use crate::saved_views::SavedViewSelection;
 
+    let target_identity = PathBuf::from(config.target.saved_view_filename());
     let selection = match &config.saved_view {
         CliSavedViewSelection::Disabled => return Ok(ingest::SourceOptionOverrides::default()),
         CliSavedViewSelection::Auto => SavedViewSelection::Auto {
-            input_path: &config.filename,
+            input_path: &target_identity,
         },
         CliSavedViewSelection::Force(name) => SavedViewSelection::Force { name },
     };
@@ -480,6 +508,9 @@ struct SourceConfigModal {
     operator: crate::table::SourceFilterOperator,
     filter_input: String,
     editing_filter: bool,
+    query_input: String,
+    editing_query: bool,
+    native_query_changed: bool,
     error: Option<String>,
 }
 
@@ -537,7 +568,7 @@ impl App {
                     let sql = self
                         .view
                         .source_query_provenance()
-                        .map(|provenance| provenance.copyable_sql.clone());
+                        .map(|provenance| provenance.copyable.clone());
                     let _ = ops::clipboard::yank_text(sql.as_deref());
                 }
                 _ => {}
@@ -780,12 +811,16 @@ impl App {
                     .min(definition.columns.len().saturating_sub(1))
             })
             .unwrap_or_default();
+        let query_input = query.native_query.clone().unwrap_or_default();
         self.source_modal = Some(SourceConfigModal {
             draft: query,
             column,
             operator: crate::table::SourceFilterOperator::Equal,
             filter_input: String::new(),
             editing_filter: false,
+            query_input,
+            editing_query: false,
+            native_query_changed: false,
             error: None,
         });
         self.popup = Some(ui::Popup::SourceConfig);
@@ -820,15 +855,20 @@ impl App {
         let sql = self
             .view
             .source_query_provenance()
-            .map(|provenance| format!("\n\nSQL:\n{}", provenance.logical_sql))
+            .map(|provenance| format!("\n\n{}:\n{}", provenance.language, provenance.logical))
             .unwrap_or_default();
-        let editor = if modal.editing_filter {
+        let editor = if modal.editing_query {
+            format!(
+                "\n\nNative query editor:\n{}\nEnter: stage query  Esc: cancel editor",
+                modal.query_input
+            )
+        } else if modal.editing_filter {
             format!(
                 "\n\nFilter editor: {} {} {}\nTab: operator  Enter: add  Esc: cancel editor",
                 column, modal.operator, modal.filter_input
             )
         } else {
-            "\n\n←/→: column  f: add filter  Tab: operator\ns/S: source sort asc/desc  x: clear column\n+/-: adjust limit  Enter: apply  Esc: cancel"
+            "\n\n←/→: column  f: add filter  q: edit native query  Tab: operator\ns/S: source sort asc/desc  x: clear column\n+/-: adjust limit  Enter: apply  Esc: cancel"
                 .to_owned()
         };
         let limit = if modal.draft.limit == std::num::NonZeroUsize::MAX {
@@ -836,9 +876,38 @@ impl App {
         } else {
             modal.draft.limit.to_string()
         };
+        let partial = if self.view.source_result_is_partial() {
+            "  Partial: yes"
+        } else {
+            ""
+        };
+        let mapping_fields = self.view.source_field_catalog();
+        let mapping = if mapping_fields.is_empty() {
+            "Mapping fields: result schema only".to_owned()
+        } else {
+            let selected = mapping_fields
+                .iter()
+                .find(|field| field.name == column)
+                .map(|field| {
+                    format!(
+                        "\nSelected mapping: {} [{}] searchable={} aggregatable={}{}{}{}",
+                        field.name,
+                        field.source_types.join("|"),
+                        field.searchable,
+                        field.aggregatable,
+                        if field.conflict { " conflict" } else { "" },
+                        if field.runtime { " runtime" } else { "" },
+                        if field.multifield { " multifield" } else { "" },
+                    )
+                })
+                .unwrap_or_default();
+            format!("Mapping fields: {}{selected}", mapping_fields.len())
+        };
         format!(
-            "Source: {relation}\nLimit: {}  Extent: {extent}\nFilters: {}  Sort keys: {}\nSelected column: {column}\nSource sorting: {sort_capability}{}{}{}",
+            "Endpoint: {}\nSource: {relation}\nLimit: {}  Extent: {extent}{partial}\nResult fields: {}\n{mapping}\nFilters: {}  Sort keys: {}\nSelected column: {column}\nSource sorting: {sort_capability}{}{}{}",
+            self.source.safe_identity(),
             limit,
+            self.view.column_count(),
             modal.draft.filters.len(),
             modal.draft.order_by.len(),
             editor,
@@ -853,17 +922,19 @@ impl App {
 
     fn query_modal_body(&self) -> String {
         let view_note = format!(
-            "\n\nLocal transformations not represented by SQL:\n{}",
+            "\n\nLocal transformations not represented by the native query:\n{}",
             self.view.view_transform_summary()
         );
         self.view
             .source_query_provenance()
             .map(|provenance| {
                 format!(
-                    "Parameterized SQL:\n{}\n\nParameters: {:?}\n\nCopyable SQL:\n{}{}",
-                    provenance.logical_sql,
+                    "Parameterized {}:\n{}\n\nParameters: {:?}\n\nCopyable {}:\n{}{}",
+                    provenance.language,
+                    provenance.logical,
                     provenance.parameters,
-                    provenance.copyable_sql,
+                    provenance.language,
+                    provenance.copyable,
                     view_note
                 )
             })
@@ -875,6 +946,39 @@ impl App {
             self.popup = None;
             return;
         };
+        if modal.editing_query {
+            match event.code {
+                KeyCode::Esc => {
+                    modal.editing_query = false;
+                    modal.query_input = modal.draft.native_query.clone().unwrap_or_default();
+                    modal.error = None;
+                }
+                KeyCode::Backspace => {
+                    modal.query_input.pop();
+                    modal.error = None;
+                }
+                KeyCode::Enter => {
+                    let query = modal.query_input.trim();
+                    if query.is_empty() {
+                        modal.error = Some("native query cannot be empty".to_owned());
+                    } else {
+                        modal.draft.native_query = Some(query.to_owned());
+                        modal.native_query_changed = true;
+                        modal.editing_query = false;
+                        modal.error = None;
+                    }
+                }
+                KeyCode::Char(ch)
+                    if event.modifiers.is_empty() || event.modifiers == KeyModifiers::SHIFT =>
+                {
+                    modal.query_input.push(ch);
+                    modal.error = None;
+                }
+                _ => {}
+            }
+            self.source_modal = Some(modal);
+            return;
+        }
         if modal.editing_filter {
             match event.code {
                 KeyCode::Esc => {
@@ -981,6 +1085,10 @@ impl App {
                         (query.limit != std::num::NonZeroUsize::MAX).then_some(query.limit);
                     self.open_options.source_filters = source_filters;
                     self.open_options.source_sort = source_sort;
+                    if modal.native_query_changed {
+                        self.open_options.native_query = query.native_query.clone();
+                        self.open_options.table = None;
+                    }
                     self.popup = None;
                     return;
                 }
@@ -1000,6 +1108,16 @@ impl App {
             KeyCode::Char('f') => {
                 modal.editing_filter = true;
                 modal.error = None;
+            }
+            KeyCode::Char('q') => {
+                if modal.draft.native_query.is_none() {
+                    modal.error =
+                        Some("this source does not expose an editable native query".to_owned());
+                } else {
+                    modal.query_input = modal.draft.native_query.clone().unwrap_or_default();
+                    modal.editing_query = true;
+                    modal.error = None;
+                }
             }
             KeyCode::Tab => modal.operator = next_source_operator(modal.operator),
             KeyCode::Char('s' | 'S') => {
@@ -1270,16 +1388,7 @@ impl App {
 
     #[cfg(feature = "saved-views")]
     fn input_filename(&self) -> String {
-        match &self.source {
-            ingest::source::InputSource::Path(path) => path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or("input")
-                .to_owned(),
-            ingest::source::InputSource::Stdin | ingest::source::InputSource::StreamingStdin(_) => {
-                "-".to_owned()
-            }
-        }
+        self.source.saved_view_filename()
     }
 
     fn reload(&mut self) -> anyhow::Result<()> {
@@ -1324,7 +1433,7 @@ impl App {
                 }
             })
             .unwrap_or_default();
-        let extent = self
+        let mut extent = self
             .view
             .source_result_extent()
             .map(|extent| match extent {
@@ -1334,6 +1443,9 @@ impl App {
                 }
             })
             .unwrap_or_else(|| "in progress".to_owned());
+        if self.view.source_result_is_partial() {
+            extent.push_str(", partial");
+        }
         format!(
             "Rows: {}\nVisible rows: {}\nFetched source rows: {}\nSource extent: {}\nColumns: {}\nPosition: {},{}\nWidth mode: {:?}\nColumn gap: {}\nMark: {}{}",
             rows,
@@ -1354,7 +1466,7 @@ impl App {
     }
 
     fn source_count_status(&self) -> String {
-        let extent = match self.view.source_result_extent() {
+        let mut extent = match self.view.source_result_extent() {
             Some(crate::table::ResultExtent::Complete { .. }) => "complete".to_owned(),
             Some(crate::table::ResultExtent::Truncated { limit, .. }) => {
                 format!("limited {limit}")
@@ -1362,6 +1474,9 @@ impl App {
             None if self.view.source_query_is_pending() => "querying".to_owned(),
             None => "fetching".to_owned(),
         };
+        if self.view.source_result_is_partial() {
+            extent.push_str(", partial");
+        }
         format!(
             "{} visible / {} source ({extent})",
             self.view.visible_row_count(),
@@ -1843,15 +1958,16 @@ fn apply_saved_view(
     use crate::ops::sort::{SortDirection, SortMode};
     use crate::saved_views::{self, FilterAction, SavedViewSelection, SortKind};
 
+    let target_identity = PathBuf::from(config.target.saved_view_filename());
     let selection = match &config.saved_view {
         CliSavedViewSelection::Disabled => return Ok(None),
         CliSavedViewSelection::Auto => SavedViewSelection::Auto {
-            input_path: &config.filename,
+            input_path: &target_identity,
         },
         CliSavedViewSelection::Force(name) => SavedViewSelection::Force { name },
     };
 
-    let target_path = placeholder_saved_view_path(&config.filename);
+    let target_path = placeholder_saved_view_path(&target_identity);
     let view_name = target_path
         .as_deref()
         .and_then(Path::file_stem)
@@ -2281,7 +2397,192 @@ mod tests {
     use clap::Parser;
     use crossterm::event::KeyModifiers;
     use std::cell::Cell;
+    #[cfg(feature = "elasticsearch")]
+    use std::io::Read;
     use std::io::{Seek, Write};
+    #[cfg(feature = "elasticsearch")]
+    use std::net::TcpListener;
+    #[cfg(feature = "elasticsearch")]
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc, Mutex,
+    };
+
+    #[cfg(feature = "elasticsearch")]
+    struct MockElasticsearchResponse {
+        status: u16,
+        body: &'static str,
+        delay: std::time::Duration,
+    }
+
+    #[cfg(feature = "elasticsearch")]
+    impl MockElasticsearchResponse {
+        fn ok(body: &'static str) -> Self {
+            Self {
+                status: 200,
+                body,
+                delay: std::time::Duration::ZERO,
+            }
+        }
+
+        fn delayed(body: &'static str, delay: std::time::Duration) -> Self {
+            Self {
+                status: 200,
+                body,
+                delay,
+            }
+        }
+
+        fn error(status: u16, body: &'static str) -> Self {
+            Self {
+                status,
+                body,
+                delay: std::time::Duration::ZERO,
+            }
+        }
+    }
+
+    #[cfg(feature = "elasticsearch")]
+    struct MockElasticsearch {
+        endpoint: url::Url,
+        requests: Arc<Mutex<Vec<String>>>,
+        stop: Arc<AtomicBool>,
+        worker: Option<std::thread::JoinHandle<()>>,
+    }
+
+    #[cfg(feature = "elasticsearch")]
+    impl MockElasticsearch {
+        fn start(responses: Vec<MockElasticsearchResponse>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").expect("mock Elasticsearch");
+            listener.set_nonblocking(true).unwrap();
+            let endpoint =
+                url::Url::parse(&format!("http://{}", listener.local_addr().unwrap())).unwrap();
+            let requests = Arc::new(Mutex::new(Vec::new()));
+            let worker_requests = requests.clone();
+            let stop = Arc::new(AtomicBool::new(false));
+            let worker_stop = stop.clone();
+            let worker = std::thread::spawn(move || {
+                let mut responses = responses.into_iter();
+                'server: while !worker_stop.load(Ordering::Acquire) {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(connection) => connection,
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            std::thread::sleep(std::time::Duration::from_millis(2));
+                            continue;
+                        }
+                        Err(error) => panic!("mock accept: {error}"),
+                    };
+                    stream.set_nonblocking(false).unwrap();
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_secs(2)))
+                        .unwrap();
+                    let mut request = Vec::new();
+                    let mut chunk = [0_u8; 4096];
+                    let header_end = loop {
+                        let count = match stream.read(&mut chunk) {
+                            Ok(count) => count,
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                                ) =>
+                            {
+                                continue 'server;
+                            }
+                            Err(error) => panic!("read mock request: {error}"),
+                        };
+                        if count == 0 {
+                            continue 'server;
+                        }
+                        request.extend_from_slice(&chunk[..count]);
+                        if let Some(index) =
+                            request.windows(4).position(|window| window == b"\r\n\r\n")
+                        {
+                            break index + 4;
+                        }
+                    };
+                    let header = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = header
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().ok())
+                                .flatten()
+                        })
+                        .unwrap_or_default();
+                    while request.len().saturating_sub(header_end) < content_length {
+                        let count = match stream.read(&mut chunk) {
+                            Ok(0) => continue 'server,
+                            Ok(count) => count,
+                            Err(error)
+                                if matches!(
+                                    error.kind(),
+                                    std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+                                ) =>
+                            {
+                                continue 'server;
+                            }
+                            Err(error) => panic!("read mock body: {error}"),
+                        };
+                        request.extend_from_slice(&chunk[..count]);
+                    }
+                    worker_requests
+                        .lock()
+                        .unwrap()
+                        .push(String::from_utf8_lossy(&request).into_owned());
+                    let Some(response) = responses.next() else {
+                        panic!("unexpected Elasticsearch request");
+                    };
+                    if !response.delay.is_zero() {
+                        std::thread::sleep(response.delay);
+                    }
+                    let reason = if response.status < 400 {
+                        "OK"
+                    } else {
+                        "Bad Request"
+                    };
+                    write!(
+                        stream,
+                        "HTTP/1.1 {} {}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+                        response.status,
+                        reason,
+                        response.body.len(),
+                        response.body
+                    )
+                    .expect("mock response");
+                    stream.flush().expect("flush mock response");
+                }
+            });
+            Self {
+                endpoint,
+                requests,
+                stop,
+                worker: Some(worker),
+            }
+        }
+
+        fn source(&self) -> ingest::source::InputSource {
+            ingest::source::InputSource::Url(self.endpoint.clone())
+        }
+
+        fn request_count(&self) -> usize {
+            self.requests.lock().unwrap().len()
+        }
+    }
+
+    #[cfg(feature = "elasticsearch")]
+    impl Drop for MockElasticsearch {
+        fn drop(&mut self) {
+            self.stop.store(true, Ordering::Release);
+            if let Some(worker) = self.worker.take() {
+                let result = worker.join();
+                if !std::thread::panicking() {
+                    result.expect("mock Elasticsearch worker panicked");
+                }
+            }
+        }
+    }
 
     fn rows(values: &[&[&str]]) -> Vec<Vec<String>> {
         values
@@ -2382,6 +2683,21 @@ mod tests {
             .expect("table");
         let mut app = app_with_rows(rows(&[&["placeholder"], &["value"]]));
         app.source = ingest::source::InputSource::Path(path);
+        app.open_options = options;
+        app.view =
+            view::TableView::from_opened_table(opened, view::Viewport::new(8, 80)).expect("view");
+        app
+    }
+
+    #[cfg(feature = "elasticsearch")]
+    fn app_for_elasticsearch(server: &MockElasticsearch, options: ingest::OpenOptions) -> App {
+        let source = server.source();
+        let opened = ingest::open_source(source.clone(), &options)
+            .expect("open Elasticsearch")
+            .into_implicit_table()
+            .expect("Elasticsearch table");
+        let mut app = app_with_rows(rows(&[&["placeholder"], &["value"]]));
+        app.source = source;
         app.open_options = options;
         app.view =
             view::TableView::from_opened_table(opened, view::Viewport::new(8, 80)).expect("view");
@@ -2917,7 +3233,245 @@ mod tests {
         let query = app.query_modal_body();
         assert!(query.contains("SELECT"));
         assert!(query.contains("Copyable SQL"));
-        assert!(query.contains("Local transformations not represented by SQL"));
+        assert!(query.contains("Local transformations not represented by the native query"));
+    }
+
+    #[cfg(feature = "elasticsearch")]
+    #[test]
+    fn elasticsearch_source_configuration_exposes_mapping_result_and_partial_state() {
+        let server = MockElasticsearch::start(vec![
+            MockElasticsearchResponse::ok(
+                r#"{"logs-a":{"mappings":{"properties":{"message":{"type":"keyword"},"latency":{"type":"long"}}}}}"#,
+            ),
+            MockElasticsearchResponse::ok(
+                r#"{"fields":{"message":{"keyword":{"searchable":true,"aggregatable":true}},"latency":{"long":{"searchable":true,"aggregatable":true}}}}"#,
+            ),
+            MockElasticsearchResponse::ok(
+                r#"{"columns":[{"name":"message","type":"keyword"},{"name":"latency","type":"long"},{"name":"_index","type":"keyword"},{"name":"_id","type":"keyword"}],"values":[["boom",42,"logs-a","one"]],"is_partial":true,"warnings":["one shard timed out"]}"#,
+            ),
+        ]);
+        let options = ingest::OpenOptions {
+            format: ingest::InputFormat::Elasticsearch,
+            table: Some("logs-a".to_owned()),
+            ..ingest::OpenOptions::default()
+        };
+        let mut app = app_for_elasticsearch(&server, options);
+
+        app.handle_key(key(KeyCode::Char('u'))).unwrap();
+        let body = app.source_modal_body();
+        assert!(body.contains(&format!("Endpoint: {}", server.endpoint)));
+        assert!(body.contains("Source: logs-a"));
+        assert!(body.contains("Partial: yes"), "{body}");
+        assert!(body.contains("Result fields: 4"));
+        assert!(body.contains("Mapping fields: 2"));
+        assert!(body.contains("Selected mapping: message [keyword]"));
+        assert!(body.contains("Source sorting: supported"));
+        assert!(body.contains("ES|QL:"));
+
+        app.handle_key(key(KeyCode::Char('q'))).unwrap();
+        assert!(app.source_modal_body().contains("Native query editor"));
+        app.handle_key(key(KeyCode::Esc)).unwrap();
+        app.handle_key(key(KeyCode::Esc)).unwrap();
+        assert_eq!(app.popup, None);
+        assert_eq!(server.request_count(), 3, "cancelling made no replacement");
+
+        app.handle_key(key(KeyCode::Char('p'))).unwrap();
+        let query = app.query_modal_body();
+        assert!(query.contains("Parameterized ES|QL"));
+        assert!(query.contains("FROM logs-a METADATA _index, _id"));
+        assert!(!query.contains("one shard timed out"));
+    }
+
+    #[cfg(feature = "elasticsearch")]
+    #[test]
+    fn elasticsearch_tui_keeps_prior_rows_pending_then_activates_new_schema() {
+        let server = MockElasticsearch::start(vec![
+            MockElasticsearchResponse::ok(
+                r#"{"logs-a":{"mappings":{"properties":{"message":{"type":"keyword"}}}}}"#,
+            ),
+            MockElasticsearchResponse::ok(
+                r#"{"fields":{"message":{"keyword":{"searchable":true,"aggregatable":true}}}}"#,
+            ),
+            MockElasticsearchResponse::ok(
+                r#"{"columns":[{"name":"message","type":"keyword"}],"values":[["before"]]}"#,
+            ),
+            MockElasticsearchResponse::delayed(
+                r#"{"columns":[{"name":"count","type":"long"}],"values":[[2]]}"#,
+                std::time::Duration::from_millis(40),
+            ),
+        ]);
+        let options = ingest::OpenOptions {
+            format: ingest::InputFormat::Elasticsearch,
+            table: Some("logs-a".to_owned()),
+            ..ingest::OpenOptions::default()
+        };
+        let mut app = app_for_elasticsearch(&server, options);
+        assert_eq!(app.view.current_raw_cell(), Some("before"));
+
+        app.handle_key(key(KeyCode::Char('u'))).unwrap();
+        {
+            let modal = app.source_modal.as_mut().unwrap();
+            modal.query_input = "FROM logs-a | STATS count = COUNT(*)".to_owned();
+            modal.draft.native_query = Some(modal.query_input.clone());
+            modal.native_query_changed = true;
+        }
+        app.handle_key(key(KeyCode::Enter)).unwrap();
+        assert!(app.view.source_query_is_pending());
+        assert_eq!(app.view.current_raw_cell(), Some("before"));
+
+        app.view.await_latest_source_query().unwrap();
+        assert_eq!(app.view.header().unwrap(), ["count"]);
+        assert_eq!(app.view.current_raw_cell(), Some("2"));
+        let mut output = Vec::new();
+        crate::output::write_view(
+            crate::output::OutputFormat::Table,
+            crate::output::ColorOutput::Never,
+            &mut app.view,
+            &app.theme,
+            &mut output,
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("count"));
+        assert!(output.contains('2'));
+        assert!(!output.contains("FROM logs-a"));
+    }
+
+    #[cfg(feature = "elasticsearch")]
+    #[test]
+    fn elasticsearch_tui_reports_replacement_error_and_preserves_result() {
+        let server = MockElasticsearch::start(vec![
+            MockElasticsearchResponse::ok(
+                r#"{"logs-a":{"mappings":{"properties":{"message":{"type":"keyword"}}}}}"#,
+            ),
+            MockElasticsearchResponse::ok(
+                r#"{"fields":{"message":{"keyword":{"searchable":true,"aggregatable":true}}}}"#,
+            ),
+            MockElasticsearchResponse::ok(
+                r#"{"columns":[{"name":"message","type":"keyword"}],"values":[["before"]]}"#,
+            ),
+            MockElasticsearchResponse::error(
+                400,
+                r#"{"error":{"reason":"invalid ES|QL test query"}}"#,
+            ),
+        ]);
+        let options = ingest::OpenOptions {
+            format: ingest::InputFormat::Elasticsearch,
+            table: Some("logs-a".to_owned()),
+            ..ingest::OpenOptions::default()
+        };
+        let mut app = app_for_elasticsearch(&server, options);
+        app.open_source_config_modal();
+        app.source_modal.as_mut().unwrap().draft.limit = std::num::NonZeroUsize::new(5).unwrap();
+        app.handle_key(key(KeyCode::Enter)).unwrap();
+
+        let error = app.view.await_latest_source_query().unwrap_err();
+        assert!(error.to_string().contains("invalid ES|QL test query"));
+        assert_eq!(app.view.header().unwrap(), ["message"]);
+        assert_eq!(app.view.current_raw_cell(), Some("before"));
+        assert!(app
+            .view
+            .take_source_status()
+            .unwrap()
+            .contains("prior result retained"));
+    }
+
+    #[cfg(feature = "elasticsearch")]
+    #[test]
+    fn query_only_elasticsearch_source_configuration_uses_result_schema() {
+        let server = MockElasticsearch::start(vec![MockElasticsearchResponse::ok(
+            r#"{"columns":[{"name":"level","type":"keyword"}],"values":[["error"]]}"#,
+        )]);
+        let options = ingest::OpenOptions {
+            format: ingest::InputFormat::Elasticsearch,
+            native_query: Some("FROM logs-* | KEEP level".to_owned()),
+            ..ingest::OpenOptions::default()
+        };
+        let mut app = app_for_elasticsearch(&server, options);
+        app.open_source_config_modal();
+        let body = app.source_modal_body();
+        assert!(body.contains("Mapping fields: result schema only"));
+        assert!(body.contains("Selected column: level"));
+    }
+
+    #[cfg(all(feature = "elasticsearch", feature = "saved-views"))]
+    #[test]
+    fn generated_elasticsearch_saved_view_persists_base_not_composed_esql() {
+        let server = MockElasticsearch::start(vec![MockElasticsearchResponse::ok(
+            r#"{"columns":[{"name":"level","type":"keyword"}],"values":[["error"]]}"#,
+        )]);
+        let options = ingest::OpenOptions {
+            format: ingest::InputFormat::Elasticsearch,
+            native_query: Some("FROM logs-*".to_owned()),
+            limit: std::num::NonZeroUsize::new(25),
+            source_filters: vec![ingest::SourceFilterRequest {
+                column: "level".to_owned(),
+                operator: crate::table::SourceFilterOperator::Equal,
+                operand: Some(crate::table::SourceOperand::Text("error".to_owned())),
+            }],
+            ..ingest::OpenOptions::default()
+        };
+        let app = app_for_elasticsearch(&server, options);
+        let yaml = app.view.to_saved_view_yaml_with_source_options(
+            "errors",
+            &app.input_filename(),
+            None,
+            &app.open_options,
+        );
+        let parsed = saved_views::parse_saved_view_yaml(&yaml).expect("generated YAML");
+
+        assert_eq!(parsed.view.source.query.as_deref(), Some("FROM logs-*"));
+        assert_eq!(parsed.view.source.limit, Some(25));
+        assert_eq!(parsed.view.source.filters.len(), 1);
+        assert!(!yaml.contains("?v1"));
+        assert!(!yaml.contains("LIMIT 26"));
+        assert_eq!(
+            parsed.view.filenames[0].raw,
+            app.source.saved_view_filename()
+        );
+    }
+
+    #[cfg(feature = "elasticsearch")]
+    #[test]
+    fn elasticsearch_reload_refetches_catalog_and_activates_new_generation() {
+        let server = MockElasticsearch::start(vec![
+            MockElasticsearchResponse::ok(
+                r#"{"logs-a":{"mappings":{"properties":{"message":{"type":"keyword"}}}}}"#,
+            ),
+            MockElasticsearchResponse::ok(
+                r#"{"fields":{"message":{"keyword":{"searchable":true,"aggregatable":true}}}}"#,
+            ),
+            MockElasticsearchResponse::ok(
+                r#"{"columns":[{"name":"message","type":"keyword"}],"values":[["before"]]}"#,
+            ),
+            MockElasticsearchResponse::ok(
+                r#"{"logs-a":{"mappings":{"properties":{"message":{"type":"keyword"},"latency":{"type":"long"}}}}}"#,
+            ),
+            MockElasticsearchResponse::ok(
+                r#"{"fields":{"message":{"keyword":{"searchable":true,"aggregatable":true}},"latency":{"long":{"searchable":true,"aggregatable":true}}}}"#,
+            ),
+            MockElasticsearchResponse::ok(
+                r#"{"columns":[{"name":"message","type":"keyword"},{"name":"latency","type":"long"}],"values":[["after",42]]}"#,
+            ),
+        ]);
+        let options = ingest::OpenOptions {
+            format: ingest::InputFormat::Elasticsearch,
+            table: Some("logs-a".to_owned()),
+            ..ingest::OpenOptions::default()
+        };
+        let mut app = app_for_elasticsearch(&server, options);
+        let generation = app.view.table_definition().unwrap().generation;
+        app.reload().unwrap();
+
+        assert_ne!(app.view.table_definition().unwrap().generation, generation);
+        assert_eq!(app.view.header().unwrap(), ["message", "latency"]);
+        assert_eq!(app.view.current_raw_cell(), Some("after"));
+        let fields = app.view.source_field_catalog();
+        assert_eq!(fields.len(), 2);
+        assert!(std::sync::Arc::ptr_eq(
+            &fields,
+            &app.view.source_field_catalog()
+        ));
     }
 
     #[test]

@@ -287,7 +287,9 @@ pub struct TableView {
     active_source_query: Option<crate::table::SourceQuery>,
     source_capabilities: crate::table::SourceOperationCapabilities,
     source_result_extent: Option<crate::table::ResultExtent>,
-    source_query_provenance: Option<crate::table::QueryProvenance>,
+    source_result_is_partial: bool,
+    source_result_warnings: Vec<String>,
+    source_query_provenance: Option<crate::table::NativeQueryArtifact>,
     source_query_coordinator: Rc<RefCell<crate::table::SourceQueryCoordinator>>,
     pending_source_query: Option<crate::table::SourceQuery>,
     pending_cursor_identity: Option<crate::table::StableRowIdentity>,
@@ -398,6 +400,8 @@ impl TableView {
             source_result_extent: Some(crate::table::ResultExtent::Complete {
                 source_rows: rows.len(),
             }),
+            source_result_is_partial: false,
+            source_result_warnings: Vec::new(),
             source_query_provenance: None,
             source_query_coordinator: Rc::new(RefCell::new(
                 crate::table::SourceQueryCoordinator::default(),
@@ -453,10 +457,16 @@ impl TableView {
         let header_visible = opened.definition.relation.header_visible;
         let generation = opened.definition.generation;
         let object_mode = opened.object_mode;
-        let source_status = (!opened.warnings.is_empty()).then(|| opened.warnings.join("; "));
+        let mut source_result_warnings = opened.warnings;
+        source_result_warnings.extend(opened.store.result_warnings().iter().cloned());
+        source_result_warnings.sort();
+        source_result_warnings.dedup();
+        let source_status =
+            (!source_result_warnings.is_empty()).then(|| source_result_warnings.join("; "));
         let active_source_query = opened.store.active_source_query().cloned();
         let source_capabilities = opened.store.source_capabilities();
         let source_result_extent = opened.store.result_extent();
+        let source_result_is_partial = opened.store.result_is_partial();
         let source_query_provenance = opened.store.query_provenance().cloned();
         let initial_target = viewport.height.saturating_sub(1);
         let progress = opened
@@ -492,6 +502,8 @@ impl TableView {
             active_source_query,
             source_capabilities,
             source_result_extent,
+            source_result_is_partial,
+            source_result_warnings,
             source_query_provenance,
             source_query_coordinator: Rc::new(RefCell::new(
                 crate::table::SourceQueryCoordinator::default(),
@@ -638,7 +650,25 @@ impl TableView {
             .or(self.source_result_extent)
     }
 
-    pub fn source_query_provenance(&self) -> Option<&crate::table::QueryProvenance> {
+    pub fn source_result_is_partial(&self) -> bool {
+        self.incremental_store
+            .as_ref()
+            .is_some_and(|store| store.0.borrow().result_is_partial())
+            || self.source_result_is_partial
+    }
+
+    pub fn source_result_warnings(&self) -> &[String] {
+        &self.source_result_warnings
+    }
+
+    pub fn source_field_catalog(&self) -> std::sync::Arc<[crate::table::SourceFieldMetadata]> {
+        self.incremental_store
+            .as_ref()
+            .map(|store| store.0.borrow().source_field_catalog())
+            .unwrap_or_default()
+    }
+
+    pub fn source_query_provenance(&self) -> Option<&crate::table::NativeQueryArtifact> {
         self.source_query_provenance.as_ref()
     }
 
@@ -691,14 +721,18 @@ impl TableView {
     pub fn poll_source_query(&mut self) -> bool {
         let event = self.source_query_coordinator.borrow_mut().poll();
         match event {
-            Some(crate::table::SourceQueryCoordinatorEvent::Ready { revision, store }) => {
+            Some(crate::table::SourceQueryCoordinatorEvent::Ready { revision, result }) => {
                 let Some(query) = self.pending_source_query.take() else {
                     return false;
                 };
                 let cursor_identity = self.pending_cursor_identity.take();
                 let mark_identity = self.pending_mark_identity.take();
-                let applied =
-                    self.activate_source_replacement(query, store, cursor_identity, mark_identity);
+                let applied = self.activate_source_replacement(
+                    query,
+                    *result,
+                    cursor_identity,
+                    mark_identity,
+                );
                 if applied {
                     self.source_status =
                         Some(format!("Source query revision {revision} completed"));
@@ -770,14 +804,21 @@ impl TableView {
 
     fn activate_source_replacement(
         &mut self,
-        query: crate::table::SourceQuery,
-        mut replacement: Box<dyn TableStore>,
+        _query: crate::table::SourceQuery,
+        replacement: crate::table::SourceResult,
         cursor_identity: Option<crate::table::StableRowIdentity>,
         mark_identity: Option<crate::table::StableRowIdentity>,
     ) -> bool {
-        let initial_target = self.viewport.height.saturating_sub(1);
-        let progress = match replacement.ensure_indexed_through(RowIndex(initial_target)) {
-            Ok(progress) => progress,
+        let viewport = self.viewport;
+        let opened = crate::ingest::OpenedTable {
+            generation: replacement.definition.generation,
+            definition: replacement.definition,
+            store: replacement.store,
+            object_mode: self.object_mode,
+            warnings: replacement.metadata.warnings,
+        };
+        let mut next = match Self::from_opened_table(opened, viewport) {
+            Ok(next) => next,
             Err(error) => {
                 self.source_status = Some(format!(
                     "Source query loading failed; prior result retained: {error}"
@@ -785,45 +826,9 @@ impl TableView {
                 return false;
             }
         };
-        let mut rows = Vec::new();
-        let mut row_ids = Vec::new();
-        for index in 0..=initial_target {
-            match replacement.row(RowIndex(index)) {
-                Ok(Some(row)) => {
-                    row_ids.push(row.id);
-                    rows.push(row.display_cells());
-                }
-                Ok(None) => break,
-                Err(error) => {
-                    self.source_status = Some(format!(
-                        "Source query loading failed; prior result retained: {error}"
-                    ));
-                    return false;
-                }
-            }
-        }
-        if !progress.schema_delta.is_empty() {
-            self.source_status =
-                Some("Source query unexpectedly changed a complete schema".to_owned());
-            return false;
-        }
-        self.source_capabilities = replacement.source_capabilities();
-        self.source_result_extent = replacement.result_extent();
-        self.source_query_provenance = replacement.query_provenance().cloned();
-        self.active_source_query = Some(query);
-        self.incremental_store = Some(SharedTableStore(Rc::new(RefCell::new(replacement))));
-        self.source_store = None;
-        self.query_store = None;
-        self.base_cached_rows = None;
-        self.base_cached_row_ids = None;
-        self.rows = rows;
-        self.row_ids = row_ids;
-        self.visible_rows = (0..self.rows.len()).collect();
-        if self.refresh_view_transform() == QueryRefresh::Failed {
-            self.source_status =
-                Some("Source result replaced but local view transform failed".to_owned());
-        }
-        self.restore_stable_identities(cursor_identity, mark_identity);
+        next.restore_view_settings_from(self);
+        next.restore_stable_identities(cursor_identity, mark_identity);
+        *self = next;
         true
     }
 
@@ -3172,8 +3177,14 @@ impl TableView {
 
         let mut source_yaml = String::new();
         if let Some(options) = source_options {
-            if self.source_query_provenance.is_some() {
-                source_yaml.push_str("format: sqlite\n");
+            if let Some(provenance) = &self.source_query_provenance {
+                source_yaml.push_str(&format!(
+                    "format: {}\n",
+                    match provenance.language {
+                        crate::table::NativeQueryLanguage::Sql => "sqlite",
+                        crate::table::NativeQueryLanguage::Esql => "elasticsearch",
+                    }
+                ));
             } else if options.format != crate::ingest::InputFormat::Auto {
                 source_yaml.push_str(&format!("format: {}\n", options.format));
             }
@@ -3183,9 +3194,12 @@ impl TableView {
             if options.schema_scan == crate::ingest::SchemaScan::Full {
                 source_yaml.push_str("schema_scan: full\n");
             }
-            if let Some(table) = options.table.as_ref().or_else(|| {
-                self.source_query_provenance
+            if let Some(query) = &options.native_query {
+                source_yaml.push_str(&format!("query: {}\n", yaml_scalar(query)));
+            } else if let Some(table) = options.table.as_ref().or_else(|| {
+                self.active_source_query
                     .as_ref()
+                    .filter(|query| query.native_query.is_none())
                     .and(self.table_definition.as_ref())
                     .map(|definition| &definition.relation.name)
             }) {

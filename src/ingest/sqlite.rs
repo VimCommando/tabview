@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use crate::table::{
     validate_source_query, CapabilityStatus, CellValue, ColumnDefinition, ColumnId,
-    ColumnSourceIdentity, InMemoryTable, IndexProgress, LogicalType, QueryProvenance, ResultExtent,
-    Row, RowCount, RowId, RowIndex, RowVisitor, ScanDirection, ScanProgress, ScanRequest,
-    SchemaDelta, SchemaState, SortDirection, SourceFilter, SourceFilterOperator, SourceFilterScope,
-    SourceGeneration, SourceOperand, SourceOperationCapabilities, SourceQuery,
-    SourceQueryExecution, SourceSort, StableRowIdentity, TableDefinition, TableStore, TypeOrigin,
-    TypeWidening, DEFAULT_SQLITE_SOURCE_LIMIT,
+    ColumnSourceIdentity, InMemoryTable, IndexProgress, LogicalType, NativeQueryArtifact,
+    NativeQueryLanguage, NativeQueryParameter, ResultExtent, Row, RowCount, RowId, RowIndex,
+    RowVisitor, ScanDirection, ScanProgress, ScanRequest, SchemaDelta, SchemaState, SortDirection,
+    SourceFilter, SourceFilterOperator, SourceFilterScope, SourceGeneration, SourceOperand,
+    SourceOperationCapabilities, SourceQuery, SourceQueryExecution, SourceSort, StableRowIdentity,
+    TableDefinition, TableStore, TypeOrigin, TypeWidening, DEFAULT_SQLITE_SOURCE_LIMIT,
 };
 
 use super::adapter::{
@@ -49,15 +49,21 @@ impl SourceAdapter for SqliteAdapter {
             InputSource::Stdin | InputSource::StreamingStdin(_) => {
                 anyhow::bail!("SQLite input from stdin is not supported; provide a local path")
             }
+            InputSource::Url(url) => {
+                anyhow::bail!(
+                    "remote SQLite database '{}' is not supported yet",
+                    InputSource::Url(url).safe_identity()
+                )
+            }
         };
-        let path_text = path.to_string_lossy().to_ascii_lowercase();
-        if ["libsql://", "http://", "https://"]
-            .iter()
-            .any(|prefix| path_text.starts_with(prefix))
-        {
-            anyhow::bail!("remote SQLite databases are not supported; provide a local path");
-        }
         let session = Arc::new(SqliteSession::open(&path)?);
+        if let Some(native_query) = options.native_query.as_deref() {
+            return Ok(OpenedSource::implicit(open_sqlite_native_query(
+                session,
+                native_query,
+                options,
+            )?));
+        }
         let discovered = session.discover_relations()?;
         let catalog = discovered
             .iter()
@@ -185,6 +191,39 @@ impl SqliteSession {
                 declared_type: statement.get_column_decltype(index),
             })
             .collect())
+    }
+
+    fn prepare_native_row_query(&self, sql: &str) -> anyhow::Result<PreparedNativeQuery> {
+        let statement = self.connection.prepare(sql).map_err(|error| {
+            if error.to_string().contains("query_only") {
+                anyhow::anyhow!("native SQLite query must be read-only: {error}")
+            } else {
+                anyhow::Error::from(error)
+            }
+        })?;
+        if !sql_tail_is_empty(&sql[statement.tail_offset()..]) {
+            anyhow::bail!("native SQLite query must contain exactly one statement");
+        }
+        if !statement.get_program().is_readonly() {
+            anyhow::bail!("native SQLite query must be read-only");
+        }
+        if statement.num_columns() == 0 {
+            anyhow::bail!("native SQLite query must produce a tabular result");
+        }
+        if statement.parameters_count() != 0 {
+            anyhow::bail!("native SQLite query cannot contain unbound parameters");
+        }
+        let embeddable_sql = remove_trailing_statement_terminator(sql);
+        let columns = (0..statement.num_columns())
+            .map(|index| PreparedColumn {
+                name: statement.get_column_name(index).into_owned(),
+                declared_type: statement.get_column_decltype(index),
+            })
+            .collect();
+        Ok(PreparedNativeQuery {
+            columns,
+            embeddable_sql,
+        })
     }
 
     fn discover_relations(&self) -> anyhow::Result<Vec<DiscoveredRelation>> {
@@ -315,6 +354,151 @@ impl SqliteSession {
     }
 }
 
+fn sql_tail_is_empty(mut tail: &str) -> bool {
+    loop {
+        tail = tail.trim_start();
+        if tail.is_empty() {
+            return true;
+        }
+        if let Some(rest) = tail.strip_prefix("--") {
+            tail = rest.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
+            continue;
+        }
+        if let Some(rest) = tail.strip_prefix("/*") {
+            let Some((_, rest)) = rest.split_once("*/") else {
+                return false;
+            };
+            tail = rest;
+            continue;
+        }
+        return false;
+    }
+}
+
+fn remove_trailing_statement_terminator(sql: &str) -> String {
+    #[derive(Clone, Copy)]
+    enum State {
+        Sql,
+        SingleQuote,
+        DoubleQuote,
+        Backtick,
+        Bracket,
+        LineComment,
+        BlockComment,
+    }
+
+    let bytes = sql.as_bytes();
+    let mut state = State::Sql;
+    let mut index = 0;
+    let mut last_significant = None;
+    while index < bytes.len() {
+        match state {
+            State::Sql => match bytes[index] {
+                byte if byte.is_ascii_whitespace() => index += 1,
+                b'\'' => {
+                    last_significant = Some(index);
+                    state = State::SingleQuote;
+                    index += 1;
+                }
+                b'"' => {
+                    last_significant = Some(index);
+                    state = State::DoubleQuote;
+                    index += 1;
+                }
+                b'`' => {
+                    last_significant = Some(index);
+                    state = State::Backtick;
+                    index += 1;
+                }
+                b'[' => {
+                    last_significant = Some(index);
+                    state = State::Bracket;
+                    index += 1;
+                }
+                b'-' if bytes.get(index + 1) == Some(&b'-') => {
+                    state = State::LineComment;
+                    index += 2;
+                }
+                b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                    state = State::BlockComment;
+                    index += 2;
+                }
+                _ => {
+                    last_significant = Some(index);
+                    index += 1;
+                }
+            },
+            State::SingleQuote => {
+                if bytes[index] == b'\'' {
+                    if bytes.get(index + 1) == Some(&b'\'') {
+                        index += 2;
+                    } else {
+                        last_significant = Some(index);
+                        state = State::Sql;
+                        index += 1;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            State::DoubleQuote => {
+                if bytes[index] == b'"' {
+                    if bytes.get(index + 1) == Some(&b'"') {
+                        index += 2;
+                    } else {
+                        last_significant = Some(index);
+                        state = State::Sql;
+                        index += 1;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            State::Backtick => {
+                if bytes[index] == b'`' {
+                    if bytes.get(index + 1) == Some(&b'`') {
+                        index += 2;
+                    } else {
+                        last_significant = Some(index);
+                        state = State::Sql;
+                        index += 1;
+                    }
+                } else {
+                    index += 1;
+                }
+            }
+            State::Bracket => {
+                if bytes[index] == b']' {
+                    last_significant = Some(index);
+                    state = State::Sql;
+                }
+                index += 1;
+            }
+            State::LineComment => {
+                if bytes[index] == b'\n' {
+                    state = State::Sql;
+                }
+                index += 1;
+            }
+            State::BlockComment => {
+                if bytes[index] == b'*' && bytes.get(index + 1) == Some(&b'/') {
+                    state = State::Sql;
+                    index += 2;
+                } else {
+                    index += 1;
+                }
+            }
+        }
+    }
+
+    let Some(terminator) = last_significant.filter(|index| bytes[*index] == b';') else {
+        return sql.trim().to_owned();
+    };
+    format!("{}{}", &sql[..terminator], &sql[terminator + 1..])
+        .trim()
+        .to_owned()
+}
+
 #[derive(Debug, Clone, PartialEq)]
 enum SqliteValue {
     Null,
@@ -361,6 +545,11 @@ impl SqliteRows {
 struct PreparedColumn {
     name: String,
     declared_type: Option<String>,
+}
+
+struct PreparedNativeQuery {
+    columns: Vec<PreparedColumn>,
+    embeddable_sql: String,
 }
 
 #[derive(Debug, Clone)]
@@ -548,6 +737,127 @@ fn open_sqlite_relation(
     })
 }
 
+fn open_sqlite_native_query(
+    session: Arc<SqliteSession>,
+    native_query: &str,
+    options: &OpenOptions,
+) -> anyhow::Result<OpenedTable> {
+    let definition = native_query_definition(&session, native_query)?;
+    let generation = definition.generation;
+    let mut query = SourceQuery::new(
+        definition.generation,
+        options.limit.unwrap_or_else(|| {
+            NonZeroUsize::new(DEFAULT_SQLITE_SOURCE_LIMIT).expect("non-zero default")
+        }),
+    );
+    query.native_query = Some(native_query.to_owned());
+    query.filters = resolve_source_filters(&definition, &options.source_filters)?;
+    query.order_by = resolve_source_sort(&definition, &options.source_sort)?;
+    validate_source_query(&definition, &query)?;
+    let store = TursoTableStore::start(
+        session,
+        definition.clone(),
+        SqliteIdentityPlan::Unavailable,
+        query,
+    )?;
+    Ok(OpenedTable {
+        generation,
+        definition,
+        store: Box::new(store),
+        object_mode: None,
+        warnings: Vec::new(),
+    })
+}
+
+fn native_query_definition(
+    session: &SqliteSession,
+    native_query: &str,
+) -> anyhow::Result<TableDefinition> {
+    let prepared = session.prepare_native_row_query(native_query)?;
+    let generation = SourceGeneration::new();
+    let relation = "__tabview_native_query".to_owned();
+    let columns = prepared
+        .columns
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, column)| ColumnDefinition {
+            id: ColumnId {
+                generation,
+                ordinal: ordinal as u32,
+            },
+            source_identity: ColumnSourceIdentity::RelationColumn {
+                relation: relation.clone(),
+                ordinal,
+                name: column.name.clone(),
+            },
+            display_name: column.name,
+            source_declared_type: column.declared_type.clone(),
+            source_type: declared_type_hint(column.declared_type.as_deref()),
+            type_origin: if column.declared_type.is_some() {
+                TypeOrigin::Declared
+            } else {
+                TypeOrigin::Inferred
+            },
+        })
+        .collect();
+    Ok(TableDefinition {
+        generation,
+        columns,
+        schema_state: SchemaState::Complete,
+        relation: crate::table::RelationMetadata {
+            name: relation,
+            display_name: "SQLite query".to_owned(),
+            header_visible: true,
+        },
+    })
+}
+
+fn remap_native_query(
+    query: &SourceQuery,
+    old: &TableDefinition,
+    new: &TableDefinition,
+) -> anyhow::Result<SourceQuery> {
+    let mut remapped = SourceQuery::new(new.generation, query.limit);
+    remapped.native_query = query.native_query.clone();
+    remapped.filters = query
+        .filters
+        .iter()
+        .map(|filter| {
+            let SourceFilterScope::Column(old_id) = filter.scope else {
+                anyhow::bail!("SQLite source filters require a result column");
+            };
+            let name = old
+                .columns
+                .get(old_id.ordinal as usize)
+                .ok_or_else(|| anyhow::anyhow!("native query filter column is stale"))?
+                .display_name
+                .clone();
+            Ok(SourceFilter {
+                scope: SourceFilterScope::Column(resolve_column(new, &name)?),
+                operator: filter.operator,
+                operand: filter.operand.clone(),
+            })
+        })
+        .collect::<anyhow::Result<_>>()?;
+    remapped.order_by = query
+        .order_by
+        .iter()
+        .map(|sort| {
+            let name = old
+                .columns
+                .get(sort.column.ordinal as usize)
+                .ok_or_else(|| anyhow::anyhow!("native query sort column is stale"))?
+                .display_name
+                .clone();
+            Ok(SourceSort {
+                column: resolve_column(new, &name)?,
+                direction: sort.direction,
+            })
+        })
+        .collect::<anyhow::Result<_>>()?;
+    Ok(remapped)
+}
+
 fn resolve_source_filters(
     definition: &TableDefinition,
     requests: &[SourceFilterRequest],
@@ -668,13 +978,15 @@ fn declared_type_hint(declaration: Option<&str>) -> LogicalType {
 #[derive(Debug, Clone)]
 struct CompiledSqliteQuery {
     execution_sql: String,
-    provenance: QueryProvenance,
+    execution_parameters: Vec<SourceOperand>,
+    provenance: NativeQueryArtifact,
 }
 
 fn compile_sqlite_query(
     definition: &TableDefinition,
     query: &SourceQuery,
     identity: &SqliteIdentityPlan,
+    embeddable_native_query: Option<&str>,
 ) -> anyhow::Result<CompiledSqliteQuery> {
     validate_source_query(definition, query)?;
     let relation = quote_identifier(&definition.relation.name);
@@ -684,7 +996,11 @@ fn compile_sqlite_query(
         }
         SqliteIdentityPlan::PrimaryKey { .. } | SqliteIdentityPlan::Unavailable => String::new(),
     };
-    let mut logical = format!("SELECT *{hidden_identity} FROM {relation}");
+    let mut logical = if let Some(base) = embeddable_native_query {
+        format!("SELECT * FROM (\n{base}\n) AS \"__tabview_source\"")
+    } else {
+        format!("SELECT *{hidden_identity} FROM {relation}")
+    };
     let mut parameters = Vec::new();
     if !query.filters.is_empty() {
         logical.push_str(" WHERE ");
@@ -781,10 +1097,16 @@ fn compile_sqlite_query(
     let execution_sql = format!("{logical_without_limit} LIMIT {probe_limit}");
     Ok(CompiledSqliteQuery {
         execution_sql,
-        provenance: QueryProvenance {
-            logical_sql: logical,
-            parameters,
-            copyable_sql,
+        execution_parameters: parameters.clone(),
+        provenance: NativeQueryArtifact {
+            language: NativeQueryLanguage::Sql,
+            base: query.native_query.clone(),
+            logical,
+            parameters: parameters
+                .into_iter()
+                .map(NativeQueryParameter::Value)
+                .collect(),
+            copyable: copyable_sql,
         },
     })
 }
@@ -883,7 +1205,7 @@ struct TursoTableStore {
     cached: Vec<Row>,
     identities: Vec<Option<StableRowIdentity>>,
     extent: Option<ResultExtent>,
-    provenance: QueryProvenance,
+    provenance: NativeQueryArtifact,
     pending_widenings: Vec<TypeWidening>,
 }
 
@@ -894,8 +1216,22 @@ impl TursoTableStore {
         identity_plan: SqliteIdentityPlan,
         query: SourceQuery,
     ) -> anyhow::Result<Self> {
-        let compiled = compile_sqlite_query(&definition, &query, &identity_plan)?;
-        let rows = session.query_rows(&compiled.execution_sql, &compiled.provenance.parameters)?;
+        let embeddable_native_query = query
+            .native_query
+            .as_deref()
+            .map(|sql| {
+                session
+                    .prepare_native_row_query(sql)
+                    .map(|prepared| prepared.embeddable_sql)
+            })
+            .transpose()?;
+        let compiled = compile_sqlite_query(
+            &definition,
+            &query,
+            &identity_plan,
+            embeddable_native_query.as_deref(),
+        )?;
+        let rows = session.query_rows(&compiled.execution_sql, &compiled.execution_parameters)?;
         Ok(Self {
             session,
             definition,
@@ -1131,12 +1467,16 @@ impl TableStore for TursoTableStore {
         query: &SourceQuery,
     ) -> anyhow::Result<SourceQueryExecution> {
         validate_source_query(&self.definition, query)?;
-        Ok(SourceQueryExecution::SourceExecuted(Box::new(Self::start(
+        let definition = self.definition.clone();
+        let store = Box::new(Self::start(
             self.session.clone(),
-            self.definition.clone(),
+            definition.clone(),
             self.identity_plan.clone(),
             query.clone(),
-        )?)))
+        )?) as Box<dyn TableStore>;
+        Ok(SourceQueryExecution::SourceExecuted(
+            crate::table::SourceResult::from_store(definition, store),
+        ))
     }
 
     fn source_query_task(
@@ -1147,21 +1487,38 @@ impl TableStore for TursoTableStore {
         let session = self.session.clone();
         let definition = self.definition.clone();
         let identity_plan = self.identity_plan.clone();
-        Ok(Box::new(move || {
-            Ok(Box::new(TursoTableStore::start(
-                session,
-                definition,
-                identity_plan,
-                query,
-            )?) as Box<dyn TableStore>)
-        }))
+        Ok(crate::table::SourceQueryTask::Blocking(Box::new(
+            move || {
+                let (definition, identity_plan, query) = if let Some(native_query) =
+                    query.native_query.as_deref()
+                {
+                    let replacement_definition = native_query_definition(&session, native_query)?;
+                    let replacement_query =
+                        remap_native_query(&query, &definition, &replacement_definition)?;
+                    (
+                        replacement_definition,
+                        SqliteIdentityPlan::Unavailable,
+                        replacement_query,
+                    )
+                } else {
+                    (definition, identity_plan, query)
+                };
+                let store = Box::new(TursoTableStore::start(
+                    session,
+                    definition.clone(),
+                    identity_plan,
+                    query,
+                )?) as Box<dyn TableStore>;
+                Ok(crate::table::SourceResult::from_store(definition, store))
+            },
+        )))
     }
 
     fn result_extent(&self) -> Option<ResultExtent> {
         self.extent
     }
 
-    fn query_provenance(&self) -> Option<&QueryProvenance> {
+    fn query_provenance(&self) -> Option<&NativeQueryArtifact> {
         Some(&self.provenance)
     }
 
@@ -1412,8 +1769,8 @@ mod tests {
             })
         ));
         let provenance = table.store.query_provenance().unwrap();
-        assert!(provenance.logical_sql.ends_with("LIMIT 1"));
-        assert!(!provenance.copyable_sql.contains("LIMIT 2"));
+        assert!(provenance.logical.ends_with("LIMIT 1"));
+        assert!(!provenance.copyable.contains("LIMIT 2"));
 
         options.table = Some("missing".to_owned());
         let error = match SqliteAdapter.open(
@@ -1521,21 +1878,22 @@ mod tests {
             &SqliteIdentityPlan::RowId {
                 expression: "rowid".to_owned(),
             },
+            None,
         )
         .unwrap();
         assert!(compiled
             .provenance
-            .logical_sql
+            .logical
             .contains("FROM \"odd \"\"table\""));
         assert!(compiled
             .provenance
-            .logical_sql
+            .logical
             .contains("instr(CAST(\"first name\" AS TEXT), ?1) > 0"));
         assert!(compiled
             .provenance
-            .logical_sql
+            .logical
             .contains("\"first name\" DESC, \"rowid\" ASC LIMIT 25"));
-        assert!(compiled.provenance.copyable_sql.contains("'O''Brien'"));
+        assert!(compiled.provenance.copyable.contains("'O''Brien'"));
         assert!(compiled.execution_sql.ends_with("LIMIT 26"));
     }
 
@@ -1591,16 +1949,18 @@ mod tests {
                 operand: Some(SourceOperand::Text("x".to_owned())),
             });
             let compiled =
-                compile_sqlite_query(&definition, &query, &SqliteIdentityPlan::Unavailable)
+                compile_sqlite_query(&definition, &query, &SqliteIdentityPlan::Unavailable, None)
                     .unwrap();
             assert!(
-                compiled.provenance.logical_sql.contains(expected),
+                compiled.provenance.logical.contains(expected),
                 "{}",
-                compiled.provenance.logical_sql
+                compiled.provenance.logical
             );
             assert_eq!(
                 compiled.provenance.parameters,
-                vec![SourceOperand::Text("x".to_owned())]
+                vec![NativeQueryParameter::Value(SourceOperand::Text(
+                    "x".to_owned()
+                ))]
             );
         }
         for (operator, expected) in [
@@ -1614,9 +1974,9 @@ mod tests {
                 operand: None,
             });
             let compiled =
-                compile_sqlite_query(&definition, &query, &SqliteIdentityPlan::Unavailable)
+                compile_sqlite_query(&definition, &query, &SqliteIdentityPlan::Unavailable, None)
                     .unwrap();
-            assert!(compiled.provenance.logical_sql.contains(expected));
+            assert!(compiled.provenance.logical.contains(expected));
             assert!(compiled.provenance.parameters.is_empty());
         }
     }
@@ -1789,7 +2149,7 @@ mod tests {
                     SourceQueryExecution::SourceExecuted(store) => store,
                     _ => panic!("SQLite query was not source executed"),
                 };
-                assert_eq!(replacement.materialize().unwrap().rows().len(), 2);
+                assert_eq!(replacement.store.materialize().unwrap().rows().len(), 2);
             }
             assert_eq!(logical_snapshot(&path), before, "{name}");
         }
@@ -1832,6 +2192,186 @@ mod tests {
             StableRowIdentity::PrimaryKey(values)
                 if values == vec![CellValue::Text("a".to_owned()), CellValue::Integer(1)]
         ));
+    }
+
+    #[test]
+    fn native_select_and_cte_queries_open_as_implicit_bounded_relations() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("native.db");
+        create_database(
+            &path,
+            &[
+                "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT, active INTEGER)",
+                "INSERT INTO users VALUES (1, 'Ada', 1)",
+                "INSERT INTO users VALUES (2, 'Grace', 0)",
+            ],
+        );
+        for sql in [
+            "SELECT id, name FROM users WHERE active = 1",
+            "SELECT id, name FROM users WHERE active = 1;",
+            "SELECT id, name FROM users WHERE active = 1; -- trailing comment",
+            "SELECT id, name FROM users WHERE active = 1; /* trailing comment */",
+            "WITH active AS (SELECT * FROM users WHERE active = 1) SELECT name FROM active",
+        ] {
+            let opened = SqliteAdapter
+                .open(
+                    InputSource::Path(path.clone()),
+                    &OpenOptions {
+                        native_query: Some(sql.to_owned()),
+                        ..OpenOptions::default()
+                    },
+                )
+                .unwrap_or_else(|error| panic!("{sql}: {error}"))
+                .into_implicit_table()
+                .unwrap_or_else(|error| panic!("{sql}: {error}"));
+            assert_eq!(opened.generation, opened.definition.generation);
+            let mut table = opened;
+            assert_eq!(table.store.materialize().unwrap().rows().len(), 1);
+            assert_eq!(
+                table
+                    .store
+                    .active_source_query()
+                    .unwrap()
+                    .native_query
+                    .as_deref(),
+                Some(sql)
+            );
+            assert!(table
+                .store
+                .stable_row_identity(RowIndex(0))
+                .unwrap()
+                .is_none());
+        }
+    }
+
+    #[test]
+    fn native_sql_rejects_writes_multiple_statements_non_rows_and_parameters() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("native_reject.db");
+        create_database(
+            &path,
+            &[
+                "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT)",
+                "INSERT INTO users VALUES (1, 'Ada')",
+            ],
+        );
+        let before = std::fs::read(&path).unwrap();
+        for (sql, expected) in [
+            ("DELETE FROM users", "read-only"),
+            (
+                "SELECT * FROM users; DELETE FROM users",
+                "exactly one statement",
+            ),
+            ("BEGIN", "tabular result"),
+            ("SELECT * FROM users WHERE id = ?1", "unbound parameters"),
+        ] {
+            let error = SqliteAdapter
+                .open(
+                    InputSource::Path(path.clone()),
+                    &OpenOptions {
+                        native_query: Some(sql.to_owned()),
+                        ..OpenOptions::default()
+                    },
+                )
+                .err()
+                .expect("native SQL must be rejected");
+            assert!(
+                error.to_string().contains(expected),
+                "{sql}: expected {expected}, got {error}"
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), before, "{sql}");
+        }
+        let connection = rusqlite::Connection::open(&path).unwrap();
+        assert_eq!(
+            connection
+                .query_row("SELECT count(*) FROM users", [], |row| row.get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn native_sql_composes_filters_sort_and_limit_around_the_base_query() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("native_compose.db");
+        create_database(
+            &path,
+            &[
+                "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT)",
+                "INSERT INTO users VALUES (1, 'Ada')",
+                "INSERT INTO users VALUES (2, 'Grace')",
+                "INSERT INTO users VALUES (3, 'Alan')",
+            ],
+        );
+        let mut table = SqliteAdapter
+            .open(
+                InputSource::Path(path),
+                &OpenOptions {
+                    native_query: Some(
+                        "SELECT id, upper(name) AS display_name FROM users LIMIT 3".to_owned(),
+                    ),
+                    limit: NonZeroUsize::new(1),
+                    source_filters: vec![SourceFilterRequest {
+                        column: "display_name".to_owned(),
+                        operator: SourceFilterOperator::Prefix,
+                        operand: Some(SourceOperand::Text("A".to_owned())),
+                    }],
+                    source_sort: vec![SourceSortRequest {
+                        column: "display_name".to_owned(),
+                        direction: SortDirection::Descending,
+                    }],
+                    ..OpenOptions::default()
+                },
+            )
+            .unwrap()
+            .into_implicit_table()
+            .unwrap();
+        let materialized = table.store.materialize().unwrap();
+        assert_eq!(materialized.rows().len(), 1);
+        assert_eq!(materialized.rows()[0].cells[1].display(), "ALAN");
+        let provenance = table.store.query_provenance().unwrap();
+        assert!(provenance.logical.contains("FROM (\nSELECT"));
+        assert!(provenance.logical.contains("ORDER BY"));
+        assert!(provenance.logical.ends_with("LIMIT 1"));
+        assert!(!provenance.copyable.contains("LIMIT 2"));
+    }
+
+    #[test]
+    fn duplicate_native_result_names_are_allowed_until_addressed_by_source_operations() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("native_duplicates.db");
+        create_database(
+            &path,
+            &[
+                "CREATE TABLE users(id INTEGER)",
+                "INSERT INTO users VALUES (1)",
+            ],
+        );
+        let base = "SELECT id AS duplicate, id AS duplicate FROM users";
+        SqliteAdapter
+            .open(
+                InputSource::Path(path.clone()),
+                &OpenOptions {
+                    native_query: Some(base.to_owned()),
+                    ..OpenOptions::default()
+                },
+            )
+            .expect("duplicate output is renderable");
+        let error = SqliteAdapter
+            .open(
+                InputSource::Path(path),
+                &OpenOptions {
+                    native_query: Some(base.to_owned()),
+                    source_sort: vec![SourceSortRequest {
+                        column: "duplicate".to_owned(),
+                        direction: SortDirection::Ascending,
+                    }],
+                    ..OpenOptions::default()
+                },
+            )
+            .err()
+            .expect("ambiguous result column");
+        assert!(error.to_string().contains("ambiguous"));
     }
 
     #[test]

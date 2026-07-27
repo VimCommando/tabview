@@ -4,6 +4,8 @@ use std::path::Path;
 use crate::table::{RelationMetadata, SourceGeneration, TableDefinition, TableStore};
 
 use super::source::InputSource;
+#[cfg(feature = "elasticsearch")]
+use super::ElasticsearchAdapter;
 #[cfg(feature = "sqlite")]
 use super::SqliteAdapter;
 use super::{DelimitedAdapter, JsonAdapter};
@@ -29,6 +31,8 @@ pub enum RelationKind {
     Table,
     View,
     VirtualTable,
+    Index,
+    DataStream,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -161,6 +165,13 @@ impl FormatResolver {
             }
         }
 
+        #[cfg(feature = "sqlite")]
+        if let InputSource::Url(url) = source {
+            if url.scheme().eq_ignore_ascii_case("libsql") {
+                return InputFormat::Sqlite;
+            }
+        }
+
         probe_content(sample)
     }
 }
@@ -168,13 +179,6 @@ impl FormatResolver {
 pub fn open_source(source: InputSource, options: &OpenOptions) -> anyhow::Result<OpenedSource> {
     let detected = match &source {
         InputSource::Path(path) => {
-            let path_text = path.to_string_lossy().to_ascii_lowercase();
-            if path_text.starts_with("libsql://")
-                || path_text.starts_with("http://")
-                || path_text.starts_with("https://")
-            {
-                anyhow::bail!("remote URLs are unsupported; provide a local file path");
-            }
             let mut sample = Vec::new();
             std::fs::File::open(path)?
                 .take(64 * 1024)
@@ -201,6 +205,30 @@ pub fn open_source(source: InputSource, options: &OpenOptions) -> anyhow::Result
                 resolve_format(options, &source, &snapshot.bytes[..sample_len])
             }
         }
+        InputSource::Url(url) => {
+            if options.format != InputFormat::Auto {
+                options.format
+            } else if url.scheme().eq_ignore_ascii_case("libsql") {
+                #[cfg(feature = "sqlite")]
+                {
+                    InputFormat::Sqlite
+                }
+                #[cfg(not(feature = "sqlite"))]
+                {
+                    anyhow::bail!("URL scheme 'libsql' requires a build with SQLite support")
+                }
+            } else if matches!(url.scheme(), "http" | "https") {
+                anyhow::bail!(
+                    "remote HTTP(S) target '{}' requires an explicit --format",
+                    source.safe_identity()
+                )
+            } else {
+                anyhow::bail!(
+                    "URL scheme '{}' has no registered input format",
+                    url.scheme()
+                )
+            }
+        }
     };
     // A JSON Pointer is itself an explicit request for structured parsing. If
     // auto-detection cannot identify JSON/NDJSON, prefer JSON so the option is
@@ -208,8 +236,15 @@ pub fn open_source(source: InputSource, options: &OpenOptions) -> anyhow::Result
     // ignored by the delimited adapter.
     let resolved = resolve_structured_options(detected, options);
     let sqlite = is_sqlite_format(resolved);
-    if !sqlite && options.table.is_some() {
-        anyhow::bail!("table selection requires SQLite input");
+    let elasticsearch = is_elasticsearch_format(resolved);
+    if options.table.is_some() && options.native_query.is_some() {
+        anyhow::bail!("source table and native query are mutually exclusive");
+    }
+    if !sqlite && !elasticsearch && options.table.is_some() {
+        anyhow::bail!("the resolved {resolved} source does not support relation selection");
+    }
+    if !sqlite && !elasticsearch && options.native_query.is_some() {
+        anyhow::bail!("the resolved {resolved} source does not support native queries");
     }
     if sqlite {
         if has_delimited_options(options) {
@@ -219,6 +254,19 @@ pub fn open_source(source: InputSource, options: &OpenOptions) -> anyhow::Result
         }
         if options.json_path.is_some() {
             anyhow::bail!("JSON starting paths cannot be used with SQLite input");
+        }
+    }
+    if elasticsearch {
+        if !matches!(&source, InputSource::Url(url) if matches!(url.scheme(), "http" | "https")) {
+            anyhow::bail!("Elasticsearch input requires an HTTP(S) endpoint target");
+        }
+        if has_delimited_options(options)
+            || options.json_path.is_some()
+            || options.object_mode != ObjectMode::Auto
+        {
+            anyhow::bail!(
+                "delimited and structured-file parsing options cannot be used with Elasticsearch input"
+            );
         }
     }
     let incompatible_object_mode = options.object_mode != ObjectMode::Auto
@@ -246,9 +294,11 @@ pub fn open_source(source: InputSource, options: &OpenOptions) -> anyhow::Result
         InputFormat::Ndjson => JsonAdapter::ndjson().open(source, &effective_options),
         #[cfg(feature = "sqlite")]
         InputFormat::Sqlite => SqliteAdapter.open(source, &effective_options),
+        #[cfg(feature = "elasticsearch")]
+        InputFormat::Elasticsearch => ElasticsearchAdapter.open(source, &effective_options),
         InputFormat::Auto => unreachable!("auto format must be resolved"),
     }?;
-    if !sqlite {
+    if !sqlite && !elasticsearch {
         opened.tables = opened
             .tables
             .into_iter()
@@ -402,6 +452,18 @@ fn is_sqlite_format(format: InputFormat) -> bool {
     }
 }
 
+fn is_elasticsearch_format(format: InputFormat) -> bool {
+    #[cfg(feature = "elasticsearch")]
+    {
+        format == InputFormat::Elasticsearch
+    }
+    #[cfg(not(feature = "elasticsearch"))]
+    {
+        let _ = format;
+        false
+    }
+}
+
 fn format_from_extension(path: &Path) -> Option<InputFormat> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     match extension.as_str() {
@@ -505,25 +567,32 @@ mod tests {
     }
 
     #[test]
-    fn remote_url_error_is_not_format_specific() {
+    fn ambiguous_http_urls_require_an_explicit_format() {
         for url in [
             "https://example.com/data.json",
             "http://example.com/data.csv",
-            "libsql://example.turso.io",
             "HTTPS://example.com/data.json",
-            "LibSQL://example.turso.io",
         ] {
-            let error = open_source(
-                InputSource::Path(PathBuf::from(url)),
-                &OpenOptions::default(),
-            )
-            .err()
-            .expect("remote URL must be rejected");
-            assert_eq!(
-                error.to_string(),
-                "remote URLs are unsupported; provide a local file path"
-            );
+            let source = InputSource::from_cli_value(url);
+            let error = open_source(source, &OpenOptions::default())
+                .err()
+                .expect("ambiguous remote URL");
+            assert!(error.to_string().contains("requires an explicit --format"));
         }
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn libsql_scheme_infers_sqlite_without_local_probing() {
+        let source = InputSource::from_cli_value("libsql://example.turso.io");
+        assert_eq!(
+            FormatResolver::resolve(InputFormat::Auto, &source, b"not sqlite bytes"),
+            InputFormat::Sqlite
+        );
+        let error = open_source(source, &OpenOptions::default())
+            .err()
+            .expect("remote libSQL is reserved but unsupported");
+        assert!(error.to_string().contains("not supported yet"));
     }
 
     #[test]

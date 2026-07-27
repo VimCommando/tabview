@@ -647,19 +647,79 @@ pub fn render_relation_picker_with_theme(
     buffer: &mut Buffer,
     theme: &ResolvedTheme,
 ) {
-    render_popup_with_actions("Select table", "", &["Open", "Cancel"], area, buffer, theme);
+    let elasticsearch = relations.iter().any(|relation| {
+        matches!(
+            relation.kind,
+            crate::ingest::RelationKind::Index | crate::ingest::RelationKind::DataStream
+        )
+    });
+    render_popup_with_actions(
+        if elasticsearch {
+            "Select Elasticsearch target"
+        } else {
+            "Select table"
+        },
+        "",
+        &["Open", "Cancel"],
+        area,
+        buffer,
+        theme,
+    );
     if area.width < 4 || area.height < 4 {
         return;
     }
     let width = area.width.saturating_sub(4) as usize;
     let height = area.height.saturating_sub(4) as usize;
     let selected = selected.min(relations.len().saturating_sub(1));
-    let start = selected
+    let mut display_rows: Vec<(Option<usize>, String)> = Vec::new();
+    if elasticsearch {
+        for (kind, heading) in [
+            (crate::ingest::RelationKind::Index, "Indices"),
+            (crate::ingest::RelationKind::DataStream, "Data streams"),
+        ] {
+            let entries = relations
+                .iter()
+                .enumerate()
+                .filter(|(_, relation)| relation.kind == kind)
+                .collect::<Vec<_>>();
+            if entries.is_empty() {
+                continue;
+            }
+            display_rows.push((None, heading.to_owned()));
+            display_rows.extend(
+                entries
+                    .into_iter()
+                    .map(|(index, relation)| (Some(index), relation.metadata.display_name.clone())),
+            );
+        }
+    } else {
+        display_rows.extend(
+            relations
+                .iter()
+                .enumerate()
+                .map(|(index, relation)| (Some(index), relation.metadata.display_name.clone())),
+        );
+    }
+    let selected_row = display_rows
+        .iter()
+        .position(|(index, _)| *index == Some(selected))
+        .unwrap_or_default();
+    let start = selected_row
         .saturating_add(1)
         .saturating_sub(height)
-        .min(relations.len().saturating_sub(height));
-    for (row, relation) in relations.iter().skip(start).take(height).enumerate() {
-        let offset = start + row;
+        .min(display_rows.len().saturating_sub(height));
+    for (row, (offset, label)) in display_rows.iter().skip(start).take(height).enumerate() {
+        let Some(offset) = *offset else {
+            buffer.set_stringn(
+                area.x + 2,
+                area.y + 2 + row as u16,
+                label,
+                width,
+                theme.style("popup.label"),
+            );
+            continue;
+        };
+        let relation = &relations[offset];
         let (suffix, style) = match &relation.availability {
             RelationAvailability::Selectable if offset == selected => {
                 ("".to_owned(), theme.style("popup.active"))
@@ -677,7 +737,7 @@ pub fn render_relation_picker_with_theme(
         buffer.set_stringn(
             area.x + 2,
             area.y + 2 + row as u16,
-            format!("{prefix}{}{}", relation.metadata.display_name, suffix),
+            format!("{prefix}{label}{suffix}"),
             width,
             style,
         );
@@ -1919,6 +1979,48 @@ view:
         assert!(text.contains("> table-7"));
         assert_eq!(buffer[(2, 7)].style().fg, theme.style("popup.active").fg);
         assert_eq!(buffer[(2, 7)].style().bg, theme.style("popup.active").bg);
+    }
+
+    #[cfg(feature = "elasticsearch")]
+    #[test]
+    fn elasticsearch_picker_renders_index_and_data_stream_sections() {
+        let relations = vec![
+            RelationCatalogEntry {
+                metadata: crate::table::RelationMetadata::implicit("logs-a", true),
+                kind: crate::ingest::RelationKind::Index,
+                availability: RelationAvailability::Selectable,
+            },
+            RelationCatalogEntry {
+                metadata: crate::table::RelationMetadata::implicit("events-prod", true),
+                kind: crate::ingest::RelationKind::DataStream,
+                availability: RelationAvailability::Selectable,
+            },
+        ];
+        let area = Rect::new(0, 0, 64, 12);
+        let mut buffer = Buffer::empty(area);
+
+        render_relation_picker_with_theme(&relations, 1, area, &mut buffer, &default_theme());
+
+        let text = buffer_text(&buffer);
+        assert!(text.contains("Select Elasticsearch target"));
+        assert!(text.contains("Indices"));
+        assert!(text.contains("logs-a"));
+        assert!(text.contains("Data streams"));
+        assert!(text.contains("> events-prod"));
+    }
+
+    #[cfg(feature = "elasticsearch")]
+    #[test]
+    fn elasticsearch_picker_handles_tiny_terminal_without_render_overflow() {
+        let relations = vec![RelationCatalogEntry {
+            metadata: crate::table::RelationMetadata::implicit("logs-a", true),
+            kind: crate::ingest::RelationKind::Index,
+            availability: RelationAvailability::Selectable,
+        }];
+        for area in [Rect::new(0, 0, 1, 1), Rect::new(0, 0, 3, 3)] {
+            let mut buffer = Buffer::empty(area);
+            render_relation_picker_with_theme(&relations, 0, area, &mut buffer, &default_theme());
+        }
     }
 
     #[test]
