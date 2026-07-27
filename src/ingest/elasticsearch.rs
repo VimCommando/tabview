@@ -532,11 +532,15 @@ fn execute_opened_table(
     let generation = SourceGeneration::new();
     let mut request = SourceQuery::new(generation, limit);
     request.native_query = Some(base);
+    let source_fields: Arc<[SourceFieldMetadata]> = field_catalog
+        .as_ref()
+        .map(source_field_metadata)
+        .unwrap_or_default()
+        .into();
     let result = execute_esql(
         client.clone(),
         safe_endpoint.clone(),
         target.clone(),
-        field_catalog.clone(),
         request,
         &options.source_filters,
         &options.source_sort,
@@ -550,7 +554,7 @@ fn execute_opened_table(
             client,
             safe_endpoint,
             target,
-            field_catalog,
+            field_catalog: source_fields,
             active_query: result.query,
             extent: result.extent,
             is_partial: result.is_partial,
@@ -578,7 +582,6 @@ fn execute_esql(
     client: Arc<Elasticsearch>,
     safe_endpoint: String,
     target: Option<String>,
-    field_catalog: Option<ElasticsearchFieldCatalog>,
     request: SourceQuery,
     filters: &[SourceFilterRequest],
     sorts: &[SourceSortRequest],
@@ -587,7 +590,6 @@ fn execute_esql(
         client,
         safe_endpoint,
         target,
-        field_catalog,
         request,
         filters.to_vec(),
         sorts.to_vec(),
@@ -598,7 +600,6 @@ async fn execute_esql_async(
     client: Arc<Elasticsearch>,
     _safe_endpoint: String,
     target: Option<String>,
-    _field_catalog: Option<ElasticsearchFieldCatalog>,
     mut request: SourceQuery,
     filters: Vec<SourceFilterRequest>,
     sorts: Vec<SourceSortRequest>,
@@ -1001,7 +1002,7 @@ struct ElasticsearchTableStore {
     client: Arc<Elasticsearch>,
     safe_endpoint: String,
     target: Option<String>,
-    field_catalog: Option<ElasticsearchFieldCatalog>,
+    field_catalog: Arc<[SourceFieldMetadata]>,
     active_query: SourceQuery,
     extent: ResultExtent,
     is_partial: bool,
@@ -1135,7 +1136,6 @@ impl TableStore for ElasticsearchTableStore {
                 client,
                 safe_endpoint,
                 target.clone(),
-                field_catalog.clone(),
                 SourceQuery {
                     native_query: Some(base),
                     ..query
@@ -1179,11 +1179,8 @@ impl TableStore for ElasticsearchTableStore {
         &self.warnings
     }
 
-    fn source_field_catalog(&self) -> Vec<SourceFieldMetadata> {
-        self.field_catalog
-            .as_ref()
-            .map(source_field_metadata)
-            .unwrap_or_default()
+    fn source_field_catalog(&self) -> Arc<[SourceFieldMetadata]> {
+        self.field_catalog.clone()
     }
 
     fn stable_row_identity(

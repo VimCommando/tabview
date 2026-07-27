@@ -75,7 +75,7 @@ impl Server {
                 let connection_responses = responses.clone();
                 let handler = std::thread::spawn(move || {
                     stream
-                        .set_read_timeout(Some(Duration::from_millis(200)))
+                        .set_read_timeout(Some(Duration::from_secs(2)))
                         .unwrap();
                     let mut request = Vec::new();
                     let mut chunk = [0_u8; 4096];
@@ -154,9 +154,7 @@ impl Server {
                     .expect("mock response");
                     stream.flush().expect("flush mock response");
                     stream.shutdown(Shutdown::Write).ok();
-                    stream
-                        .set_read_timeout(Some(Duration::from_millis(200)))
-                        .ok();
+                    stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
                     while stream.read(&mut chunk).is_ok_and(|count| count > 0) {}
                 });
                 worker_handlers.lock().unwrap().push(handler);

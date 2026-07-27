@@ -96,8 +96,8 @@ pub trait TableStore: Send {
     fn result_warnings(&self) -> &[String] {
         &[]
     }
-    fn source_field_catalog(&self) -> Vec<SourceFieldMetadata> {
-        Vec::new()
+    fn source_field_catalog(&self) -> Arc<[SourceFieldMetadata]> {
+        Arc::from([])
     }
     fn stable_row_identity(
         &mut self,

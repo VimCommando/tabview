@@ -661,7 +661,7 @@ impl TableView {
         &self.source_result_warnings
     }
 
-    pub fn source_field_catalog(&self) -> Vec<crate::table::SourceFieldMetadata> {
+    pub fn source_field_catalog(&self) -> std::sync::Arc<[crate::table::SourceFieldMetadata]> {
         self.incremental_store
             .as_ref()
             .map(|store| store.0.borrow().source_field_catalog())

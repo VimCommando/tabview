@@ -3466,7 +3466,12 @@ mod tests {
         assert_ne!(app.view.table_definition().unwrap().generation, generation);
         assert_eq!(app.view.header().unwrap(), ["message", "latency"]);
         assert_eq!(app.view.current_raw_cell(), Some("after"));
-        assert_eq!(app.view.source_field_catalog().len(), 2);
+        let fields = app.view.source_field_catalog();
+        assert_eq!(fields.len(), 2);
+        assert!(std::sync::Arc::ptr_eq(
+            &fields,
+            &app.view.source_field_catalog()
+        ));
     }
 
     #[test]
