@@ -14,8 +14,12 @@ use crate::view::ColumnWidthMode;
     command(about = "View delimited, JSON, NDJSON, or local SQLite data.")
 )]
 #[cfg_attr(
-    feature = "elasticsearch",
+    all(feature = "sqlite", feature = "elasticsearch"),
     command(about = "View delimited, JSON, NDJSON, SQLite, or Elasticsearch data.")
+)]
+#[cfg_attr(
+    all(feature = "elasticsearch", not(feature = "sqlite")),
+    command(about = "View delimited, JSON, NDJSON, or Elasticsearch data.")
 )]
 #[cfg_attr(
     not(any(feature = "sqlite", feature = "elasticsearch")),
@@ -707,6 +711,14 @@ mod tests {
             config.source_options.native_query.as_deref(),
             Some("FROM logs-* | LIMIT 10")
         );
+    }
+
+    #[cfg(all(feature = "elasticsearch", not(feature = "sqlite")))]
+    #[test]
+    fn elasticsearch_only_help_does_not_claim_sqlite_support() {
+        let help = Args::command().render_long_help().to_string();
+        assert!(help.contains("Elasticsearch"));
+        assert!(!help.contains("SQLite"));
     }
 
     #[cfg(feature = "sqlite")]

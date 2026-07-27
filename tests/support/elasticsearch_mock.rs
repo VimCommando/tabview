@@ -67,6 +67,7 @@ impl Server {
                     }
                     Err(error) => panic!("mock accept: {error}"),
                 };
+                stream.set_nonblocking(false).unwrap();
                 let connection_requests = worker_requests.clone();
                 let connection_responses = responses.clone();
                 std::thread::spawn(move || {
