@@ -100,9 +100,6 @@ impl SourceAdapter for ElasticsearchAdapter {
                 availability: RelationAvailability::Selectable,
             })
             .collect::<Vec<_>>();
-        if relations.is_empty() {
-            anyhow::bail!("no visible open Elasticsearch indices or data streams are available");
-        }
         Ok(OpenedSource::relational(
             relations,
             None,

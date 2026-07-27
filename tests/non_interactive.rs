@@ -257,15 +257,18 @@ fn elasticsearch_selected_target_preserves_multivalues_and_warns_partial_on_stde
 #[test]
 fn elasticsearch_direct_output_without_selection_and_query_failures_keep_stdout_clean() {
     let _guard = elasticsearch_test_lock();
-    let discovery = ElasticsearchServer::start(vec![ElasticsearchResponse::ok(
+    for discovery_body in [
         r#"{"indices":[{"name":"logs-a","attributes":["open"]}],"aliases":[],"data_streams":[]}"#,
-    )]);
-    tabview_command()
-        .args(["--format", "elasticsearch", discovery.endpoint()])
-        .assert()
-        .failure()
-        .stdout("")
-        .stderr(predicate::str::contains("--table or --query"));
+        r#"{"indices":[],"aliases":[],"data_streams":[]}"#,
+    ] {
+        let discovery = ElasticsearchServer::start(vec![ElasticsearchResponse::ok(discovery_body)]);
+        tabview_command()
+            .args(["--format", "elasticsearch", discovery.endpoint()])
+            .assert()
+            .failure()
+            .stdout("")
+            .stderr(predicate::str::contains("--table or --query"));
+    }
 
     let failure = ElasticsearchServer::start(vec![ElasticsearchResponse::error(
         400,

@@ -21,6 +21,9 @@ impl SourceTarget {
         if value == "-" {
             return Self::Stdin;
         }
+        if is_windows_drive_path(value) {
+            return Self::Path(PathBuf::from(value));
+        }
         match Url::parse(value) {
             Ok(url) if url.scheme() == "file" => url
                 .to_file_path()
@@ -115,6 +118,11 @@ impl SourceTarget {
             }
         }
     }
+}
+
+fn is_windows_drive_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
 impl fmt::Display for SourceTarget {
@@ -381,6 +389,16 @@ mod tests {
         assert_eq!(url.host_str(), Some("elastic.example"));
         assert_eq!(url.port(), Some(9200));
         assert_eq!(url.path(), "/logs");
+    }
+
+    #[test]
+    fn parses_windows_drive_paths_without_treating_the_drive_as_a_url_scheme() {
+        for path in [r"C:/data/logs.csv", r"C:\data\logs.csv", "C:logs.csv"] {
+            assert_eq!(
+                InputSource::from_cli_value(path),
+                InputSource::Path(PathBuf::from(path))
+            );
+        }
     }
 
     #[test]

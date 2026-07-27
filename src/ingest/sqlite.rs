@@ -609,7 +609,7 @@ fn open_sqlite_native_query(
     options: &OpenOptions,
 ) -> anyhow::Result<OpenedTable> {
     let definition = native_query_definition(&session, native_query)?;
-    let generation = SourceGeneration::new();
+    let generation = definition.generation;
     let mut query = SourceQuery::new(
         definition.generation,
         options.limit.unwrap_or_else(|| {
@@ -2059,7 +2059,7 @@ mod tests {
             "SELECT id, name FROM users WHERE active = 1",
             "WITH active AS (SELECT * FROM users WHERE active = 1) SELECT name FROM active",
         ] {
-            let mut table = SqliteAdapter
+            let opened = SqliteAdapter
                 .open(
                     InputSource::Path(path.clone()),
                     &OpenOptions {
@@ -2070,6 +2070,8 @@ mod tests {
                 .unwrap()
                 .into_implicit_table()
                 .unwrap();
+            assert_eq!(opened.generation, opened.definition.generation);
+            let mut table = opened;
             assert_eq!(table.store.materialize().unwrap().rows().len(), 1);
             assert_eq!(
                 table

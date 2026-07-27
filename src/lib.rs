@@ -204,6 +204,20 @@ fn prepare_app(
         report_status(&schema_status)?;
     }
     let mut opened_source = ingest::open_source(source.clone(), &open_options)?;
+    #[cfg(feature = "elasticsearch")]
+    if !opened_source.has_selected_table()
+        && select_relation.is_none()
+        && open_options.format == ingest::InputFormat::Elasticsearch
+    {
+        anyhow::bail!("direct Elasticsearch output requires --table or --query");
+    }
+    #[cfg(feature = "elasticsearch")]
+    if !opened_source.has_selected_table()
+        && opened_source.selectable_relations().next().is_none()
+        && open_options.format == ingest::InputFormat::Elasticsearch
+    {
+        anyhow::bail!("no visible open Elasticsearch indices or data streams are available");
+    }
     if !opened_source.has_selected_table() && opened_source.selectable_relations().count() > 0 {
         if let Some(selector) = select_relation.as_mut() {
             let Some(selected) = selector(opened_source.list_relations())? else {
@@ -211,11 +225,6 @@ fn prepare_app(
             };
             opened_source.open_relation(&selected)?;
             open_options.table = Some(selected);
-        } else {
-            #[cfg(feature = "elasticsearch")]
-            if open_options.format == ingest::InputFormat::Elasticsearch {
-                anyhow::bail!("direct Elasticsearch output requires --table or --query");
-            }
         }
     }
     let opened = opened_source.into_implicit_table()?;
