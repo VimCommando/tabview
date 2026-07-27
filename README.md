@@ -1,7 +1,7 @@
 # Tabview
 
-View delimited text, JSON, and NDJSON files in a spreadsheet-like terminal
-interface.
+View delimited text, JSON, NDJSON, and local SQLite databases in a
+spreadsheet-like terminal interface.
 
 **This project is functional but future development will be sporadic and
 limited. For a more fully featured CSV viewer/spreadsheet app, check out the
@@ -28,6 +28,7 @@ contents of that cell are shown next to it.
 - Rust command-line application distributed as the `tabview` binary.
 - Spreadsheet-like view for visualizing tabular data.
 - Automatic or explicit delimited, JSON, and NDJSON input selection.
+- Read-only browsing of local SQLite databases through Turso.
 - RFC 6901 JSON Pointer selection for tables embedded in response documents.
 - Incremental indexing for large seekable inputs and typed JSON scalar values.
 - Vim-like navigation, including `h`, `j`, `k`, `l`, `g`, `G`, marks, and
@@ -47,8 +48,13 @@ contents of that cell are shown next to it.
 
 - Rust toolchain for installation with Cargo.
 - Optional clipboard support can be enabled with the `clipboard` Cargo feature.
-- Saved views are enabled by default. Build with `--no-default-features` to omit
-  saved view support.
+- Saved views and SQLite support are enabled by default through the
+  `saved-views` and `sqlite` Cargo features.
+- Build with `--no-default-features` to omit both optional capabilities, or
+  enable either one explicitly (for example,
+  `--no-default-features --features saved-views` builds without SQLite).
+- Tokio is part of every build and provides the application runtime used for
+  background source-query work across SQLite and file-backed sources.
 
 ## Installation
 
@@ -90,6 +96,8 @@ tabview repositories.json --object-mode entries
 tabview settings.json --object-mode record
 tabview records.ndjson --format ndjson
 tabview response.data --format json --schema-scan full
+tabview sample/us-counties.sqlite3
+tabview sample/us-counties.sqlite3 --format sqlite --table counties
 tabview data.csv --output table
 tabview --interactive data.csv
 tabview --interactive --output table data.csv > edited.txt
@@ -127,10 +135,63 @@ syntax, so write it to a text destination rather than replacing the source.
 Future serializers such as CSV and Markdown can be added as new `--output`
 values without changing `--interactive`.
 
-`--format auto|delimited|json|ndjson` defaults to `auto`. Filename extensions
-are considered before bounded content probing; an explicit format always wins.
-Delimited-only options such as `--delimiter` imply delimited input under
-`auto` and are rejected with an explicitly selected JSON format.
+`--format auto|delimited|json|ndjson|sqlite` defaults to `auto`. Filename
+extensions are considered before bounded content probing; SQLite's
+`SQLite format 3` signature is recognized before any text decoding. An explicit
+format always wins. Delimited-only options imply delimited input under `auto`
+unless the input has a SQLite signature, and are rejected for SQLite and
+explicitly selected structured formats.
+
+### SQLite sources
+
+Tabview opens local SQLite-format files through Turso. If a database contains
+one selectable table or compatible ordinary view, it is selected
+automatically. If several are available, the interactive application presents
+a simple table picker; direct batch output instead requires
+`--table <name>` or saved `source.table` so it cannot choose silently or emit a
+partial result. SQLite data cannot be read from stdin, and Turso Cloud,
+`libsql://`, and other remote URLs are outside this feature's scope.
+SQLite support is compiled by the default-enabled `sqlite` Cargo feature; a
+build without that feature omits Turso, `--format sqlite`, and `--table` while
+retaining the shared Tokio application runtime.
+
+SQLite source queries are bounded to 1,000 rows by default. Source filters and
+SQLite-native source sorting run before that limit. View filters, rich local
+sorts, search, formatting, and hiding then operate only on the fixed bounded
+result and never refill it. The Source Configuration modal (`u`) edits the
+source limit, filters, and native sort as one staged query. The View
+Configuration modal (`V`) manages source-independent local presentation, while
+Column Info (`i`) remains the quick current-column editor. Existing `f`/`F` and
+sort keybindings remain view-only.
+
+The Query modal (`p`) shows the logical parameterized SQLite `SELECT`, typed
+parameters, and a safely rendered copyable statement. It also calls out active
+local view transforms, because they are intentionally absent from the SQL.
+The private extra-row truncation probe is never shown in the reusable SQL.
+
+Tabview opens SQLite through Turso with storage-level read-only flags before
+creating a connection, so viewing does not convert a rollback-journal database
+to WAL, create journal/WAL/shared-memory sidecars, or modify existing database
+or sidecar bytes. The connection is confined behind a read-only facade,
+`PRAGMA query_only` is enabled and verified as defense in depth, all values are
+bound parameters, and Tabview exposes no arbitrary-SQL or mutation command.
+Ordinary tables and capability-probed ordinary views are selectable. Virtual
+tables—including existing FTS5 and RTree tables—are reported as unsupported;
+shadow and SQLite-internal objects are hidden.
+Turso's optional FTS support is disabled because Tabview does not select
+existing SQLite FTS virtual tables. SQLite-enabled builds use Turso's mimalloc
+feature as Tabview's global allocator.
+
+SQLite declared types are displayed as source metadata and used only as
+conservative initial hints. SQLite values remain dynamically typed at runtime,
+and observed integer, real, text, blob, and null values can widen those hints.
+Rowid tables and declared primary-key tuples provide stable cursor/mark
+identity across source-query replacement. Views and tables without a stable
+key reset identity-dependent state.
+
+A public-domain Census Bureau database with 1,000 county records is included at
+`sample/us-counties.sqlite3`; see `sample/README.md` for its provenance and
+column-selection details.
 
 For structured formats, `--object-mode auto|record|entries` controls how a
 selected object becomes rows. `record` keeps compatibility behavior and opens
@@ -294,31 +355,31 @@ Saved views can define sparse per-column state:
 name: cat-shards
 filenames:
   - cat_shards.txt
-format: delimited
-schema_scan: default
-nulls: last
-columns:
-  shard:
-    type: integer
-    width: header
-    align: left
-    nulls: first
-  "*count":
-    type: integer
-    format: locale
-    width: content
-  segment:
-    type: text
-    visible: false
-sort:
-  - column: shard
-    direction: asc
-    kind: numeric
-filters:
-  - column: "*count"
-    action: in
-    kind: numeric
-    condition: ">0"
+source: {}
+view:
+  nulls: last
+  columns:
+    shard:
+      type: integer
+      width: header
+      align: left
+      nulls: first
+    "*count":
+      type: integer
+      format: locale
+      width: content
+    segment:
+      type: text
+      visible: false
+  sort:
+    - column: shard
+      direction: asc
+      kind: numeric
+  filters:
+    - column: "*count"
+      action: in
+      kind: numeric
+      condition: ">0"
 ```
 
 A keyed-object view can pin its row shape and address the synthetic key column
@@ -327,11 +388,13 @@ independently of its display label:
 ```yaml
 name: repositories
 filenames: [repositories.json]
-format: json
-object_mode: entries
-columns:
-  "@key":
-    label: Repository
+source:
+  format: json
+  object_mode: entries
+view:
+  columns:
+    "@key":
+      label: Repository
 ```
 
 Column keys match headers case-insensitively. Exact keys win over wildcard
@@ -340,24 +403,35 @@ Supported type aliases are `string`, `text`, `date`, `ip`, `number`, `float`,
 `integer`, `semver`, `boolean`, `char`, `bit`, and `word`. Formats include
 `plain`, `locale`, `mask`, `uppercase`, `lowercase`, `char`, `bit`, and `word`.
 Number masks support `0`, `0.00`, `#,##0`, and `#,##0.00` forms. `locale`
-uses the system POSIX locale with `en_US` fallback, or a top-level `locale`.
+uses the system POSIX locale with `en_US` fallback, or `view.locale`.
 Headers are prefixed first with sort state, then filter state: `▲` for
 ascending sort, `▼` for descending sort, `+` for filter-in, `-` for filter-out,
 and `±` for multiple filters. Truncation applies after those prefix markers.
 
-Source options are selected before the table opens. Saved views accept
-`format`, `json_path`, `object_mode`, and `schema_scan`; precedence is explicit
-CLI options, then the selected saved view, then defaults. Supplying
-`--schema-scan default` therefore overrides a saved `schema_scan: full` for one
+Source options under `source` are selected before the table opens. View
+formatting and local operations live under `view`. Source-option precedence is
+explicit CLI options, then the selected saved view, then defaults. Supplying
+`--schema-scan default` therefore overrides a saved `source.schema_scan: full` for one
 invocation. When a view is written for an object table, tabview saves the
-resolved explicit `object_mode` (`record` or `entries`) so later detector
+resolved explicit `source.object_mode` (`record` or `entries`) so later detector
 improvements do not change that view's shape. Non-object tables omit it.
+
+For delimited, JSON, and NDJSON sources, saved source filters stream decoded
+logical records before the source limit. Use `column: "*"` for a grep-style
+whole-record filter. Quoted multiline CSV fields remain part of one logical
+record. Source sorting is deliberately unavailable for file adapters that
+cannot provide it without unbounded materialization; use `view.sort` for a
+local sort over the bounded result instead.
+
+Relational saved column keys use the SQLite source name when it is unique.
+Duplicate result names are deterministic occurrence keys such as `name#1` and
+`name#2`; an unsuffixed duplicate is rejected as ambiguous.
 
 Structured column configuration should use exact, case-sensitive canonical
 JSON Pointers such as `/_source/user/email`; keyed-object member names use
 `@key`, regardless of whether its display label is `name` or `_key`. An
 unambiguous compact display label is accepted as a fallback. A column can set
-`label` without changing its canonical identity or raw data. Top-level and
+`label` without changing its canonical identity or raw data. View-level and
 per-column `nulls: first|last`
 control direction-independent sort placement, with the column policy winning
 over the view policy and `last` as the built-in default.
@@ -387,48 +461,49 @@ rule wins, and colors affect only cell styling; raw values, formatted values,
 sorting, filtering, search, copy, and popups are unchanged.
 
 ```yaml
-columns:
-  active:
-    type: boolean
-    colors:
-      - match:
-          true: green
-          false: muted
-  prirep:
-    type: string
-    colors:
-      - match:
-          p: darkgreen
-          r: blue
-  used_percent:
-    type: number
-    colors:
-      - range:
-          "<10": red
-          ">=90": red
-      - gradient:
-          mode: auto
-          steps: 8
-          colors: [green, yellow]
-  latency_ms:
-    type: number
-    colors:
-      - gradient:
-          mode: fixed
-          stops:
-            0: green
-            100: yellow
-            500: red
-  ip_address:
-    type: ip
-    colors:
-      - identifiers:
-          colors: auto
-  host:
-    type: string
-    colors:
-      - identifiers:
-          colors: [cyan, "palette(198)", "#25A39AFF"]
+view:
+  columns:
+    active:
+      type: boolean
+      colors:
+        - match:
+            true: green
+            false: muted
+    prirep:
+      type: string
+      colors:
+        - match:
+            p: darkgreen
+            r: blue
+    used_percent:
+      type: number
+      colors:
+        - range:
+            "<10": red
+            ">=90": red
+        - gradient:
+            mode: auto
+            steps: 8
+            colors: [green, yellow]
+    latency_ms:
+      type: number
+      colors:
+        - gradient:
+            mode: fixed
+            stops:
+              0: green
+              100: yellow
+              500: red
+    ip_address:
+      type: ip
+      colors:
+        - identifiers:
+            colors: auto
+    host:
+      type: string
+      colors:
+        - identifiers:
+            colors: [cyan, "palette(198)", "#25A39AFF"]
 ```
 
 The `identifiers` rule is for string-like discrete values. It assigns each
@@ -475,6 +550,9 @@ cargo clippy --all-targets --all-features -- -D warnings
 | `Enter` | View full cell contents in a popup. |
 | `/` | Search. |
 | `i` | Edit the current column view configuration, sort state, and filter action. |
+| `u` | Edit staged source filters, native sort, and source limit. |
+| `V` | Show source-independent view configuration. |
+| `p` | Show and copy the active source SQL when available. |
 | `f`, `F` | Filter in or filter out rows by the current column. `Tab` cycles text, regex, and numeric modes; submitting an empty condition clears filters for the current column. |
 | `n` | Go to the next search result. |
 | `N` | Go to the previous search result. |

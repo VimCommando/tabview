@@ -144,6 +144,11 @@ pub enum ColumnSourceIdentity {
     StructuredPath(StructuredPath),
     ObjectKey,
     Positional(usize),
+    RelationColumn {
+        relation: String,
+        ordinal: usize,
+        name: String,
+    },
 }
 
 impl ColumnSourceIdentity {
@@ -151,7 +156,7 @@ impl ColumnSourceIdentity {
         match self {
             Self::StructuredPath(path) => Some(path.as_str()),
             Self::ObjectKey => Some("@key"),
-            Self::Delimited { .. } | Self::Positional(_) => None,
+            Self::Delimited { .. } | Self::Positional(_) | Self::RelationColumn { .. } => None,
         }
     }
 }
@@ -161,6 +166,7 @@ pub struct ColumnDefinition {
     pub id: ColumnId,
     pub source_identity: ColumnSourceIdentity,
     pub display_name: String,
+    pub source_declared_type: Option<String>,
     pub source_type: LogicalType,
     pub type_origin: TypeOrigin,
 }
@@ -216,6 +222,48 @@ pub struct TableDefinition {
 }
 
 impl TableDefinition {
+    pub fn canonical_column_key(&self, index: usize) -> Option<String> {
+        let column = self.columns.get(index)?;
+        match &column.source_identity {
+            ColumnSourceIdentity::RelationColumn { name, .. } => {
+                let matches = self
+                    .columns
+                    .iter()
+                    .filter(|candidate| {
+                        matches!(
+                            &candidate.source_identity,
+                            ColumnSourceIdentity::RelationColumn {
+                                name: candidate_name,
+                                ..
+                            } if candidate_name == name
+                        )
+                    })
+                    .count();
+                if matches == 1 {
+                    Some(name.clone())
+                } else {
+                    let occurrence = self.columns[..=index]
+                        .iter()
+                        .filter(|candidate| {
+                            matches!(
+                                &candidate.source_identity,
+                                ColumnSourceIdentity::RelationColumn {
+                                    name: candidate_name,
+                                    ..
+                                } if candidate_name == name
+                            )
+                        })
+                        .count();
+                    Some(format!("{name}#{occurrence}"))
+                }
+            }
+            _ => column
+                .source_identity
+                .canonical_key()
+                .map(ToOwned::to_owned),
+        }
+    }
+
     pub fn apply_delta(&mut self, delta: SchemaDelta) -> anyhow::Result<()> {
         for (offset, column) in delta.added_columns.iter().enumerate() {
             let expected_ordinal = self.columns.len().saturating_add(offset);
@@ -250,7 +298,7 @@ mod tests {
 
     #[test]
     fn typed_values_keep_null_empty_and_native_kinds_distinct() {
-        let values = vec![
+        let values = [
             CellValue::Null,
             CellValue::Text(String::new()),
             CellValue::Boolean(true),
@@ -298,6 +346,7 @@ mod tests {
             },
             source_identity: ColumnSourceIdentity::Positional(ordinal as usize),
             display_name: format!("c{ordinal}"),
+            source_declared_type: None,
             source_type: LogicalType::Text,
             type_origin: TypeOrigin::Inferred,
         };

@@ -3,19 +3,24 @@ mod delimited;
 mod json;
 mod options;
 pub mod source;
+#[cfg(feature = "sqlite")]
+mod sqlite;
 mod streaming_json;
 
 pub use adapter::{
-    open_source, FormatResolver, OpenedSource, OpenedTable, ProbeResult, SourceAdapter,
+    open_source, FormatResolver, OpenedSource, OpenedTable, ProbeResult, RelationAvailability,
+    RelationCatalogEntry, RelationKind, RelationOpener, SourceAdapter,
 };
 pub use delimited::DelimitedAdapter;
 pub use json::JsonAdapter;
 pub use options::{
     resolve_selected_shape, InputFormat, JsonPointer, ObjectMode, ObjectModeOrigin,
     ObjectModeResolution, OpenOptions, ResolvedObjectMode, SchemaScan, SelectedShapeResolution,
-    SelectedTableShape, SelectedValueShape, SourceOptionError, SourceOptionOverrides,
-    StructuredPath, DEFAULT_SCHEMA_SCAN_BYTES,
+    SelectedTableShape, SelectedValueShape, SourceFilterRequest, SourceOptionError,
+    SourceOptionOverrides, SourceSortRequest, StructuredPath, DEFAULT_SCHEMA_SCAN_BYTES,
 };
+#[cfg(feature = "sqlite")]
+pub use sqlite::SqliteAdapter;
 
 use std::borrow::Cow;
 use std::env;

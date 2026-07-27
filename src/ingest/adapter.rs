@@ -4,6 +4,8 @@ use std::path::Path;
 use crate::table::{RelationMetadata, SourceGeneration, TableDefinition, TableStore};
 
 use super::source::InputSource;
+#[cfg(feature = "sqlite")]
+use super::SqliteAdapter;
 use super::{DelimitedAdapter, JsonAdapter};
 use super::{InputFormat, ObjectMode, ObjectModeOrigin, ObjectModeResolution, OpenOptions};
 
@@ -22,28 +24,118 @@ pub struct OpenedTable {
     pub warnings: Vec<String>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelationKind {
+    Table,
+    View,
+    VirtualTable,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RelationAvailability {
+    Selectable,
+    Unavailable { reason: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RelationCatalogEntry {
+    pub metadata: RelationMetadata,
+    pub kind: RelationKind,
+    pub availability: RelationAvailability,
+}
+
+impl RelationCatalogEntry {
+    pub fn is_selectable(&self) -> bool {
+        matches!(self.availability, RelationAvailability::Selectable)
+    }
+}
+
+pub trait RelationOpener {
+    fn open_relation(&mut self, name: &str) -> anyhow::Result<OpenedTable>;
+}
+
 pub struct OpenedSource {
-    // Public multi-relation construction and selection are introduced with the
-    // follow-on SQLite/database source rather than the file-adapter change.
-    relations: Vec<RelationMetadata>,
+    relations: Vec<RelationCatalogEntry>,
     tables: Vec<OpenedTable>,
+    relation_opener: Option<Box<dyn RelationOpener>>,
 }
 
 impl OpenedSource {
     pub fn implicit(table: OpenedTable) -> Self {
         Self {
-            relations: vec![table.definition.relation.clone()],
+            relations: vec![RelationCatalogEntry {
+                metadata: table.definition.relation.clone(),
+                kind: RelationKind::Table,
+                availability: RelationAvailability::Selectable,
+            }],
             tables: vec![table],
+            relation_opener: None,
         }
     }
 
-    pub fn list_relations(&self) -> &[RelationMetadata] {
+    pub fn relational(
+        relations: Vec<RelationCatalogEntry>,
+        selected: Option<OpenedTable>,
+        opener: Box<dyn RelationOpener>,
+    ) -> Self {
+        Self {
+            relations,
+            tables: selected.into_iter().collect(),
+            relation_opener: Some(opener),
+        }
+    }
+
+    pub fn list_relations(&self) -> &[RelationCatalogEntry] {
         &self.relations
     }
 
+    pub fn selectable_relations(&self) -> impl Iterator<Item = &RelationCatalogEntry> {
+        self.relations
+            .iter()
+            .filter(|relation| relation.is_selectable())
+    }
+
+    pub fn has_selected_table(&self) -> bool {
+        self.tables.len() == 1
+    }
+
+    pub fn open_relation(&mut self, name: &str) -> anyhow::Result<()> {
+        let Some(entry) = self
+            .relations
+            .iter()
+            .find(|entry| entry.metadata.name == name)
+        else {
+            anyhow::bail!("relation '{name}' was not found");
+        };
+        if let RelationAvailability::Unavailable { reason } = &entry.availability {
+            anyhow::bail!("relation '{name}' is unavailable: {reason}");
+        }
+        let opener = self
+            .relation_opener
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("source does not support relation selection"))?;
+        let table = opener.open_relation(name)?;
+        self.tables.clear();
+        self.tables.push(table);
+        Ok(())
+    }
+
     pub fn into_implicit_table(mut self) -> anyhow::Result<OpenedTable> {
+        if self.tables.is_empty() {
+            let selectable = self
+                .selectable_relations()
+                .map(|entry| entry.metadata.name.as_str())
+                .collect::<Vec<_>>();
+            if selectable.len() > 1 {
+                anyhow::bail!(
+                    "SQLite database has multiple selectable relations ({}); select one with --table or saved source.table",
+                    selectable.join(", ")
+                );
+            }
+            anyhow::bail!("source has no selected relation");
+        }
         if self.tables.len() != 1 {
-            anyhow::bail!("source does not contain exactly one implicit relation");
+            anyhow::bail!("source contains more than one opened relation");
         }
         Ok(self.tables.remove(0))
     }
@@ -76,11 +168,18 @@ impl FormatResolver {
 pub fn open_source(source: InputSource, options: &OpenOptions) -> anyhow::Result<OpenedSource> {
     let detected = match &source {
         InputSource::Path(path) => {
+            let path_text = path.to_string_lossy().to_ascii_lowercase();
+            if path_text.starts_with("libsql://")
+                || path_text.starts_with("http://")
+                || path_text.starts_with("https://")
+            {
+                anyhow::bail!("remote URLs are unsupported; provide a local file path");
+            }
             let mut sample = Vec::new();
             std::fs::File::open(path)?
                 .take(64 * 1024)
                 .read_to_end(&mut sample)?;
-            FormatResolver::resolve(options.format, &source, &sample)
+            resolve_format(options, &source, &sample)
         }
         InputSource::Stdin => {
             // Stdin is consumed exactly once by the selected adapter. With no
@@ -99,7 +198,7 @@ pub fn open_source(source: InputSource, options: &OpenOptions) -> anyhow::Result
                 input.wait_for_probe_sample()?;
                 let snapshot = input.snapshot(false)?;
                 let sample_len = snapshot.bytes.len().min(64 * 1024);
-                FormatResolver::resolve(options.format, &source, &snapshot.bytes[..sample_len])
+                resolve_format(options, &source, &snapshot.bytes[..sample_len])
             }
         }
     };
@@ -108,8 +207,23 @@ pub fn open_source(source: InputSource, options: &OpenOptions) -> anyhow::Result
     // either honored or produces a parse error instead of being silently
     // ignored by the delimited adapter.
     let resolved = resolve_structured_options(detected, options);
+    let sqlite = is_sqlite_format(resolved);
+    if !sqlite && options.table.is_some() {
+        anyhow::bail!("table selection requires SQLite input");
+    }
+    if sqlite {
+        if has_delimited_options(options) {
+            anyhow::bail!(
+                "encoding, delimiter, quoting, and quote-character options cannot be used with SQLite input"
+            );
+        }
+        if options.json_path.is_some() {
+            anyhow::bail!("JSON starting paths cannot be used with SQLite input");
+        }
+    }
     let incompatible_object_mode = options.object_mode != ObjectMode::Auto
-        && matches!(resolved, InputFormat::Delimited | InputFormat::Ndjson);
+        && (matches!(resolved, InputFormat::Delimited | InputFormat::Ndjson)
+            || is_sqlite_format(resolved));
     let mut effective_options = options.clone();
     let warning =
         if incompatible_object_mode && options.object_mode_origin == ObjectModeOrigin::SavedView {
@@ -130,14 +244,109 @@ pub fn open_source(source: InputSource, options: &OpenOptions) -> anyhow::Result
         InputFormat::Delimited => DelimitedAdapter.open(source, &effective_options),
         InputFormat::Json => JsonAdapter::json().open(source, &effective_options),
         InputFormat::Ndjson => JsonAdapter::ndjson().open(source, &effective_options),
+        #[cfg(feature = "sqlite")]
+        InputFormat::Sqlite => SqliteAdapter.open(source, &effective_options),
         InputFormat::Auto => unreachable!("auto format must be resolved"),
     }?;
+    if !sqlite {
+        opened.tables = opened
+            .tables
+            .into_iter()
+            .map(|table| apply_file_source_query(table, &effective_options))
+            .collect::<anyhow::Result<Vec<_>>>()?;
+    }
     if let Some(warning) = warning {
         for table in &mut opened.tables {
             table.warnings.push(warning.clone());
         }
     }
     Ok(opened)
+}
+
+fn apply_file_source_query(
+    mut table: OpenedTable,
+    options: &OpenOptions,
+) -> anyhow::Result<OpenedTable> {
+    let definition = table.definition.clone();
+    let mut query = crate::table::SourceQuery::new(
+        definition.generation,
+        options.limit.unwrap_or(std::num::NonZeroUsize::MAX),
+    );
+    query.filters = options
+        .source_filters
+        .iter()
+        .map(|request| {
+            let scope = if request.column == "*" {
+                crate::table::SourceFilterScope::WholeRecord
+            } else {
+                crate::table::SourceFilterScope::Column(resolve_source_column(
+                    &definition,
+                    &request.column,
+                )?)
+            };
+            Ok(crate::table::SourceFilter {
+                scope,
+                operator: request.operator,
+                operand: request.operand.clone(),
+            })
+        })
+        .collect::<anyhow::Result<_>>()?;
+    query.order_by = options
+        .source_sort
+        .iter()
+        .map(|request| {
+            Ok(crate::table::SourceSort {
+                column: resolve_source_column(&definition, &request.column)?,
+                direction: request.direction,
+            })
+        })
+        .collect::<anyhow::Result<_>>()?;
+    let placeholder = Box::new(crate::table::InMemoryTable::from_text_rows(
+        definition.generation,
+        Vec::new(),
+    ));
+    let base = std::mem::replace(&mut table.store, placeholder);
+    table.store = if options.limit.is_none()
+        && options.source_filters.is_empty()
+        && options.source_sort.is_empty()
+    {
+        Box::new(crate::table::FileSourceQueryStore::passthrough(
+            base,
+            table.definition.clone(),
+            query,
+        ))
+    } else {
+        Box::new(crate::table::FileSourceQueryStore::execute_initial(
+            base,
+            &mut table.definition,
+            query,
+        )?)
+    };
+    Ok(table)
+}
+
+fn resolve_source_column(
+    definition: &TableDefinition,
+    key: &str,
+) -> anyhow::Result<crate::table::ColumnId> {
+    if let Some((index, _)) = definition
+        .columns
+        .iter()
+        .enumerate()
+        .find(|(index, _)| definition.canonical_column_key(*index).as_deref() == Some(key))
+    {
+        return Ok(definition.columns[index].id);
+    }
+    let matches = definition
+        .columns
+        .iter()
+        .filter(|column| column.display_name == key)
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [column] => Ok(column.id),
+        [] => anyhow::bail!("source operation references unknown column '{key}'"),
+        _ => anyhow::bail!("source operation column '{key}' is ambiguous"),
+    }
 }
 
 fn resolve_structured_options(detected: InputFormat, options: &OpenOptions) -> InputFormat {
@@ -151,6 +360,48 @@ fn resolve_structured_options(detected: InputFormat, options: &OpenOptions) -> I
     }
 }
 
+fn resolve_format(options: &OpenOptions, source: &InputSource, sample: &[u8]) -> InputFormat {
+    if options.format == InputFormat::Auto && has_delimited_options(options) {
+        if has_sqlite_signature(sample) {
+            #[cfg(feature = "sqlite")]
+            return InputFormat::Sqlite;
+        }
+        return InputFormat::Delimited;
+    }
+    FormatResolver::resolve(options.format, source, sample)
+}
+
+fn has_delimited_options(options: &OpenOptions) -> bool {
+    options.delimited.encoding.is_some()
+        || options.delimited.delimiter.is_some()
+        || options.delimited.quoting.is_some()
+        || options.delimited.quote_char != b'"'
+}
+
+fn has_sqlite_signature(sample: &[u8]) -> bool {
+    #[cfg(feature = "sqlite")]
+    {
+        sample.starts_with(b"SQLite format 3\0")
+    }
+    #[cfg(not(feature = "sqlite"))]
+    {
+        let _ = sample;
+        false
+    }
+}
+
+fn is_sqlite_format(format: InputFormat) -> bool {
+    #[cfg(feature = "sqlite")]
+    {
+        format == InputFormat::Sqlite
+    }
+    #[cfg(not(feature = "sqlite"))]
+    {
+        let _ = format;
+        false
+    }
+}
+
 fn format_from_extension(path: &Path) -> Option<InputFormat> {
     let extension = path.extension()?.to_str()?.to_ascii_lowercase();
     match extension.as_str() {
@@ -161,6 +412,10 @@ fn format_from_extension(path: &Path) -> Option<InputFormat> {
 }
 
 fn probe_content(sample: &[u8]) -> InputFormat {
+    #[cfg(feature = "sqlite")]
+    if has_sqlite_signature(sample) {
+        return InputFormat::Sqlite;
+    }
     let Ok(text) = std::str::from_utf8(sample) else {
         return InputFormat::Delimited;
     };
@@ -190,7 +445,7 @@ fn probe_content(sample: &[u8]) -> InputFormat {
 mod tests {
     use std::path::PathBuf;
 
-    use crate::table::RowCount;
+    use crate::table::{RowCount, SortDirection, SourceFilterOperator, SourceOperand};
 
     use super::*;
 
@@ -250,6 +505,28 @@ mod tests {
     }
 
     #[test]
+    fn remote_url_error_is_not_format_specific() {
+        for url in [
+            "https://example.com/data.json",
+            "http://example.com/data.csv",
+            "libsql://example.turso.io",
+            "HTTPS://example.com/data.json",
+            "LibSQL://example.turso.io",
+        ] {
+            let error = open_source(
+                InputSource::Path(PathBuf::from(url)),
+                &OpenOptions::default(),
+            )
+            .err()
+            .expect("remote URL must be rejected");
+            assert_eq!(
+                error.to_string(),
+                "remote URLs are unsupported; provide a local file path"
+            );
+        }
+    }
+
+    #[test]
     fn json_path_prevents_auto_format_from_falling_back_to_delimited() {
         let options = OpenOptions {
             json_path: Some("/rows".parse().unwrap()),
@@ -267,6 +544,107 @@ mod tests {
     }
 
     #[test]
+    fn delimited_options_override_auto_extension_and_content_detection() {
+        let options = OpenOptions {
+            delimited: super::super::ParseOptions {
+                delimiter: Some(b'|'),
+                ..super::super::ParseOptions::default()
+            },
+            ..OpenOptions::default()
+        };
+
+        assert_eq!(
+            resolve_format(
+                &options,
+                &InputSource::Path(PathBuf::from("data.json")),
+                br#"[{"a":1}]"#
+            ),
+            InputFormat::Delimited
+        );
+        assert_eq!(
+            resolve_format(
+                &options,
+                &InputSource::StreamingStdin(
+                    crate::ingest::source::StreamingInput::pending_for_test()
+                ),
+                b"{\"a\":1}\n{\"a\":2}\n"
+            ),
+            InputFormat::Delimited
+        );
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn sqlite_signature_precedes_delimited_options_under_auto() {
+        let options = OpenOptions {
+            delimited: super::super::ParseOptions {
+                delimiter: Some(b'|'),
+                ..super::super::ParseOptions::default()
+            },
+            ..OpenOptions::default()
+        };
+
+        assert_eq!(
+            resolve_format(
+                &options,
+                &InputSource::Path(PathBuf::from("database.data")),
+                b"SQLite format 3\0"
+            ),
+            InputFormat::Sqlite
+        );
+
+        let file = tempfile::NamedTempFile::new().expect("SQLite signature fixture");
+        std::fs::write(file.path(), b"SQLite format 3\0").expect("write signature");
+        let error = open_source(InputSource::Path(file.path().to_path_buf()), &options)
+            .err()
+            .expect("delimited options must be rejected");
+        assert!(error
+            .to_string()
+            .contains("options cannot be used with SQLite input"));
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn saved_object_mode_is_ignored_for_sqlite_but_cli_mode_is_rejected() {
+        let file = tempfile::NamedTempFile::new().expect("SQLite fixture");
+        let connection = rusqlite::Connection::open(file.path()).expect("SQLite connection");
+        connection
+            .execute_batch(
+                "CREATE TABLE users(id INTEGER PRIMARY KEY, name TEXT);
+                 INSERT INTO users VALUES (1, 'Ada');",
+            )
+            .expect("SQLite fixture data");
+        drop(connection);
+        let saved_options = OpenOptions {
+            object_mode: ObjectMode::Entries,
+            object_mode_origin: ObjectModeOrigin::SavedView,
+            table: Some("users".to_owned()),
+            ..OpenOptions::default()
+        };
+
+        let table = open_source(InputSource::Path(file.path().to_path_buf()), &saved_options)
+            .expect("saved mode ignored")
+            .into_implicit_table()
+            .expect("SQLite table");
+        assert!(table
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("object_mode") && warning.contains("ignored")));
+
+        let error = open_source(
+            InputSource::Path(file.path().to_path_buf()),
+            &OpenOptions {
+                object_mode_origin: ObjectModeOrigin::Cli,
+                ..saved_options
+            },
+        )
+        .err()
+        .expect("CLI mode rejected");
+        assert!(error.to_string().contains("object mode"));
+        assert!(error.to_string().contains("incompatible with sqlite"));
+    }
+
+    #[test]
     fn automatic_streaming_probe_selects_ndjson_without_waiting_for_eof() {
         let input = crate::ingest::source::StreamingInput::pending_for_test();
         input.append_for_test(b"{\"a\":1}\n{\"a\":2}\n");
@@ -278,5 +656,53 @@ mod tests {
         let table = source.into_implicit_table().expect("table");
         assert_eq!(table.store.row_count(), RowCount::AtLeast(2));
         input.finish_for_test();
+    }
+
+    #[test]
+    fn file_source_filter_treats_quoted_multiline_csv_as_one_record() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "id,note\n1,\"multi\nline\"\n2,single\n").unwrap();
+        let source = open_source(
+            InputSource::Path(file.path().to_path_buf()),
+            &OpenOptions {
+                source_filters: vec![super::super::SourceFilterRequest {
+                    column: "*".to_owned(),
+                    operator: SourceFilterOperator::Contains,
+                    operand: Some(SourceOperand::Text("multi\nline".to_owned())),
+                }],
+                limit: std::num::NonZeroUsize::new(10),
+                ..OpenOptions::default()
+            },
+        )
+        .unwrap();
+        let mut table = source.into_implicit_table().unwrap();
+        let materialized = table.store.materialize().unwrap();
+        assert_eq!(materialized.rows().len(), 1);
+        assert_eq!(materialized.rows()[0].cells[0].display(), "1");
+        assert!(matches!(
+            table.store.result_extent(),
+            Some(crate::table::ResultExtent::Complete { source_rows: 1 })
+        ));
+    }
+
+    #[test]
+    fn file_source_sort_fails_without_unbounded_fallback() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(file.path(), "id\n2\n1\n").unwrap();
+        let result = open_source(
+            InputSource::Path(file.path().to_path_buf()),
+            &OpenOptions {
+                source_sort: vec![super::super::SourceSortRequest {
+                    column: "id".to_owned(),
+                    direction: SortDirection::Ascending,
+                }],
+                ..OpenOptions::default()
+            },
+        );
+        assert!(result
+            .err()
+            .unwrap()
+            .to_string()
+            .contains("source sorting is unavailable"));
     }
 }

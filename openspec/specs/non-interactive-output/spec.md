@@ -30,7 +30,6 @@ Tabview SHALL resolve the independent `--interactive` flag and optional `--outpu
 #### Scenario: Interactive mode without a controlling terminal
 - **WHEN** `--interactive` is supplied, stdin/stdout are data streams, and no controlling terminal is available
 - **THEN** Tabview fails before consuming input or entering raw mode, writes a clear diagnostic to stderr, and emits no stdout
-
 ### Requirement: Explicit interactive transformation
 Combining `--interactive` with `--output <format>` SHALL treat the TUI as an interactive transformation stage. On normal quit, Tabview SHALL restore the terminal, complete input ingestion and late schema resolution, freeze the final live view state, prepare the complete logical result, and serialize it through the selected output adapter to stdout. Interactive sessions without `--output` SHALL NOT serialize their final live state.
 
@@ -49,7 +48,6 @@ Combining `--interactive` with `--output <format>` SHALL treat the TUI as an int
 #### Scenario: Cancellation or failure does not export
 - **WHEN** an interactive transform is cancelled or fails during terminal use, ingestion, final preparation, or terminal restoration
 - **THEN** Tabview emits no final table and exits according to the failure or cancellation contract
-
 ### Requirement: Terminal and data channel separation
 When interactive input or output occupies standard streams, Tabview SHALL use an available controlling terminal for UI events and drawing while reserving stdin for source bytes and stdout for serialized result bytes. UI control sequences, loading indicators, and screen content SHALL NOT be written to redirected stdout.
 
@@ -64,7 +62,6 @@ When interactive input or output occupies standard streams, Tabview SHALL use an
 #### Scenario: Terminal restored before output
 - **WHEN** an interactive transform quits normally
 - **THEN** raw mode and alternate-screen state are restored before the output adapter writes any final bytes
-
 ### Requirement: Non-interactive execution path
 In any batch output format, Tabview SHALL NOT enable raw mode, enter the alternate screen, draw loading/footer chrome, read terminal events, access the clipboard, or wait for user input.
 
@@ -75,49 +72,50 @@ In any batch output format, Tabview SHALL NOT enable raw mode, enter the alterna
 #### Scenario: Piped stdin and stdout
 - **WHEN** input is read from stdin and table output is piped to another process
 - **THEN** Tabview consumes stdin as data, writes the formatted table to stdout, and never attempts to read interactive input
-
 ### Requirement: Complete configured logical result
-Table mode SHALL render the complete logical result after applying source options and selected view configuration, including labels, column visibility and order, formats, widths, alignment, header visibility, filters, sort order, null placement, and source-derived schema updates. Cursor position, viewport origin, selection styling, search state, and TUI-only start position SHALL NOT limit or decorate the output.
+Batch output SHALL render the complete logical view after applying source options, the active bounded source result, and selected view configuration, including labels, column visibility and order, formats, widths, alignment, header visibility, view filters, view sort, null placement, and source-derived schema updates. Completion SHALL mean the entire active source result, not rows outside its configured source-query limit. Cursor position, viewport origin, selection styling, search state, and TUI-only start position SHALL NOT limit or decorate output.
 
 #### Scenario: Saved view controls output
-- **WHEN** an automatically selected or explicitly named saved view hides columns, formats values, filters rows, and sorts the result
-- **THEN** table output contains every row and visible column in that configured logical result and no hidden columns
+- **WHEN** an automatically selected or explicitly named saved view configures source operations, hides columns, formats values, filters rows, and sorts the view
+- **THEN** batch output contains every row and visible column in the final view of the bounded source result
+
+#### Scenario: SQLite source limit bounds output
+- **WHEN** SQLite batch output uses a source limit of 1000
+- **THEN** completion traverses at most those 1000 source rows even when the selected table contains more rows
+
+#### Scenario: View filter does not refill output
+- **WHEN** a view filter leaves 17 rows from a limited 1000-row SQLite result
+- **THEN** output contains those 17 rows and does not query for replacements
 
 #### Scenario: No saved view uses defaults
 - **WHEN** no saved view applies
-- **THEN** table output uses the normal source-defined headers, visible columns, display formatting, width mode, alignment defaults, and source order
+- **THEN** batch output uses source-defined headers, visible columns, display formatting, width mode, alignment defaults, source order, and the source's default result limit
 
 #### Scenario: Start position does not truncate output
-- **WHEN** a table-mode invocation includes an existing start-position argument
-- **THEN** the complete logical result is emitted because start position is an interactive cursor setting
+- **WHEN** a batch invocation includes an existing start-position argument
+- **THEN** the complete bounded logical result is emitted because start position is an interactive cursor setting
 
 #### Scenario: Late schema is included
-- **WHEN** a structured incremental source discovers additional columns while completing the output
-- **THEN** applicable saved configuration is resolved for those columns and the final output layout includes every resulting visible column
-
+- **WHEN** an incremental source discovers additional columns while completing its active result
+- **THEN** applicable saved configuration is resolved before final output layout
 ### Requirement: Stable complete-table widths
-Before writing the first table line, table mode SHALL complete the required source/query traversal and resolve one stable display width per visible column. It SHALL NOT derive an aggregate width from terminal dimensions, impose a total row-width cap, or automatically wrap or reflow output. Explicitly configured per-column fixed or maximum widths SHALL be honored; without an explicit per-column cap, each column SHALL expand to the widest normalized header or rendered value in the complete logical result.
+Before writing the first table line, table output SHALL complete the active bounded source result and resolve one stable display width per visible column. It SHALL NOT cross a source-query limit to discover wider values. Explicit per-column widths SHALL be honored; otherwise each column SHALL expand to the widest normalized header or rendered value in that active result.
 
 #### Scenario: Later wide value affects initial lines
-- **WHEN** a value near the end of the result is wider than earlier values and its column uses automatic width
-- **THEN** the header and every preceding row are padded using the final wider column width
+- **WHEN** a value near the end of the active result is wider than earlier values
+- **THEN** the header and preceding rows use that final wider column width
+
+#### Scenario: Wider value lies beyond SQLite limit
+- **WHEN** a wider database value exists outside the active source result
+- **THEN** it does not affect output width and is not fetched for profiling
 
 #### Scenario: Explicit width clips values
-- **WHEN** a saved view or CLI width mode supplies an explicit column width smaller than a rendered value
-- **THEN** that cell is clipped to the configured display width without shifting subsequent columns
+- **WHEN** saved view or CLI width configuration is smaller than a rendered value
+- **THEN** that cell is clipped without shifting later columns
 
-#### Scenario: Wide output remains unconstrained
-- **WHEN** the complete result requires a row wider than the terminal or downstream viewport and no per-column cap is configured
-- **THEN** Tabview emits the full-width row without wrapping, reflowing, or clipping it to an aggregate limit
-
-#### Scenario: Consumer controls presentation width
-- **WHEN** a caller wants truncation, wrapping, paging, horizontal scrolling, or reflow
-- **THEN** the caller composes table output with an appropriate downstream consumer rather than relying on terminal-width detection in Tabview
-
-#### Scenario: Incremental input is fully traversed
-- **WHEN** an incremental store supplies table output
-- **THEN** Tabview performs controlled complete traversal for rows, pending schema, query semantics, and width profiling before emission without relying on a terminal viewport
-
+#### Scenario: Incremental result is fully traversed
+- **WHEN** an incremental SQLite store supplies table output
+- **THEN** Tabview traverses the complete bounded result for rows and width profiling without relying on a terminal viewport
 ### Requirement: Deterministic fixed-width text format
 Plain table output SHALL emit zero or more newline-terminated physical lines. Each included header or data row SHALL contain visible cells in configured order, aligned and clipped by Unicode display width, separated by exactly the configured column gap, with no leading location field, borders, divider line, hidden-column markers, footer, or trailing spaces after the final cell.
 
@@ -152,7 +150,6 @@ Plain table output SHALL emit zero or more newline-terminated physical lines. Ea
 #### Scenario: Embedded control characters
 - **WHEN** a rendered cell contains newline, carriage-return, tab, escape, or another control character
 - **THEN** table mode replaces it with a visible escaped representation so one logical row remains one physical output line
-
 ### Requirement: Non-interactive color policy
 Tabview SHALL resolve color mode as `auto`, `always`, or `never`. In table output, `auto` and `never` SHALL emit no ANSI control sequences, while `always` SHALL emit ANSI styles derived from the resolved theme for headers, ordinary cells, and configured conditional cell colors.
 
@@ -171,7 +168,6 @@ Tabview SHALL resolve color mode as `auto`, `always`, or `never`. In table outpu
 #### Scenario: Styling does not affect width
 - **WHEN** ANSI styling is enabled
 - **THEN** escape sequences do not contribute to clipping, alignment, or padding calculations
-
 ### Requirement: Clean stdout and stderr contract
 Batch output and interactive final export SHALL reserve stdout for adapter bytes, write warnings and errors to stderr, return a nonzero status for failures other than downstream pipe closure, and treat `BrokenPipe` while writing stdout as a clean early termination without an additional diagnostic.
 
@@ -194,7 +190,6 @@ Batch output and interactive final export SHALL reserve stdout for adapter bytes
 #### Scenario: Same-file shell redirection is not supported
 - **WHEN** a caller redirects final output to the same pathname used as input
 - **THEN** safe in-place replacement is outside Tabview's contract because the shell may truncate the file before process startup; documentation directs callers to a distinct destination and notes that fixed-width table output does not preserve CSV or JSON source format
-
 ### Requirement: Modular output adapters
 Tabview SHALL dispatch each selected `OutputFormat` through a source-neutral output adapter in both direct and post-interactive lifecycles. Shared orchestration SHALL open the source, apply the saved or frozen live view, satisfy the adapter's declared preparation requirements, validate adapter capabilities, provide an immutable prepared projection, and own stdout, stderr, broken-pipe, and exit-status behavior. Format-specific adapters SHALL own only their layout, escaping, styling, and byte serialization rules.
 
@@ -213,18 +208,53 @@ Tabview SHALL dispatch each selected `OutputFormat` through a source-neutral out
 #### Scenario: Unsupported adapter capability
 - **WHEN** an output option such as `--color always` is incompatible with the selected adapter
 - **THEN** Tabview rejects the invocation before writing stdout with a clear diagnostic on stderr
-
 ### Requirement: Supported-source conversion
-Every output adapter SHALL consume every compatible source format supported by the normal format-aware opening path through the source-neutral table/view model rather than implementing input-format-specific exporters.
+Every output adapter SHALL consume every compatible source format, including SQLite, through the shared table/view model rather than implementing source-specific exporters.
 
 #### Scenario: CSV to text table
-- **WHEN** a delimited input is piped or explicitly rendered in table mode
+- **WHEN** a delimited input is rendered in table mode
 - **THEN** its source-defined columns and rows are emitted as fixed-width text
 
 #### Scenario: JSON to text table
 - **WHEN** a JSON array or keyed JSON object is rendered in table mode
-- **THEN** its resolved table rows and columns are emitted using the same JSON interpretation and saved-view rules as the interactive viewer
+- **THEN** its resolved rows and columns use the same interpretation and saved-view rules as the TUI
 
-#### Scenario: Future source adapter
-- **WHEN** a future adapter supplies a valid opened table and store
-- **THEN** each compatible output adapter can render it without source-specific output code
+#### Scenario: SQLite to text table
+- **WHEN** a SQLite table is resolved and rendered in table mode
+- **THEN** the existing output adapter serializes its bounded transformed view without SQLite-specific formatting code
+### Requirement: Non-interactive SQLite table selection
+Direct batch execution SHALL auto-select a sole selectable SQLite ordinary table or compatible ordinary view and SHALL require explicit CLI or saved selection when multiple selectable candidates remain.
+
+#### Scenario: Sole table in batch mode
+- **WHEN** direct batch execution discovers exactly one selectable candidate and no table is requested
+- **THEN** it opens that candidate and emits its bounded view
+
+#### Scenario: Saved table in batch mode
+- **WHEN** direct batch execution discovers multiple selectable candidates and `source.table` resolves one
+- **THEN** it opens that table without waiting for input
+
+#### Scenario: Ambiguous batch database
+- **WHEN** direct batch execution discovers multiple selectable candidates without `--table` or saved `source.table`
+- **THEN** it writes no stdout, reports the candidates and required selection on stderr, and exits nonzero
+
+#### Scenario: Interactive export can select
+- **WHEN** `--interactive --output table` opens an ambiguous database
+- **THEN** the startup table picker resolves the table before interaction and final export uses that selected table
+### Requirement: SQLite output query completion
+Direct and post-interactive output SHALL prepare the latest requested bounded SQLite source result before passing an immutable projection to the selected output adapter.
+
+#### Scenario: Direct output waits for initial query
+- **WHEN** the initial SQLite source query is still running
+- **THEN** the output driver writes no stdout until the query and required bounded traversal succeed
+
+#### Scenario: Interactive export waits for latest query
+- **WHEN** normal interactive quit requests final output while a newer source-query revision is pending
+- **THEN** final preparation awaits the latest revision before freezing and serializing the view
+
+#### Scenario: Query preparation fails
+- **WHEN** the required SQLite query or bounded traversal fails
+- **THEN** no table bytes are emitted and the existing output error contract applies
+
+#### Scenario: Generated SQL stays out of adapter output
+- **WHEN** SQLite query provenance exists during normal table serialization
+- **THEN** stdout contains only the selected output adapter's bytes

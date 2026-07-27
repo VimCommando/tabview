@@ -7,11 +7,15 @@ use serde::Deserialize;
 use yaml_serde::{Mapping, Value};
 
 use crate::ingest::{
-    InputFormat, JsonPointer, ObjectMode, OpenOptions, SchemaScan, SourceOptionOverrides,
+    InputFormat, JsonPointer, ObjectMode, OpenOptions, SchemaScan, SourceFilterRequest,
+    SourceOptionOverrides, SourceSortRequest,
 };
 #[cfg(test)]
 use crate::table::ColumnSourceIdentity;
-use crate::table::{NullPlacement, SchemaState, TableDefinition};
+use crate::table::{
+    NullPlacement, SchemaState, SortDirection as TableSortDirection,
+    SourceFilterOperator as TableSourceFilterOperator, SourceOperand, TableDefinition,
+};
 use crate::theme::{
     ConditionalColorRule, ConditionalValue, GradientStop, IdentifierColors, MatchEntry, RangeEntry,
 };
@@ -19,28 +23,77 @@ use crate::theme::{
 pub const MAX_SORT_KEYS: usize = 3;
 const VIEW_DIR: &str = "tabview/views";
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SavedView {
     pub name: String,
-    pub locale: Option<String>,
     pub filenames: Vec<FilenamePattern>,
+    pub source: SavedSourceConfig,
+    pub view: SavedViewConfig,
+}
+
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct SavedSourceConfig {
     pub format: Option<InputFormat>,
     pub json_path: Option<JsonPointer>,
     pub object_mode: Option<ObjectMode>,
     pub schema_scan: Option<SchemaScan>,
+    pub table: Option<String>,
+    pub limit: Option<usize>,
+    pub filters: Vec<SavedSourceFilter>,
+    pub sort: Vec<SavedSourceSort>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SavedViewConfig {
+    pub locale: Option<String>,
     pub nulls: Option<NullPlacement>,
     pub columns: BTreeMap<String, ColumnView>,
     pub sort: Vec<SortKey>,
     pub filters: Vec<SavedFilter>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub struct SavedSourceFilter {
+    pub column: String,
+    pub operator: SourceFilterOperator,
+    pub value: Option<SourceFilterValue>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceFilterOperator {
+    Equal,
+    NotEqual,
+    LessThan,
+    LessOrEqual,
+    GreaterThan,
+    GreaterOrEqual,
+    Contains,
+    Prefix,
+    IsNull,
+    IsNotNull,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SourceFilterValue {
+    Boolean(bool),
+    Integer(i64),
+    Float(f64),
+    Text(String),
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedSourceSort {
+    pub column: String,
+    pub direction: SortDirection,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct ValidatedSavedView {
     pub view: SavedView,
     pub warnings: Vec<SavedViewWarning>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SavedViewFile {
     pub path: PathBuf,
     pub canonical_name: String,
@@ -48,13 +101,13 @@ pub struct SavedViewFile {
     pub warnings: Vec<SavedViewWarning>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct SavedViewDiscovery {
     pub views: Vec<SavedViewFile>,
     pub warnings: Vec<SavedViewWarning>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SelectedSavedView<'a> {
     pub view: &'a SavedViewFile,
     pub warnings: Vec<SavedViewWarning>,
@@ -226,12 +279,30 @@ pub enum SavedViewParseError {
 #[serde(deny_unknown_fields)]
 struct RawSavedView {
     name: String,
-    locale: Option<String>,
     filenames: Vec<String>,
+    source: RawSavedSourceConfig,
+    view: RawSavedViewConfig,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSavedSourceConfig {
     format: Option<String>,
     json_path: Option<String>,
     object_mode: Option<String>,
     schema_scan: Option<String>,
+    table: Option<String>,
+    limit: Option<usize>,
+    #[serde(default)]
+    filters: Vec<RawSavedSourceFilter>,
+    #[serde(default)]
+    sort: Vec<RawSavedSourceSort>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSavedViewConfig {
+    locale: Option<String>,
     nulls: Option<String>,
     #[serde(default)]
     columns: BTreeMap<String, RawColumnView>,
@@ -311,6 +382,29 @@ struct RawSavedFilter {
     action: String,
     kind: String,
     condition: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSavedSourceFilter {
+    column: String,
+    operator: String,
+    #[serde(default, deserialize_with = "deserialize_present_value")]
+    value: Option<Value>,
+}
+
+fn deserialize_present_value<'de, D>(deserializer: D) -> Result<Option<Value>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Value::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawSavedSourceSort {
+    column: String,
+    direction: String,
 }
 
 pub fn parse_saved_view_yaml(input: &str) -> Result<ValidatedSavedView, SavedViewParseError> {
@@ -467,6 +561,7 @@ pub fn resolve_columns(view: &SavedView, headers: &[String]) -> ResolvedColumns 
 
     for (column_index, header) in headers.iter().enumerate() {
         if let Some((key, column_view)) = view
+            .view
             .columns
             .iter()
             .find(|(key, _)| key.eq_ignore_ascii_case(header))
@@ -481,6 +576,7 @@ pub fn resolve_columns(view: &SavedView, headers: &[String]) -> ResolvedColumns 
         }
 
         let mut wildcard_matches = view
+            .view
             .columns
             .iter()
             .filter(|(key, _)| is_wildcard_pattern(key))
@@ -500,12 +596,13 @@ pub fn resolve_columns(view: &SavedView, headers: &[String]) -> ResolvedColumns 
     }
 
     let warnings = view
+        .view
         .columns
         .keys()
         .filter(|key| !matched_keys.contains(*key))
         .map(|key| {
             warning(
-                format!("columns.{key}"),
+                format!("view.columns.{key}"),
                 "configured column matched no header",
             )
         })
@@ -534,9 +631,10 @@ pub fn resolve_structured_columns(
     }
 
     for (index, column) in definition.columns.iter().enumerate() {
-        let canonical = column.source_identity.canonical_key();
-        if let Some((key, column_view)) =
-            canonical.and_then(|canonical| view.columns.get_key_value(canonical))
+        let canonical = definition.canonical_column_key(index);
+        if let Some((key, column_view)) = canonical
+            .as_deref()
+            .and_then(|canonical| view.view.columns.get_key_value(canonical))
         {
             matched_keys.insert(key.clone());
             resolved[index] = Some(ResolvedColumnView {
@@ -552,7 +650,8 @@ pub fn resolve_structured_columns(
             .copied()
             .unwrap_or_default();
         if label_matches == 1 {
-            if let Some((key, column_view)) = view.columns.get_key_value(&column.display_name) {
+            if let Some((key, column_view)) = view.view.columns.get_key_value(&column.display_name)
+            {
                 matched_keys.insert(key.clone());
                 resolved[index] = Some(ResolvedColumnView {
                     column_index: index,
@@ -560,18 +659,18 @@ pub fn resolve_structured_columns(
                     view: column_view.clone(),
                 });
             }
-        } else if view.columns.contains_key(&column.display_name)
+        } else if view.view.columns.contains_key(&column.display_name)
             && warned_ambiguous_labels.insert(column.display_name.clone())
         {
             warnings.push(warning(
-                format!("columns.{}", column.display_name),
-                "display label is ambiguous; use a canonical JSON Pointer",
+                format!("view.columns.{}", column.display_name),
+                "display label is ambiguous; use a canonical source key such as name#2",
             ));
         }
     }
 
     let mut pending = BTreeMap::new();
-    for (key, column_view) in &view.columns {
+    for (key, column_view) in &view.view.columns {
         if matched_keys.contains(key) {
             continue;
         }
@@ -579,7 +678,7 @@ pub fn resolve_structured_columns(
             pending.insert(key.clone(), column_view.clone());
         } else {
             warnings.push(warning(
-                format!("columns.{key}"),
+                format!("view.columns.{key}"),
                 "configured column matched no structured source column",
             ));
         }
@@ -615,7 +714,8 @@ pub fn resolve_structured_column_reference(
     definition
         .columns
         .iter()
-        .position(|column| column.source_identity.canonical_key() == Some(key))
+        .enumerate()
+        .position(|(index, _)| definition.canonical_column_key(index).as_deref() == Some(key))
         .or_else(|| {
             let matches = definition
                 .columns
@@ -630,67 +730,104 @@ pub fn resolve_structured_column_reference(
 
 fn validate_raw_view(raw: RawSavedView) -> ValidatedSavedView {
     let mut warnings = Vec::new();
-    let format = raw.format.and_then(|value| match value.parse() {
-        Ok(value) => Some(value),
-        Err(_) => {
-            warnings.push(warning("format", format!("unknown input format '{value}'")));
-            None
-        }
-    });
-    let json_path = raw.json_path.and_then(|value| match value.parse() {
+    let format = raw.source.format.and_then(|value| match value.parse() {
         Ok(value) => Some(value),
         Err(_) => {
             warnings.push(warning(
-                "json_path",
+                "source.format",
+                format!("unknown input format '{value}'"),
+            ));
+            None
+        }
+    });
+    let json_path = raw.source.json_path.and_then(|value| match value.parse() {
+        Ok(value) => Some(value),
+        Err(_) => {
+            warnings.push(warning(
+                "source.json_path",
                 format!("invalid RFC 6901 JSON Pointer '{value}'"),
             ));
             None
         }
     });
-    let mut object_mode = raw.object_mode.and_then(|value| match value.parse() {
-        Ok(value) => Some(value),
-        Err(_) => {
-            warnings.push(warning(
-                "object_mode",
-                format!("unknown object mode '{value}'"),
-            ));
-            None
-        }
-    });
+    let mut object_mode = raw
+        .source
+        .object_mode
+        .and_then(|value| match value.parse() {
+            Ok(value) => Some(value),
+            Err(_) => {
+                warnings.push(warning(
+                    "source.object_mode",
+                    format!("unknown object mode '{value}'"),
+                ));
+                None
+            }
+        });
     if matches!(format, Some(InputFormat::Delimited | InputFormat::Ndjson))
         && matches!(object_mode, Some(ObjectMode::Record | ObjectMode::Entries))
     {
         warnings.push(warning(
-            "object_mode",
+            "source.object_mode",
             "object mode is incompatible with the selected row-stream format",
         ));
         object_mode = None;
     }
-    let schema_scan = raw.schema_scan.and_then(|value| match value.parse() {
-        Ok(value) => Some(value),
-        Err(_) => {
-            warnings.push(warning(
-                "schema_scan",
-                format!("unknown schema scan policy '{value}'"),
-            ));
+    let schema_scan = raw
+        .source
+        .schema_scan
+        .and_then(|value| match value.parse() {
+            Ok(value) => Some(value),
+            Err(_) => {
+                warnings.push(warning(
+                    "source.schema_scan",
+                    format!("unknown schema scan policy '{value}'"),
+                ));
+                None
+            }
+        });
+    let table = raw.source.table.and_then(|value| {
+        if value.is_empty() {
+            warnings.push(warning("source.table", "table cannot be empty"));
             None
+        } else {
+            Some(value)
         }
     });
-    let nulls = raw.nulls.and_then(|value| {
+    let limit = raw.source.limit.and_then(|value| {
+        if value == 0 {
+            warnings.push(warning("source.limit", "limit must be greater than zero"));
+            None
+        } else {
+            Some(value)
+        }
+    });
+    let source_filters = raw
+        .source
+        .filters
+        .into_iter()
+        .filter_map(|filter| validate_source_filter(filter, &mut warnings))
+        .collect();
+    let source_sort = raw
+        .source
+        .sort
+        .into_iter()
+        .filter_map(|sort| validate_source_sort(sort, &mut warnings))
+        .collect();
+    let nulls = raw.view.nulls.and_then(|value| {
         parse_null_placement(&value).or_else(|| {
             warnings.push(warning(
-                "nulls",
+                "view.nulls",
                 format!("unknown null placement '{value}'"),
             ));
             None
         })
     });
-    let locale = raw.locale.and_then(|locale| {
+    let locale = raw.view.locale.and_then(|locale| {
         if is_posix_locale(&locale) {
             Some(locale)
         } else {
             warnings.push(warning(
-                "locale",
+                "view.locale",
                 format!("unsupported POSIX-style locale '{locale}', falling back to en_US"),
             ));
             None
@@ -702,12 +839,14 @@ fn validate_raw_view(raw: RawSavedView) -> ValidatedSavedView {
         .filter_map(|pattern| validate_filename_pattern(pattern, &mut warnings))
         .collect();
     let columns = raw
+        .view
         .columns
         .into_iter()
         .filter_map(|(key, raw_column)| validate_column(key, raw_column, &mut warnings))
         .collect();
-    let sort_count = raw.sort.len();
+    let sort_count = raw.view.sort.len();
     let sort = raw
+        .view
         .sort
         .into_iter()
         .take(MAX_SORT_KEYS)
@@ -715,11 +854,12 @@ fn validate_raw_view(raw: RawSavedView) -> ValidatedSavedView {
         .collect::<Vec<_>>();
     if sort_count > MAX_SORT_KEYS {
         warnings.push(warning(
-            "sort",
+            "view.sort",
             format!("only the first {MAX_SORT_KEYS} sort keys are used"),
         ));
     }
     let filters = raw
+        .view
         .filters
         .into_iter()
         .filter_map(|filter| validate_filter(filter, &mut warnings))
@@ -728,16 +868,24 @@ fn validate_raw_view(raw: RawSavedView) -> ValidatedSavedView {
     ValidatedSavedView {
         view: SavedView {
             name: raw.name,
-            locale,
             filenames,
-            format,
-            json_path,
-            object_mode,
-            schema_scan,
-            nulls,
-            columns,
-            sort,
-            filters,
+            source: SavedSourceConfig {
+                format,
+                json_path,
+                object_mode,
+                schema_scan,
+                table,
+                limit,
+                filters: source_filters,
+                sort: source_sort,
+            },
+            view: SavedViewConfig {
+                locale,
+                nulls,
+                columns,
+                sort,
+                filters,
+            },
         },
         warnings,
     }
@@ -942,19 +1090,19 @@ fn validate_column(
     warnings: &mut Vec<SavedViewWarning>,
 ) -> Option<(String, ColumnView)> {
     if key.is_empty() {
-        warnings.push(warning("columns", "empty column key ignored"));
+        warnings.push(warning("view.columns", "empty column key ignored"));
         return None;
     }
     if is_wildcard_pattern(&key) {
         if let Err(message) = validate_glob_pattern(&key) {
             warnings.push(warning(
-                format!("columns.{key}"),
+                format!("view.columns.{key}"),
                 format!("invalid wildcard column key: {message}"),
             ));
             return None;
         }
     }
-    let field = |name: &str| format!("columns.{key}.{name}");
+    let field = |name: &str| format!("view.columns.{key}.{name}");
     let column_type = raw.column_type.and_then(|value| {
         parse_column_type(&value).or_else(|| {
             warnings.push(warning(
@@ -1382,14 +1530,14 @@ fn gradient_stop_value_from_yaml_key(key: Value) -> Option<f64> {
 fn validate_sort(raw: RawSortKey, warnings: &mut Vec<SavedViewWarning>) -> Option<SortKey> {
     let direction = parse_sort_direction(&raw.direction).or_else(|| {
         warnings.push(warning(
-            "sort.direction",
+            "view.sort.direction",
             format!("unknown sort direction '{}'", raw.direction),
         ));
         None
     })?;
     let kind = parse_sort_kind(&raw.kind).or_else(|| {
         warnings.push(warning(
-            "sort.kind",
+            "view.sort.kind",
             format!("unknown sort kind '{}'", raw.kind),
         ));
         None
@@ -1407,14 +1555,14 @@ fn validate_filter(
 ) -> Option<SavedFilter> {
     let action = parse_filter_action(&raw.action).or_else(|| {
         warnings.push(warning(
-            "filters.action",
+            "view.filters.action",
             format!("unknown filter action '{}'", raw.action),
         ));
         None
     })?;
     let kind = parse_filter_kind(&raw.kind).or_else(|| {
         warnings.push(warning(
-            "filters.kind",
+            "view.filters.kind",
             format!("unknown filter kind '{}'", raw.kind),
         ));
         None
@@ -1422,7 +1570,7 @@ fn validate_filter(
     if kind == FilterKind::Regex {
         if let Err(err) = Regex::new(&raw.condition) {
             warnings.push(warning(
-                "filters.condition",
+                "view.filters.condition",
                 format!("invalid regex filter condition '{}': {err}", raw.condition),
             ));
             return None;
@@ -1434,6 +1582,97 @@ fn validate_filter(
         kind,
         condition: raw.condition,
     })
+}
+
+fn validate_source_filter(
+    raw: RawSavedSourceFilter,
+    warnings: &mut Vec<SavedViewWarning>,
+) -> Option<SavedSourceFilter> {
+    if raw.column.is_empty() {
+        warnings.push(warning(
+            "source.filters.column",
+            "source filter column cannot be empty",
+        ));
+        return None;
+    }
+    let operator = parse_source_filter_operator(&raw.operator).or_else(|| {
+        warnings.push(warning(
+            "source.filters.operator",
+            format!("unknown source filter operator '{}'", raw.operator),
+        ));
+        None
+    })?;
+    let expects_value = !matches!(
+        operator,
+        SourceFilterOperator::IsNull | SourceFilterOperator::IsNotNull
+    );
+    let value = if expects_value {
+        let Some(value) = raw.value else {
+            warnings.push(warning(
+                "source.filters.value",
+                "source filter operator requires a non-null scalar value",
+            ));
+            return None;
+        };
+        let Some(value) = source_filter_value(value) else {
+            warnings.push(warning(
+                "source.filters.value",
+                "source filter value must be a non-null scalar",
+            ));
+            return None;
+        };
+        Some(value)
+    } else {
+        if raw.value.is_some() {
+            warnings.push(warning(
+                "source.filters.value",
+                "null-test source filter ignores its value",
+            ));
+        }
+        None
+    };
+    Some(SavedSourceFilter {
+        column: raw.column,
+        operator,
+        value,
+    })
+}
+
+fn validate_source_sort(
+    raw: RawSavedSourceSort,
+    warnings: &mut Vec<SavedViewWarning>,
+) -> Option<SavedSourceSort> {
+    if raw.column.is_empty() {
+        warnings.push(warning(
+            "source.sort.column",
+            "source sort column cannot be empty",
+        ));
+        return None;
+    }
+    let direction = parse_sort_direction(&raw.direction).or_else(|| {
+        warnings.push(warning(
+            "source.sort.direction",
+            format!("unknown sort direction '{}'", raw.direction),
+        ));
+        None
+    })?;
+    Some(SavedSourceSort {
+        column: raw.column,
+        direction,
+    })
+}
+
+fn source_filter_value(value: Value) -> Option<SourceFilterValue> {
+    match value {
+        Value::Null => None,
+        Value::Bool(value) => Some(SourceFilterValue::Boolean(value)),
+        Value::Number(value) => value
+            .as_i64()
+            .map(SourceFilterValue::Integer)
+            .or_else(|| value.as_f64().map(SourceFilterValue::Float)),
+        Value::String(value) => Some(SourceFilterValue::Text(value)),
+        _ => None,
+    }
 }
 
 fn parse_column_type(value: &str) -> Option<ColumnType> {
@@ -1524,10 +1763,58 @@ fn parse_null_placement(value: &str) -> Option<NullPlacement> {
 impl SavedView {
     pub fn source_options(&self) -> SourceOptionOverrides {
         SourceOptionOverrides {
-            format: self.format,
-            json_path: self.json_path.clone(),
-            object_mode: self.object_mode,
-            schema_scan: self.schema_scan,
+            format: self.source.format,
+            json_path: self.source.json_path.clone(),
+            object_mode: self.source.object_mode,
+            schema_scan: self.source.schema_scan,
+            table: self.source.table.clone(),
+            limit: self.source.limit.and_then(std::num::NonZeroUsize::new),
+            source_filters: Some(
+                self.source
+                    .filters
+                    .iter()
+                    .map(|filter| SourceFilterRequest {
+                        column: filter.column.clone(),
+                        operator: match filter.operator {
+                            SourceFilterOperator::Equal => TableSourceFilterOperator::Equal,
+                            SourceFilterOperator::NotEqual => TableSourceFilterOperator::NotEqual,
+                            SourceFilterOperator::LessThan => TableSourceFilterOperator::LessThan,
+                            SourceFilterOperator::LessOrEqual => {
+                                TableSourceFilterOperator::LessThanOrEqual
+                            }
+                            SourceFilterOperator::GreaterThan => {
+                                TableSourceFilterOperator::GreaterThan
+                            }
+                            SourceFilterOperator::GreaterOrEqual => {
+                                TableSourceFilterOperator::GreaterThanOrEqual
+                            }
+                            SourceFilterOperator::Contains => TableSourceFilterOperator::Contains,
+                            SourceFilterOperator::Prefix => TableSourceFilterOperator::Prefix,
+                            SourceFilterOperator::IsNull => TableSourceFilterOperator::IsNull,
+                            SourceFilterOperator::IsNotNull => TableSourceFilterOperator::IsNotNull,
+                        },
+                        operand: filter.value.as_ref().map(|value| match value {
+                            SourceFilterValue::Boolean(value) => SourceOperand::Boolean(*value),
+                            SourceFilterValue::Integer(value) => SourceOperand::Integer(*value),
+                            SourceFilterValue::Float(value) => SourceOperand::Float(*value),
+                            SourceFilterValue::Text(value) => SourceOperand::Text(value.clone()),
+                        }),
+                    })
+                    .collect(),
+            ),
+            source_sort: Some(
+                self.source
+                    .sort
+                    .iter()
+                    .map(|sort| SourceSortRequest {
+                        column: sort.column.clone(),
+                        direction: match sort.direction {
+                            SortDirection::Asc => TableSortDirection::Ascending,
+                            SortDirection::Desc => TableSortDirection::Descending,
+                        },
+                    })
+                    .collect(),
+            ),
         }
     }
 
@@ -1544,6 +1831,22 @@ fn parse_sort_direction(value: &str) -> Option<SortDirection> {
     match value {
         "asc" => Some(SortDirection::Asc),
         "desc" => Some(SortDirection::Desc),
+        _ => None,
+    }
+}
+
+fn parse_source_filter_operator(value: &str) -> Option<SourceFilterOperator> {
+    match value {
+        "equal" => Some(SourceFilterOperator::Equal),
+        "not_equal" => Some(SourceFilterOperator::NotEqual),
+        "less_than" => Some(SourceFilterOperator::LessThan),
+        "less_or_equal" => Some(SourceFilterOperator::LessOrEqual),
+        "greater_than" => Some(SourceFilterOperator::GreaterThan),
+        "greater_or_equal" => Some(SourceFilterOperator::GreaterOrEqual),
+        "contains" => Some(SourceFilterOperator::Contains),
+        "prefix" => Some(SourceFilterOperator::Prefix),
+        "is_null" => Some(SourceFilterOperator::IsNull),
+        "is_not_null" => Some(SourceFilterOperator::IsNotNull),
         _ => None,
     }
 }
@@ -1604,43 +1907,141 @@ mod tests {
         let parsed = parse_saved_view_yaml(
             r##"
 name: shards
-locale: en_US
 filenames:
   - cat_shards.txt
   - "*shards*"
-columns:
-  Index:
-    type: string
-    width: 20
-  docs:
-    type: integer
-    format: mask
-    mask: "#,##0"
-    visible: false
-sort:
-  - column: docs
-    direction: desc
-    kind: numeric
-filters:
-  - column: docs
-    action: in
-    kind: numeric
-    condition: ">0"
+source: {}
+view:
+  locale: en_US
+  columns:
+    Index:
+      type: string
+      width: 20
+    docs:
+      type: integer
+      format: mask
+      mask: "#,##0"
+      visible: false
+  sort:
+    - column: docs
+      direction: desc
+      kind: numeric
+  filters:
+    - column: docs
+      action: in
+      kind: numeric
+      condition: ">0"
 "##,
         )
         .expect("parse");
 
         assert!(parsed.warnings.is_empty());
         assert_eq!(parsed.view.name, "shards");
-        assert_eq!(parsed.view.locale.as_deref(), Some("en_US"));
+        assert_eq!(parsed.view.view.locale.as_deref(), Some("en_US"));
         assert_eq!(parsed.view.filenames[0].kind, FilenamePatternKind::Exact);
         assert_eq!(parsed.view.filenames[1].kind, FilenamePatternKind::Glob);
         assert_eq!(
-            parsed.view.columns.get("docs").expect("docs").column_type,
+            parsed
+                .view
+                .view
+                .columns
+                .get("docs")
+                .expect("docs")
+                .column_type,
             Some(ColumnType::Number(NumberKind::Int))
         );
-        assert_eq!(parsed.view.sort.len(), 1);
-        assert_eq!(parsed.view.filters.len(), 1);
+        assert_eq!(parsed.view.view.sort.len(), 1);
+        assert_eq!(parsed.view.view.filters.len(), 1);
+    }
+
+    #[cfg(feature = "sqlite")]
+    #[test]
+    fn parses_nested_source_query_and_view_configuration() {
+        let parsed = parse_saved_view_yaml(
+            r#"
+name: recent
+filenames: [transactions.db]
+source:
+  format: sqlite
+  table: transactions
+  limit: 2500
+  filters:
+    - column: settled
+      operator: equal
+      value: true
+    - column: deleted_at
+      operator: is_null
+  sort:
+    - column: timestamp
+      direction: desc
+view:
+  locale: en_US
+  nulls: last
+  filters:
+    - column: description
+      action: in
+      kind: regex
+      condition: '^invoice-'
+  sort:
+    - column: user
+      direction: asc
+      kind: natural
+"#,
+        )
+        .expect("parse");
+
+        assert!(parsed.warnings.is_empty());
+        assert_eq!(parsed.view.source.format, Some(InputFormat::Sqlite));
+        assert_eq!(parsed.view.source.table.as_deref(), Some("transactions"));
+        assert_eq!(parsed.view.source.limit, Some(2500));
+        assert_eq!(parsed.view.source.filters.len(), 2);
+        assert_eq!(
+            parsed.view.source.filters[0].value,
+            Some(SourceFilterValue::Boolean(true))
+        );
+        assert_eq!(parsed.view.source.sort.len(), 1);
+        assert_eq!(parsed.view.view.filters.len(), 1);
+        assert_eq!(parsed.view.view.sort.len(), 1);
+    }
+
+    #[test]
+    fn explicit_null_source_operand_is_rejected_by_runtime_and_schema() {
+        let parsed = parse_saved_view_yaml(
+            r#"
+name: null-operand
+filenames: [data.csv]
+source:
+  filters:
+    - column: deleted_at
+      operator: equal
+      value: null
+view: {}
+"#,
+        )
+        .expect("parse");
+
+        assert!(parsed.view.source.filters.is_empty());
+        assert!(parsed.warnings.iter().any(|warning| {
+            warning.field == "source.filters.value" && warning.message.contains("non-null scalar")
+        }));
+
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../schemas/view.schema.json"))
+                .expect("saved view schema");
+        assert_eq!(
+            schema.pointer("/$defs/sourceFilter/allOf/0/else/properties/value/not/type"),
+            Some(&serde_json::Value::String("null".to_owned()))
+        );
+    }
+
+    #[test]
+    fn rejects_legacy_flat_saved_view_fields() {
+        let error = parse_saved_view_yaml(
+            "name: legacy\nfilenames: [data.csv]\ncolumns: {}\nsource: {}\nview: {}\n",
+        )
+        .expect_err("legacy root field must fail");
+
+        assert!(error.to_string().contains("unknown field `columns`"));
     }
 
     #[test]
@@ -1649,27 +2050,36 @@ filters:
             r#"
 name: elastic
 filenames: [response.json]
-format: json
-json_path: /hits/hits
-schema_scan: full
-nulls: first
-columns:
-  /_source/user/email:
-    label: User email
-    nulls: last
+source:
+  format: json
+  json_path: /hits/hits
+  schema_scan: full
+view:
+  nulls: first
+  columns:
+    /_source/user/email:
+      label: User email
+      nulls: last
 "#,
         )
         .expect("parse");
 
         assert!(parsed.warnings.is_empty());
-        assert_eq!(parsed.view.format, Some(InputFormat::Json));
+        assert_eq!(parsed.view.source.format, Some(InputFormat::Json));
         assert_eq!(
-            parsed.view.json_path.as_ref().expect("path").segments(),
+            parsed
+                .view
+                .source
+                .json_path
+                .as_ref()
+                .expect("path")
+                .segments(),
             ["hits", "hits"]
         );
-        assert_eq!(parsed.view.schema_scan, Some(SchemaScan::Full));
-        assert_eq!(parsed.view.nulls, Some(NullPlacement::First));
+        assert_eq!(parsed.view.source.schema_scan, Some(SchemaScan::Full));
+        assert_eq!(parsed.view.view.nulls, Some(NullPlacement::First));
         let email = parsed
+            .view
             .view
             .columns
             .get("/_source/user/email")
@@ -1694,13 +2104,15 @@ columns:
             r#"
 name: keyed
 filenames: [repositories.json]
-format: json
-object_mode: record
+source:
+  format: json
+  object_mode: record
+view: {}
 "#,
         )
         .expect("parse");
         assert!(parsed.warnings.is_empty());
-        assert_eq!(parsed.view.object_mode, Some(ObjectMode::Record));
+        assert_eq!(parsed.view.source.object_mode, Some(ObjectMode::Record));
         let merged = parsed.view.merged_open_options(
             OpenOptions::default(),
             &SourceOptionOverrides {
@@ -1714,19 +2126,21 @@ object_mode: record
             crate::ingest::ObjectModeOrigin::Cli
         );
 
-        let invalid = parse_saved_view_yaml("name: bad\nfilenames: [data]\nobject_mode: rows\n")
-            .expect("parse invalid");
-        assert_eq!(invalid.view.object_mode, None);
+        let invalid = parse_saved_view_yaml(
+            "name: bad\nfilenames: [data]\nsource:\n  object_mode: rows\nview: {}\n",
+        )
+        .expect("parse invalid");
+        assert_eq!(invalid.view.source.object_mode, None);
         assert!(invalid
             .warnings
             .iter()
-            .any(|warning| warning.field == "object_mode"));
+            .any(|warning| warning.field == "source.object_mode"));
 
         let row_stream = parse_saved_view_yaml(
-            "name: stream\nfilenames: [rows.ndjson]\nformat: ndjson\nobject_mode: entries\n",
+            "name: stream\nfilenames: [rows.ndjson]\nsource:\n  format: ndjson\n  object_mode: entries\nview: {}\n",
         )
         .expect("parse stream");
-        assert_eq!(row_stream.view.object_mode, None);
+        assert_eq!(row_stream.view.source.object_mode, None);
         assert!(row_stream
             .warnings
             .iter()
@@ -1746,7 +2160,7 @@ object_mode: record
             (ObjectMode::Record, crate::table::RowCount::Exact(1)),
         ] {
             let parsed = parse_saved_view_yaml(&format!(
-                "name: objects\nfilenames: [objects.json]\nformat: json\nobject_mode: {mode}\n"
+                "name: objects\nfilenames: [objects.json]\nsource:\n  format: json\n  object_mode: {mode}\nview: {{}}\n"
             ))
             .expect("saved view");
             let options = parsed
@@ -1775,9 +2189,11 @@ object_mode: record
             r#"
 name: keyed
 filenames: [repositories.json]
-columns:
-  "@key":
-    label: Repository
+source: {}
+view:
+  columns:
+    "@key":
+      label: Repository
 "#,
         )
         .expect("parse");
@@ -1791,6 +2207,7 @@ columns:
                 },
                 source_identity: ColumnSourceIdentity::ObjectKey,
                 display_name: "name".to_owned(),
+                source_declared_type: None,
                 source_type: crate::table::LogicalType::Text,
                 type_origin: crate::table::TypeOrigin::Declared,
             }],
@@ -1812,22 +2229,24 @@ columns:
             r#"
 name: bad-source
 filenames: [data]
-format: sqlite
-json_path: hits/hits
-schema_scan: endless
-nulls: middle
-columns:
-  a:
-    label: ""
-    nulls: middle
+source:
+  format: parquet
+  json_path: hits/hits
+  schema_scan: endless
+view:
+  nulls: middle
+  columns:
+    a:
+      label: ""
+      nulls: middle
 "#,
         )
         .expect("parse");
         assert_eq!(parsed.warnings.len(), 6);
-        assert_eq!(parsed.view.format, None);
-        assert_eq!(parsed.view.json_path, None);
-        assert_eq!(parsed.view.schema_scan, None);
-        assert_eq!(parsed.view.nulls, None);
+        assert_eq!(parsed.view.source.format, None);
+        assert_eq!(parsed.view.source.json_path, None);
+        assert_eq!(parsed.view.source.schema_scan, None);
+        assert_eq!(parsed.view.view.nulls, None);
     }
 
     #[test]
@@ -1835,30 +2254,32 @@ columns:
         let parsed = parse_saved_view_yaml(
             r#"
 name: bad
-locale: "?"
 filenames:
   - "[broken"
-columns:
-  "*count":
-    type: text
-    format: mask
-    mask: "bad"
-sort:
-  - column: count
-    direction: sideways
-    kind: numeric
-filters:
-  - column: name
-    action: in
-    kind: regex
-    condition: "["
+source: {}
+view:
+  locale: "?"
+  columns:
+    "*count":
+      type: text
+      format: mask
+      mask: "bad"
+  sort:
+    - column: count
+      direction: sideways
+      kind: numeric
+  filters:
+    - column: name
+      action: in
+      kind: regex
+      condition: "["
 "#,
         )
         .expect("parse");
 
         assert!(parsed.view.filenames.is_empty());
-        assert!(parsed.view.sort.is_empty());
-        assert!(parsed.view.filters.is_empty());
+        assert!(parsed.view.view.sort.is_empty());
+        assert!(parsed.view.view.filters.is_empty());
         assert!(parsed.warnings.len() >= 5);
     }
 
@@ -1868,20 +2289,22 @@ filters:
             r#"
 name: sort
 filenames: [data.csv]
-sort:
-  - { column: a, direction: asc, kind: lexical }
-  - { column: b, direction: asc, kind: lexical }
-  - { column: c, direction: asc, kind: lexical }
-  - { column: d, direction: asc, kind: lexical }
+source: {}
+view:
+  sort:
+    - { column: a, direction: asc, kind: lexical }
+    - { column: b, direction: asc, kind: lexical }
+    - { column: c, direction: asc, kind: lexical }
+    - { column: d, direction: asc, kind: lexical }
 "#,
         )
         .expect("parse");
 
-        assert_eq!(parsed.view.sort.len(), MAX_SORT_KEYS);
+        assert_eq!(parsed.view.view.sort.len(), MAX_SORT_KEYS);
         assert!(parsed
             .warnings
             .iter()
-            .any(|warning| warning.field == "sort"));
+            .any(|warning| warning.field == "view.sort"));
     }
 
     #[test]
@@ -1899,12 +2322,12 @@ sort:
         std::fs::create_dir(&views).expect("views dir");
         std::fs::write(
             views.join("cat-shards.yaml"),
-            "name: cat-shards\nfilenames: [ignored.txt]\n",
+            "name: cat-shards\nfilenames: [ignored.txt]\nsource: {}\nview: {}\n",
         )
         .expect("write yaml");
         std::fs::write(
             views.join("cat-shards.yml"),
-            "name: cat-shards\nfilenames: [cat_shards.txt]\n",
+            "name: cat-shards\nfilenames: [cat_shards.txt]\nsource: {}\nview: {}\n",
         )
         .expect("write yml");
 
@@ -1924,7 +2347,7 @@ sort:
         std::fs::write(views.join("bad.yml"), "name: [").expect("write bad");
         std::fs::write(
             views.join("good.yml"),
-            "name: good\nfilenames: [data.csv]\n",
+            "name: good\nfilenames: [data.csv]\nsource: {}\nview: {}\n",
         )
         .expect("write good");
 
@@ -1942,17 +2365,17 @@ sort:
         std::fs::create_dir(&views).expect("views dir");
         std::fs::write(
             views.join("regex.yml"),
-            "name: regex\nfilenames: ['^cat_.*txt$']\n",
+            "name: regex\nfilenames: ['^cat_.*txt$']\nsource: {}\nview: {}\n",
         )
         .expect("write regex");
         std::fs::write(
             views.join("glob.yml"),
-            "name: glob\nfilenames: ['*shards*']\n",
+            "name: glob\nfilenames: ['*shards*']\nsource: {}\nview: {}\n",
         )
         .expect("write glob");
         std::fs::write(
             views.join("exact.yml"),
-            "name: exact\nfilenames: [cat_shards.txt]\n",
+            "name: exact\nfilenames: [cat_shards.txt]\nsource: {}\nview: {}\n",
         )
         .expect("write exact");
         let discovered = discover_saved_views_in_dir(&views);
@@ -1975,16 +2398,9 @@ sort:
             canonical_name: "cat-shards".to_owned(),
             view: SavedView {
                 name: "cat-shards".to_owned(),
-                locale: None,
                 filenames: Vec::new(),
-                format: None,
-                json_path: None,
-                object_mode: None,
-                schema_scan: None,
-                nulls: None,
-                columns: BTreeMap::new(),
-                sort: Vec::new(),
-                filters: Vec::new(),
+                source: SavedSourceConfig::default(),
+                view: SavedViewConfig::default(),
             },
             warnings: Vec::new(),
         };
@@ -2007,11 +2423,13 @@ sort:
             r#"
 name: columns
 filenames: [data.csv]
-columns:
-  count:
-    width: 20
-  "*count":
-    visible: false
+source: {}
+view:
+  columns:
+    count:
+      width: 20
+    "*count":
+      visible: false
 "#,
         )
         .expect("parse");
@@ -2048,13 +2466,15 @@ columns:
             r#"
 name: columns
 filenames: [data.csv]
-columns:
-  "*count":
-    visible: false
-  "docs_count*":
-    width: 10
-  missing:
-    width: 5
+source: {}
+view:
+  columns:
+    "*count":
+      visible: false
+    "docs_count*":
+      width: 10
+    missing:
+      width: 5
 "#,
         )
         .expect("parse");
@@ -2073,7 +2493,7 @@ columns:
         assert!(resolved
             .warnings
             .iter()
-            .any(|warning| warning.field == "columns.missing"));
+            .any(|warning| warning.field == "view.columns.missing"));
     }
 
     #[test]
@@ -2082,13 +2502,15 @@ columns:
             r#"
 name: json
 filenames: [data.json]
-columns:
-  /customer/email:
-    label: Customer
-  email:
-    visible: false
-  /late/value:
-    width: 12
+source: {}
+view:
+  columns:
+    /customer/email:
+      label: Customer
+    email:
+      visible: false
+    /late/value:
+      width: 12
 "#,
         )
         .expect("parse");
@@ -2105,6 +2527,7 @@ columns:
                         "/customer/email".parse().unwrap(),
                     ),
                     display_name: "email".to_owned(),
+                    source_declared_type: None,
                     source_type: crate::table::LogicalType::Text,
                     type_origin: crate::table::TypeOrigin::Inferred,
                 },
@@ -2117,6 +2540,7 @@ columns:
                         "/billing/email".parse().unwrap(),
                     ),
                     display_name: "email".to_owned(),
+                    source_declared_type: None,
                     source_type: crate::table::LogicalType::Text,
                     type_origin: crate::table::TypeOrigin::Inferred,
                 },
@@ -2146,6 +2570,86 @@ columns:
     }
 
     #[test]
+    fn duplicate_relational_columns_use_occurrence_keys_and_reject_ambiguity() {
+        let generation = crate::table::SourceGeneration::new();
+        let relation = "joined".to_owned();
+        let column = |ordinal| crate::table::ColumnDefinition {
+            id: crate::table::ColumnId {
+                generation,
+                ordinal,
+            },
+            source_identity: ColumnSourceIdentity::RelationColumn {
+                relation: relation.clone(),
+                ordinal: ordinal as usize,
+                name: "name".to_owned(),
+            },
+            display_name: "name".to_owned(),
+            source_declared_type: Some("TEXT".to_owned()),
+            source_type: crate::table::LogicalType::Text,
+            type_origin: crate::table::TypeOrigin::Declared,
+        };
+        let definition = TableDefinition {
+            generation,
+            columns: vec![column(0), column(1)],
+            schema_state: SchemaState::Complete,
+            relation: crate::table::RelationMetadata {
+                name: relation.clone(),
+                display_name: relation,
+                header_visible: true,
+            },
+        };
+        assert_eq!(
+            definition.canonical_column_key(0).as_deref(),
+            Some("name#1")
+        );
+        assert_eq!(
+            definition.canonical_column_key(1).as_deref(),
+            Some("name#2")
+        );
+
+        let deterministic = parse_saved_view_yaml(
+            r#"
+name: duplicate
+filenames: [joined.db]
+source: {}
+view:
+  columns:
+    "name#2":
+      label: Secondary
+"#,
+        )
+        .expect("deterministic saved view");
+        let resolved = resolve_structured_columns(&deterministic.view, &definition);
+        assert!(resolved.columns[0].is_none());
+        assert_eq!(
+            resolved.columns[1]
+                .as_ref()
+                .expect("second occurrence")
+                .source_key,
+            "name#2"
+        );
+
+        let ambiguous = parse_saved_view_yaml(
+            r#"
+name: ambiguous
+filenames: [joined.db]
+source: {}
+view:
+  columns:
+    name:
+      visible: false
+"#,
+        )
+        .expect("ambiguous saved view");
+        let resolved = resolve_structured_columns(&ambiguous.view, &definition);
+        assert!(resolved.columns.iter().all(Option::is_none));
+        assert!(resolved
+            .warnings
+            .iter()
+            .any(|warning| warning.message.contains("ambiguous")));
+    }
+
+    #[test]
     fn elasticsearch_saved_view_path_opens_hits_and_resolves_canonical_columns() {
         use crate::ingest::SourceAdapter;
 
@@ -2153,11 +2657,13 @@ columns:
             r#"
 name: elasticsearch hits
 filenames: [elasticsearch-response.json]
-format: json
-json_path: /hits/hits
-columns:
-  /_source/user/id:
-    label: User ID
+source:
+  format: json
+  json_path: /hits/hits
+view:
+  columns:
+    /_source/user/id:
+      label: User ID
 "#,
         )
         .expect("saved view");
@@ -2206,37 +2712,45 @@ columns:
             r##"
 name: colors
 filenames: [data.csv]
-columns:
-  health:
-    colors:
-      - match:
-          true: green
-          false: muted
-          "": red
-      - range:
-          "<10": red
-          ">=90": red
-          ">=50 <75": yellow
-      - gradient:
-          mode: fixed
-          stops:
-            10: green
-            "90": yellow
-      - gradient:
-          mode: auto
-          steps: 5
-          colors: [green, yellow, red]
-      - identifiers:
-          colors: auto
-      - identifiers:
-          colors: [green, "#ff00ffff"]
-      - range:
-          nope: red
+source: {}
+view:
+  columns:
+    health:
+      colors:
+        - match:
+            true: green
+            false: muted
+            "": red
+        - range:
+            "<10": red
+            ">=90": red
+            ">=50 <75": yellow
+        - gradient:
+            mode: fixed
+            stops:
+              10: green
+              "90": yellow
+        - gradient:
+            mode: auto
+            steps: 5
+            colors: [green, yellow, red]
+        - identifiers:
+            colors: auto
+        - identifiers:
+            colors: [green, "#ff00ffff"]
+        - range:
+            nope: red
 "##,
         )
         .expect("parse");
 
-        let colors = &parsed.view.columns.get("health").expect("health").colors;
+        let colors = &parsed
+            .view
+            .view
+            .columns
+            .get("health")
+            .expect("health")
+            .colors;
         assert_eq!(colors.len(), 6);
         assert_eq!(
             colors[0],
@@ -2323,6 +2837,7 @@ columns:
         assert!(parsed.warnings.is_empty());
         assert_eq!(
             parsed
+                .view
                 .view
                 .columns
                 .get("used_percent")
