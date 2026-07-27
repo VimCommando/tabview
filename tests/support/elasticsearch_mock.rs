@@ -179,7 +179,10 @@ impl Drop for Server {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            let result = worker.join();
+            if !std::thread::panicking() {
+                result.expect("mock Elasticsearch worker panicked");
+            }
         }
     }
 }
