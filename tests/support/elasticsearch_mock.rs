@@ -45,6 +45,7 @@ pub struct Server {
     requests: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
     worker: Option<std::thread::JoinHandle<()>>,
+    handlers: Arc<Mutex<Vec<std::thread::JoinHandle<()>>>>,
 }
 
 impl Server {
@@ -57,6 +58,8 @@ impl Server {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = stop.clone();
         let responses = Arc::new(Mutex::new(VecDeque::from(responses)));
+        let handlers = Arc::new(Mutex::new(Vec::new()));
+        let worker_handlers = handlers.clone();
         let worker = std::thread::spawn(move || {
             while !worker_stop.load(Ordering::Acquire) {
                 let (mut stream, _) = match listener.accept() {
@@ -70,9 +73,9 @@ impl Server {
                 stream.set_nonblocking(false).unwrap();
                 let connection_requests = worker_requests.clone();
                 let connection_responses = responses.clone();
-                std::thread::spawn(move || {
+                let handler = std::thread::spawn(move || {
                     stream
-                        .set_read_timeout(Some(Duration::from_secs(5)))
+                        .set_read_timeout(Some(Duration::from_millis(200)))
                         .unwrap();
                     let mut request = Vec::new();
                     let mut chunk = [0_u8; 4096];
@@ -156,6 +159,7 @@ impl Server {
                         .ok();
                     while stream.read(&mut chunk).is_ok_and(|count| count > 0) {}
                 });
+                worker_handlers.lock().unwrap().push(handler);
             }
         });
         Self {
@@ -163,6 +167,7 @@ impl Server {
             requests,
             stop,
             worker: Some(worker),
+            handlers,
         }
     }
 
@@ -182,6 +187,13 @@ impl Drop for Server {
             let result = worker.join();
             if !std::thread::panicking() {
                 result.expect("mock Elasticsearch worker panicked");
+            }
+        }
+        let handlers = std::mem::take(&mut *self.handlers.lock().unwrap());
+        for handler in handlers {
+            let result = handler.join();
+            if !std::thread::panicking() {
+                result.expect("mock Elasticsearch connection handler panicked");
             }
         }
     }
