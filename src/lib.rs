@@ -165,7 +165,7 @@ fn emit_diagnostics(diagnostics: &[String]) {
 
 fn emit_source_result_warnings(view: &view::TableView) {
     if view.source_result_is_partial() {
-        eprintln!("warning: Elasticsearch returned a partial result");
+        eprintln!("warning: source returned a partial result");
     }
     for warning in view.source_result_warnings() {
         eprintln!("warning: {warning}");
