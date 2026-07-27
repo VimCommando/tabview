@@ -217,7 +217,11 @@ Clearing a source operation generates a new artifact. View-only changes do not c
 
 ### Replace source results asynchronously and atomically
 
-Turso connection setup, query execution, and row iteration run behind an application-owned Tokio boundary. A source-query change creates a revisioned query job:
+The executable owns a standard multi-thread Tokio runtime used by every source.
+Blocking SQLite and file-backed source-query work runs on Tokio's blocking
+pool, while revision coordination runs as a Tokio task. Library and unit-test
+callers outside the executable use a lazily initialized fallback runtime. A
+source-query change creates a revisioned query job:
 
 1. Keep the previous successful source result and view state visible.
 2. Display source-query progress.
@@ -326,20 +330,22 @@ Immediately after connecting, the facade enables and verifies `PRAGMA query_only
 Add `turso` with default features disabled, then explicitly enable mimalloc as
 Tabview's global allocator while leaving Tantivy-backed FTS out of the release
 dependency graph. Existing SQLite FTS3/4/5 virtual tables remain unselectable.
-Keep only the Tokio features required by the runtime boundary and record
-binary-size, compile-time, allocator, and platform effects.
+Keep only the Tokio features required by the standard runtime boundary and
+record binary-size, compile-time, allocator, and platform effects.
 
 ### Gate SQLite behind a default feature
 
 Add a default-enabled `sqlite` Cargo feature that activates the optional
-`turso` and `tokio` dependencies together with the SQLite adapter. The normal
-build keeps its SQLite behavior unchanged.
+`turso` dependency together with the SQLite adapter. Tokio remains an
+unconditional application dependency so file-backed and SQLite source-query
+work share one runtime boundary. The normal build keeps its SQLite behavior
+unchanged.
 
-A build without `sqlite` omits the adapter module and dependency graph,
-`InputFormat::Sqlite`, SQLite signature dispatch, and the `--table` CLI option.
-Its format diagnostics and help text list only the formats compiled into that
-binary. The source/view table model remains source-neutral and available to
-file adapters.
+A build without `sqlite` omits the adapter module and Turso dependency graph,
+`InputFormat::Sqlite`, SQLite signature dispatch, and the `--table` CLI option,
+while retaining Tokio. Its format diagnostics and help text list only the
+formats compiled into that binary. The source/view table model remains
+source-neutral and available to file adapters.
 
 ## Risks / Trade-offs
 

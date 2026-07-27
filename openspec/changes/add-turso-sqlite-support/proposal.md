@@ -7,7 +7,7 @@ Local SQLite support can therefore be added as a Turso-backed adapter and store 
 ## What Changes
 
 - Add local SQLite as an explicit and signature-detected input format, opened through the `turso` crate.
-- Put SQLite support and its Turso/Tokio dependency graph behind a default-enabled `sqlite` Cargo feature; builds without that feature omit SQLite format parsing, signature dispatch, and `--table`.
+- Put SQLite support and its Turso dependency graph behind a default-enabled `sqlite` Cargo feature; keep Tokio as the standard application runtime so every source can use the same background-work boundary. Builds without `sqlite` omit SQLite format parsing, signature dispatch, and `--table`.
 - Discover user-facing ordinary SQLite tables and compatible ordinary views, exclude virtual, shadow, and internal objects, and select one with `--table`, saved `source.table`, automatic selection when exactly one selectable candidate exists, or a simple interactive table picker when multiple selectable choices remain. Preserve unavailable-view diagnostics so the picker or an explicit selection can explain incompatibility.
 - Extend the existing source-identity model with relation-column identity; SQLite column metadata is supplied directly and is never represented as a synthetic CSV header row.
 - Map Turso values directly into the existing typed `CellValue` variants. Preserve raw SQLite declarations for inspection, use SQLite affinity only as an initial logical-type hint, and widen the observed profile when runtime values disagree.
@@ -38,7 +38,7 @@ Local SQLite support can therefore be added as a Turso-backed adapter and store 
 
 ## Impact
 
-- Adds optional `turso` and Tokio dependencies behind the default-enabled `sqlite` feature. Turso defaults are disabled, mimalloc is explicitly enabled as the global allocator, Tantivy-backed FTS is omitted, and SQLite virtual tables remain outside the selectable relation set.
+- Adds optional `turso` behind the default-enabled `sqlite` feature and makes Tokio part of the standard application runtime. Turso defaults are disabled, mimalloc is explicitly enabled as the global allocator, Tantivy-backed FTS is omitted, and SQLite virtual tables remain outside the selectable relation set.
 - Extends `InputFormat`, `OpenOptions`, `SourceOptionOverrides`, format resolution, `OpenedSource` relation selection, and source-neutral batch preparation.
 - Refactors the flat `SavedView` schema and the single `TableQuery`/filter/sort state into explicit source-query and view-transform models; backward compatibility for the pre-change YAML shape is not required.
 - Adds a SQLite `SourceAdapter`, SQL query compiler, asynchronous query coordinator, and `TursoTableStore`; the existing `TableDefinition`, typed cells, and store boundaries remain authoritative.

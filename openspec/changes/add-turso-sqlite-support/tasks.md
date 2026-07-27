@@ -29,14 +29,14 @@
 
 ## 4. Establish Turso and read-only access
 
-- [x] 4.1 Pin the candidate `turso` version with defaults disabled, explicitly enable mimalloc without FTS, and retain the minimal Tokio features required for local asynchronous I/O.
+- [x] 4.1 Pin the candidate `turso` version with defaults disabled, explicitly enable mimalloc without FTS, and make the minimal Tokio runtime a standard dependency for background source work.
 - [x] 4.2 Introduce a Tabview-owned SQLite facade that keeps the raw Turso connection private and exposes typed discovery, schema, source-query, and row-fetch operations without a general execute or arbitrary-SQL API.
 - [x] 4.3 Enable and verify `PRAGMA query_only=ON` immediately after connecting, failing source opening when confinement cannot be verified.
 - [x] 4.4 Centralize reviewed read-only SQL templates, typed parameter binding, identifier quoting, and copyable SQL rendering.
 - [x] 4.5 Add a logical snapshot harness proving mutation attempts are rejected and supported actions do not change schema or table contents.
 - [x] 4.6 Record release binary size, compile time, allocator configuration, and platform effects with mimalloc explicitly enabled and Turso FTS disabled, and document that SQLite FTS virtual tables remain unselectable.
 - [x] 4.7 Open SQLite through Turso core with `OpenFlags::ReadOnly` before creating a connection, retaining verified `PRAGMA query_only=ON` as defense in depth.
-- [x] 4.8 Put the SQLite adapter and optional Turso/Tokio dependencies behind a default-enabled `sqlite` Cargo feature, including format parsing, signature probing, and table-selection CLI gating.
+- [x] 4.8 Put the SQLite adapter and optional Turso dependency behind a default-enabled `sqlite` Cargo feature, including format parsing, signature probing, and table-selection CLI gating, while retaining Tokio in every build.
 
 ## 5. Add SQLite discovery, metadata, and selection
 
@@ -91,7 +91,7 @@
 - [x] 8.10 Run formatting, Clippy, all-feature tests, release builds, and project-supported platform checks.
 - [x] 8.11 Update README and internal documentation with nested saved views, layered operations, source limits, SQL output, batch table selection, compatible-view probing, virtual-table exclusions, read-only guarantees, explicit mimalloc and disabled Turso FTS defaults, compatibility limits, and remote-access non-goals.
 - [x] 8.12 Add physical read-only regressions for sidecar-free rollback databases, existing WAL databases, and non-writable database paths.
-- [x] 8.13 Verify default/all-feature and no-default-feature builds, tests, Clippy, CLI help, and the feature-disabled normal dependency graph.
+- [x] 8.13 Verify default/all-feature and no-default-feature builds, tests, Clippy, CLI help, and that the feature-disabled normal dependency graph retains Tokio while excluding Turso.
 - [x] 8.14 Treat interactive table-picker cancellation as a clean startup outcome that restores the terminal and exits successfully without opening a relation row stream.
 - [x] 8.15 Add regressions for pending SQLite post-interactive export, deterministic duplicate relational saved-view keys, and physical database/sidecar preservation across supported actions.
 - [x] 8.16 Run the all-feature test and Clippy matrix on the supported Linux host and record the result.

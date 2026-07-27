@@ -1,8 +1,9 @@
 ## ADDED Requirements
 
 ### Requirement: SQLite compile feature
-The system SHALL place SQLite support and its Turso/Tokio dependency graph
-behind a default-enabled `sqlite` Cargo feature.
+The system SHALL place SQLite support and its Turso dependency graph behind a
+default-enabled `sqlite` Cargo feature. Tokio SHALL remain a standard
+application dependency used for source-query background work in every build.
 
 #### Scenario: Default build
 - **WHEN** Tabview is compiled with its default features
@@ -10,7 +11,7 @@ behind a default-enabled `sqlite` Cargo feature.
 
 #### Scenario: SQLite feature is disabled
 - **WHEN** Tabview is compiled without the `sqlite` feature
-- **THEN** Turso and Tokio are absent from the normal dependency graph and the binary does not accept `--format sqlite`, expose `--table`, or dispatch the SQLite signature
+- **THEN** Turso is absent from the normal dependency graph, Tokio remains available to file-backed sources, and the binary does not accept `--format sqlite`, expose `--table`, or dispatch the SQLite signature
 
 ### Requirement: SQLite source resolution
 When compiled with the `sqlite` feature, the system SHALL open local

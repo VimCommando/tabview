@@ -1,6 +1,9 @@
 use std::fmt;
 use std::num::NonZeroUsize;
-use std::sync::{mpsc, Arc, Condvar, Mutex};
+use std::sync::{
+    atomic::{AtomicU64, Ordering},
+    mpsc, Arc, OnceLock,
+};
 
 use super::{CellValue, ColumnId, SourceGeneration, SourceQueryTask, TableStore};
 
@@ -265,19 +268,14 @@ struct SourceQueryJob {
     task: SourceQueryTask,
 }
 
-#[derive(Default)]
-struct SourceQueryWorkerState {
-    pending: Option<SourceQueryJob>,
-    latest_requested: u64,
-    shutdown: bool,
-}
-
 pub struct SourceQueryCoordinator {
     next_revision: u64,
     latest_requested: u64,
     progress: SourceQueryProgress,
-    worker: Arc<(Mutex<SourceQueryWorkerState>, Condvar)>,
-    worker_handle: Option<std::thread::JoinHandle<()>>,
+    worker: Option<tokio::sync::mpsc::UnboundedSender<SourceQueryJob>>,
+    latest_worker_revision: Arc<AtomicU64>,
+    worker_handle: Option<tokio::task::JoinHandle<()>>,
+    worker_done: mpsc::Receiver<()>,
     receiver: mpsc::Receiver<SourceQueryJobResult>,
 }
 
@@ -294,21 +292,24 @@ impl fmt::Debug for SourceQueryCoordinator {
 impl Default for SourceQueryCoordinator {
     fn default() -> Self {
         let (sender, receiver) = mpsc::channel();
-        let worker = Arc::new((
-            Mutex::new(SourceQueryWorkerState::default()),
-            Condvar::new(),
+        let (worker, worker_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (worker_done_sender, worker_done) = mpsc::channel();
+        let latest_worker_revision = Arc::new(AtomicU64::new(0));
+        let worker_revision = latest_worker_revision.clone();
+        let worker_handle = source_runtime_handle().spawn(source_query_worker(
+            worker_receiver,
+            worker_revision,
+            sender,
+            worker_done_sender,
         ));
-        let worker_state = worker.clone();
-        let worker_handle = std::thread::Builder::new()
-            .name("tabview-source-query".to_owned())
-            .spawn(move || source_query_worker(worker_state, sender))
-            .expect("source query worker thread");
         Self {
             next_revision: 1,
             latest_requested: 0,
             progress: SourceQueryProgress::Idle,
-            worker,
+            worker: Some(worker),
+            latest_worker_revision,
             worker_handle: Some(worker_handle),
+            worker_done,
             receiver,
         }
     }
@@ -320,13 +321,13 @@ impl SourceQueryCoordinator {
         self.next_revision = self.next_revision.saturating_add(1);
         self.latest_requested = revision;
         self.progress = SourceQueryProgress::Pending { revision };
-        let (state, wake) = &*self.worker;
-        let mut state = state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.latest_requested = revision;
-        state.pending = Some(SourceQueryJob { revision, task });
-        wake.notify_one();
+        self.latest_worker_revision
+            .store(revision, Ordering::Release);
+        self.worker
+            .as_ref()
+            .expect("source query worker is active")
+            .send(SourceQueryJob { revision, task })
+            .expect("source query worker accepts jobs");
         revision
     }
 
@@ -371,52 +372,46 @@ impl SourceQueryCoordinator {
 
 impl Drop for SourceQueryCoordinator {
     fn drop(&mut self) {
-        let (state, wake) = &*self.worker;
-        let mut state = state
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        state.shutdown = true;
-        state.pending = None;
-        wake.notify_one();
-        drop(state);
-        if let Some(worker) = self.worker_handle.take() {
-            let _ = worker.join();
-        }
+        self.worker.take();
+        let _ = self.worker_done.recv();
+        self.worker_handle.take();
     }
 }
 
-fn source_query_worker(
-    worker: Arc<(Mutex<SourceQueryWorkerState>, Condvar)>,
+fn source_runtime_handle() -> tokio::runtime::Handle {
+    tokio::runtime::Handle::try_current().unwrap_or_else(|_| {
+        static FALLBACK_RUNTIME: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+        FALLBACK_RUNTIME
+            .get_or_init(|| {
+                tokio::runtime::Builder::new_multi_thread()
+                    .worker_threads(2)
+                    .thread_name("tabview-runtime")
+                    .build()
+                    .expect("fallback Tokio runtime")
+            })
+            .handle()
+            .clone()
+    })
+}
+
+async fn source_query_worker(
+    mut worker: tokio::sync::mpsc::UnboundedReceiver<SourceQueryJob>,
+    latest_requested: Arc<AtomicU64>,
     sender: mpsc::Sender<SourceQueryJobResult>,
+    worker_done: mpsc::Sender<()>,
 ) {
-    loop {
-        let job = {
-            let (state, wake) = &*worker;
-            let mut state = state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            while state.pending.is_none() && !state.shutdown {
-                state = wake
-                    .wait(state)
-                    .unwrap_or_else(|poisoned| poisoned.into_inner());
-            }
-            if state.shutdown {
-                return;
-            }
-            state.pending.take().expect("pending source query job")
-        };
-        std::thread::yield_now();
-        let is_latest = {
-            let (state, _) = &*worker;
-            let state = state
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
-            !state.shutdown && job.revision == state.latest_requested
-        };
-        if !is_latest {
+    while let Some(mut job) = worker.recv().await {
+        while let Ok(replacement) = worker.try_recv() {
+            job = replacement;
+        }
+        tokio::task::yield_now().await;
+        if job.revision != latest_requested.load(Ordering::Acquire) {
             continue;
         }
-        let result = (job.task)();
+        let result = match tokio::task::spawn_blocking(job.task).await {
+            Ok(result) => result,
+            Err(error) => Err(anyhow::anyhow!("source query task failed: {error}")),
+        };
         if sender
             .send(SourceQueryJobResult {
                 revision: job.revision,
@@ -424,9 +419,10 @@ fn source_query_worker(
             })
             .is_err()
         {
-            return;
+            break;
         }
     }
+    let _ = worker_done.send(());
 }
 
 impl CapabilityStatus {
@@ -655,5 +651,31 @@ mod tests {
             .recv_timeout(std::time::Duration::from_secs(5))
             .expect("worker joined");
         drop_thread.join().expect("drop thread");
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn source_query_tasks_run_on_the_active_tokio_runtime() {
+        let generation = SourceGeneration::new();
+        let mut coordinator = SourceQueryCoordinator::default();
+        coordinator.request(Box::new(move || {
+            assert!(tokio::runtime::Handle::try_current().is_ok());
+            Ok(Box::new(super::super::InMemoryTable::from_text_rows(
+                generation,
+                vec![vec!["tokio".to_owned()]],
+            )))
+        }));
+
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        loop {
+            if let Some(event) = coordinator.poll() {
+                assert!(matches!(event, SourceQueryCoordinatorEvent::Ready { .. }));
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Tokio source query task timed out"
+            );
+            tokio::task::yield_now().await;
+        }
     }
 }

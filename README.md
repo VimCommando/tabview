@@ -53,6 +53,8 @@ contents of that cell are shown next to it.
 - Build with `--no-default-features` to omit both optional capabilities, or
   enable either one explicitly (for example,
   `--no-default-features --features saved-views` builds without SQLite).
+- Tokio is part of every build and provides the application runtime used for
+  background source-query work across SQLite and file-backed sources.
 
 ## Installation
 
@@ -150,8 +152,8 @@ a simple table picker; direct batch output instead requires
 partial result. SQLite data cannot be read from stdin, and Turso Cloud,
 `libsql://`, and other remote URLs are outside this feature's scope.
 SQLite support is compiled by the default-enabled `sqlite` Cargo feature; a
-build without that feature omits Turso and Tokio, `--format sqlite`, and
-`--table`.
+build without that feature omits Turso, `--format sqlite`, and `--table` while
+retaining the shared Tokio application runtime.
 
 SQLite source queries are bounded to 1,000 rows by default. Source filters and
 SQLite-native source sorting run before that limit. View filters, rich local
