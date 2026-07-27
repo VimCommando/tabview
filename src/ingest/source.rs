@@ -29,7 +29,8 @@ impl SourceTarget {
                 .to_file_path()
                 .map(Self::Path)
                 .unwrap_or_else(|_| Self::Path(PathBuf::from(value))),
-            Ok(url) => Self::Url(url),
+            Ok(url) if url.host_str().is_some() || value.contains("://") => Self::Url(url),
+            Ok(_) => Self::Path(PathBuf::from(value)),
             Err(_) => Self::Path(PathBuf::from(value)),
         }
     }
@@ -394,6 +395,16 @@ mod tests {
     #[test]
     fn parses_windows_drive_paths_without_treating_the_drive_as_a_url_scheme() {
         for path in [r"C:/data/logs.csv", r"C:\data\logs.csv", "C:logs.csv"] {
+            assert_eq!(
+                InputSource::from_cli_value(path),
+                InputSource::Path(PathBuf::from(path))
+            );
+        }
+    }
+
+    #[test]
+    fn parses_colon_bearing_local_names_without_treating_them_as_opaque_urls() {
+        for path in ["foo:bar.csv", "report:2026.json"] {
             assert_eq!(
                 InputSource::from_cli_value(path),
                 InputSource::Path(PathBuf::from(path))
