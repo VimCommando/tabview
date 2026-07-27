@@ -2882,6 +2882,26 @@ mod tests {
 
         app.handle_key(key(KeyCode::Char('V'))).expect("view modal");
         assert_eq!(app.popup, Some(ui::Popup::ViewConfig));
+        assert!(app.view.view_transform_summary().contains("nulls Last"));
+        app.handle_key(key(KeyCode::Char('n')))
+            .expect("toggle view null placement");
+        assert!(app.view.view_transform_summary().contains("nulls First"));
+        app.handle_key(key(KeyCode::Enter))
+            .expect("close view modal");
+
+        app.handle_key(key(KeyCode::Char('#')))
+            .expect("add view sort");
+        app.handle_key(key(KeyCode::Char('V'))).expect("view modal");
+        assert!(app
+            .view
+            .view_transform_summary()
+            .contains("1 view sort key"));
+        app.handle_key(key(KeyCode::Char('x')))
+            .expect("clear view operations");
+        assert!(app
+            .view
+            .view_transform_summary()
+            .contains("0 view sort key"));
         app.handle_key(key(KeyCode::Char('i')))
             .expect("column info from view");
         assert_eq!(app.popup, Some(ui::Popup::ColumnInfo));

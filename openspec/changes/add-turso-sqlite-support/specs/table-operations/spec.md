@@ -175,7 +175,7 @@ The system SHALL serialize active source sort and view sort as separate ordered 
 ## ADDED Requirements
 
 ### Requirement: Source and View configuration modals
-The interactive runtime SHALL provide separate Source and View configuration modals. Source configuration SHALL own construction of the bounded source result and MAY vary by adapter capability; View configuration SHALL own source-neutral local transformation and presentation.
+The interactive runtime SHALL provide separate Source and View configuration modals. Source configuration SHALL own construction of the bounded source result and MAY vary by adapter capability; View configuration SHALL summarize source-neutral local transformation and provide common local actions without changing the source result.
 
 #### Scenario: Open Source configuration
 - **WHEN** the user opens Source configuration
@@ -203,11 +203,15 @@ The interactive runtime SHALL provide separate Source and View configuration mod
 
 #### Scenario: Open View configuration
 - **WHEN** the user opens View configuration for any supported source
-- **THEN** it offers the same canonical view filters, sort modes and precedence, null behavior, and presentation controls
+- **THEN** it summarizes the active view filters, ordered sort keys, and view-wide null placement and offers actions to clear operations, toggle null placement, or open Column Info
 
-#### Scenario: Apply View edit
-- **WHEN** the user changes View configuration
+#### Scenario: Clear View operations
+- **WHEN** the user clears filters and sorts through View configuration
 - **THEN** the local view is recomputed over the fixed active source result without re-querying the source
+
+#### Scenario: Toggle View null placement
+- **WHEN** the user toggles view-wide null placement through View configuration
+- **THEN** active local sorts use the new policy without re-querying or expanding the source result
 
 #### Scenario: Same column in both scopes
 - **WHEN** a column participates in a source filter or sort
@@ -219,15 +223,15 @@ The interactive runtime SHALL provide separate Source and View configuration mod
 
 #### Scenario: Column Info applies a View filter
 - **WHEN** the user adds, edits, or clears a filter for the current column through Column Info
-- **THEN** the corresponding `ViewFilter` changes and the broader View Configuration modal reflects that change
+- **THEN** the corresponding `ViewFilter` changes and the View Configuration summary reflects that change
 
 #### Scenario: Column Info applies a View sort
 - **WHEN** the user changes the current column's sort through Column Info
-- **THEN** the corresponding `ViewSort` changes using established View sort precedence and the broader View Configuration modal reflects that change
+- **THEN** the corresponding `ViewSort` changes using established View sort precedence and the View Configuration summary reflects that change
 
-#### Scenario: View Configuration updates Column Info
-- **WHEN** the user changes a current column's filter or sort through View Configuration and later opens Column Info
-- **THEN** Column Info displays the current View operation state rather than maintaining a separate copy
+#### Scenario: Open Column Info from View configuration
+- **WHEN** the user opens Column Info from View configuration
+- **THEN** Column Info displays and edits the current column's active View operation state rather than maintaining a separate copy
 
 #### Scenario: Source operation in Column Info
 - **WHEN** the current column participates in a source filter or source sort
@@ -235,7 +239,7 @@ The interactive runtime SHALL provide separate Source and View configuration mod
 
 #### Scenario: Saved View modal remains distinct
 - **WHEN** the user opens the Saved View YAML modal
-- **THEN** it serializes current runtime Source and View configuration without replacing either runtime configuration modal
+- **THEN** it serializes current runtime Source and View state without replacing either runtime configuration modal
 
 ### Requirement: SQLite source SQL output
 When a SQLite source query is active, the user SHALL be able to inspect and copy the final source SQL together with its bound values or an equivalent executable SQL representation.

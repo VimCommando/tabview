@@ -160,9 +160,10 @@ Runtime configuration is split by execution scope rather than by operation type:
 └─────────────────────────────────────────┘
 
 ┌─ View Configuration ────────────────────┐
-│ View filters                            │
-│ View sort                               │
-│ View-wide and column presentation       │
+│ Active ViewTransform summary            │
+│ Clear view filters and sorts            │
+│ Toggle view-wide null placement         │
+│ Open current-column configuration       │
 └─────────────────────────────────────────┘
 ```
 
@@ -170,15 +171,15 @@ The Source modal constructs the bounded working set and is intentionally adapter
 
 Source edits are staged in the modal. Confirming Apply validates the complete draft and starts at most one asynchronous source-query replacement; Cancel leaves the active query untouched. Pending, failure, and capability states remain inside the Source workflow, with the last successful result retained until replacement succeeds.
 
-The View modal transforms and presents the already-bounded source result. Its filters, sort modes, null handling, column presentation, and interaction semantics are identical for delimited, structured, and SQLite sources. View edits may update the local result immediately because they do not re-query or expand the source.
+The View modal summarizes the source-neutral transform over the already-bounded source result and provides common global actions: clear view filters and sorts, toggle view-wide null placement, and open Column Info for the current column. These actions behave identically for delimited, structured, and SQLite sources and may update the local result immediately because they do not re-query or expand the source.
 
-A column may participate independently in both scopes. Source configuration determines whether its row enters the bounded working set; View configuration may then filter or reorder that same column locally.
+A column may participate independently in both scopes. Source configuration determines whether its row enters the bounded working set; current-column controls or quick commands may then filter or reorder that same column locally.
 
 Existing direct filter and sort commands—including the current-column filter prompt and shortcut sorts—remain View operations on every source. This preserves their existing responsiveness and prevents a familiar key from unexpectedly launching a potentially expensive database query. Source filters and sorts are changed only through the explicit Source modal.
 
-Column Info remains a contextual editor for the current column. In addition to source identity, inferred or declared type, and presentation controls, it keeps direct View filter and View sort controls for that column. Changes made there update the same `ViewTransform` represented by the broader View Configuration modal; they are not a separate operation store. A current-column sort follows the established View sort precedence behavior, and a filter becomes a normal entry in `view.filters`.
+Column Info remains a contextual editor for the current column. In addition to source identity, inferred or declared type, and presentation controls, it keeps direct View filter and View sort controls for that column. Changes made there update the same `ViewTransform` summarized by View Configuration; they are not a separate operation store. A current-column sort follows the established View sort precedence behavior, and a filter becomes a normal entry in `view.filters`.
 
-The broader View modal provides the multi-column picture: ordered sort precedence, filters across columns, view-wide null behavior, and presentation configuration. Changes from either UI are reflected immediately in the other. Source operations affecting the current column may be summarized read-only in Column Info, but editing them requires Source Configuration so a contextual action cannot unexpectedly replace the source result.
+View Configuration provides the multi-column transform summary while Column Info and existing quick commands provide the implemented editing paths. Source operations affecting the current column may be summarized read-only in Column Info, but editing them requires Source Configuration so a contextual action cannot unexpectedly replace the source result. A complete global editor for individual filters, ordered sorts, null overrides, and presentation is intentionally deferred to the `interface-updates` change.
 
 The runtime View Configuration modal is distinct from the Saved View modal that displays or writes YAML. Runtime source and view state continue to serialize into the matching saved `source` and `view` sections.
 
