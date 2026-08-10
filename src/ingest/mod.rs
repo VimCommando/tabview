@@ -259,7 +259,7 @@ pub fn parse_decoded_rows(
 }
 
 pub fn sniff_delimiter(text: &str) -> Option<u8> {
-    let candidates = [b',', b'\t', b';', b'|', b' '];
+    let candidates = *b",\t;| ";
     let sample: Vec<&str> = text
         .lines()
         .filter(|line| !line.trim().is_empty())
