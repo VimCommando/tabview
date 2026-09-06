@@ -775,7 +775,7 @@ fn native_query_definition(
 ) -> anyhow::Result<TableDefinition> {
     let prepared = session.prepare_native_row_query(native_query)?;
     let generation = SourceGeneration::new();
-    let relation = "__tabview_native_query".to_owned();
+    let relation = "__tview_native_query".to_owned();
     let columns = prepared
         .columns
         .into_iter()
@@ -992,12 +992,12 @@ fn compile_sqlite_query(
     let relation = quote_identifier(&definition.relation.name);
     let hidden_identity = match identity {
         SqliteIdentityPlan::RowId { expression } => {
-            format!(", {} AS \"__tabview_rowid\"", quote_identifier(expression))
+            format!(", {} AS \"__tview_rowid\"", quote_identifier(expression))
         }
         SqliteIdentityPlan::PrimaryKey { .. } | SqliteIdentityPlan::Unavailable => String::new(),
     };
     let mut logical = if let Some(base) = embeddable_native_query {
-        format!("SELECT * FROM (\n{base}\n) AS \"__tabview_source\"")
+        format!("SELECT * FROM (\n{base}\n) AS \"__tview_source\"")
     } else {
         format!("SELECT *{hidden_identity} FROM {relation}")
     };

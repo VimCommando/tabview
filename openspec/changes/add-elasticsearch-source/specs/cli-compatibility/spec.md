@@ -4,15 +4,15 @@
 The Rust executable SHALL accept `--format auto|delimited|json|ndjson`, using `auto` by default, and SHALL reject incompatible format-specific argument combinations clearly. A build with the `sqlite` feature SHALL additionally accept `sqlite`, and a build with the `elasticsearch` feature SHALL additionally accept `elasticsearch`. When `--format` is omitted, an unambiguous registered URL scheme MAY resolve the effective format before existing local probing.
 
 #### Scenario: Force JSON format
-- **WHEN** a user runs `tabview --format json response.data`
+- **WHEN** a user runs `tview --format json response.data`
 - **THEN** the JSON adapter is selected without relying on the filename extension
 
 #### Scenario: Force delimited format
-- **WHEN** a `.json`-named file actually contains delimited data and the user runs `tabview --format delimited data.json`
+- **WHEN** a `.json`-named file actually contains delimited data and the user runs `tview --format delimited data.json`
 - **THEN** the delimited adapter is selected
 
 #### Scenario: Force SQLite format
-- **WHEN** a user runs `tabview --format sqlite --table users application.data`
+- **WHEN** a user runs `tview --format sqlite --table users application.data`
 - **THEN** the SQLite adapter is selected without relying on the filename extension
 
 #### Scenario: Infer SQLite from LibSQL
@@ -20,7 +20,7 @@ The Rust executable SHALL accept `--format auto|delimited|json|ndjson`, using `a
 - **THEN** the effective format resolves to SQLite before adapter capability validation
 
 #### Scenario: Force Elasticsearch format
-- **WHEN** a user runs `tabview https://elastic.example:9200 --format elasticsearch`
+- **WHEN** a user runs `tview https://elastic.example:9200 --format elasticsearch`
 - **THEN** the Elasticsearch adapter is selected without attempting content probing
 
 #### Scenario: Ambiguous remote format
@@ -46,11 +46,11 @@ The Rust executable SHALL accept `--format auto|delimited|json|ndjson`, using `a
 When at least one relational or query-native source feature is enabled, the Rust executable SHALL accept `--table <name>` as a generic relation or target selector. The resolved adapter SHALL define which catalog entries are selectable and SHALL reject the option for non-relational sources.
 
 #### Scenario: Select SQLite table
-- **WHEN** a user runs `tabview application.db --table users`
+- **WHEN** a user runs `tview application.db --table users`
 - **THEN** the command opens `users` when the input is SQLite and that relation is selectable
 
 #### Scenario: Select Elasticsearch index
-- **WHEN** a user runs `tabview https://elastic.example:9200 --format elasticsearch --table application-events`
+- **WHEN** a user runs `tview https://elastic.example:9200 --format elasticsearch --table application-events`
 - **THEN** the command uses `application-events` as the generated bounded ES|QL `FROM` target without requiring picker discovery
 
 #### Scenario: Select Elasticsearch data stream

@@ -1,13 +1,13 @@
 #!/bin/sh
 set -eu
 
-endpoint="${TABVIEW_ELASTICSEARCH_URL:-http://localhost:19200}"
+endpoint="${TVIEW_ELASTICSEARCH_URL:-http://localhost:19200}"
 
 for target in logs-a logs-conflict_a logs-conflict_b logs-unavailable .hidden-fixture; do
   curl -sS -o /dev/null -X DELETE "$endpoint/$target"
 done
 curl -sS -o /dev/null -X DELETE "$endpoint/_data_stream/events-fixture"
-curl -sS -o /dev/null -X DELETE "$endpoint/_index_template/tabview-events"
+curl -sS -o /dev/null -X DELETE "$endpoint/_index_template/tview-events"
 
 curl -fsS -X PUT "$endpoint/logs-a" \
   -H 'content-type: application/json' \
@@ -31,7 +31,7 @@ curl -fsS -X PUT "$endpoint/logs-unavailable?wait_for_active_shards=0" \
   -H 'content-type: application/json' \
   -d '{"settings":{"index.routing.allocation.include._name":"no-such-node"},"mappings":{"properties":{"message":{"type":"keyword"}}}}'
 
-curl -fsS -X PUT "$endpoint/_index_template/tabview-events" \
+curl -fsS -X PUT "$endpoint/_index_template/tview-events" \
   -H 'content-type: application/json' \
   -d '{"index_patterns":["events-*"],"data_stream":{},"template":{"mappings":{"properties":{"@timestamp":{"type":"date"},"message":{"type":"keyword"}}}}}'
 curl -fsS -X POST "$endpoint/events-fixture/_doc?op_type=create&refresh=true" \

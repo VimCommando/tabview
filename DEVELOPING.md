@@ -1,7 +1,7 @@
 # Development
 
 This repository is being rewritten as a single Rust crate that builds the
-`tabview` binary.
+`tview` binary.
 
 Run these commands before submitting implementation changes:
 

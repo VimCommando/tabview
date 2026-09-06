@@ -1,13 +1,13 @@
 [package]
-name = "tabview"
+name = "tview"
 version = "2.0.0-alpha.1"
 edition = "2021"
 license = "MIT"
 description = "A command-line CSV and tabular data viewer"
-repository = "https://github.com/Tabviewer/tabview"
+repository = "https://github.com/commandzero/tview"
 
 [[bin]]
-name = "tabview"
+name = "tview"
 path = "src/main.rs"
 
 [features]

@@ -1,19 +1,19 @@
 ## Purpose
 
-Define implementation architecture, target environments, test harness expectations, and excluded feature areas for the Rust `tabview` replacement.
+Define implementation architecture, target environments, test harness expectations, and excluded feature areas for the Rust `tview` replacement.
 ## Requirements
 ### Requirement: Single Rust crate and binary
-The rewrite SHALL be implemented as one Rust crate that builds one `tabview` binary.
+The rewrite SHALL be implemented as one Rust crate that builds one `tview` binary.
 
 #### Scenario: Cargo install
 - **WHEN** a user installs the crate with `cargo install`
-- **THEN** the installed executable is named `tabview`
+- **THEN** the installed executable is named `tview`
 
 ### Requirement: Supported target environments
 The Rust binary SHALL target macOS, Linux, and WSL for the first release.
 
 #### Scenario: WSL terminal
-- **WHEN** a user runs `tabview` inside WSL with a supported terminal
+- **WHEN** a user runs `tview` inside WSL with a supported terminal
 - **THEN** terminal rendering and keyboard input use the crossterm backend without requiring curses
 
 ### Requirement: Typestate boundaries

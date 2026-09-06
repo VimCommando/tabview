@@ -76,7 +76,7 @@ An adapter whose native query can shape columns SHALL construct `TableDefinition
 
 #### Scenario: Same names but changed types
 - **WHEN** a replacement retains column names but changes source types
-- **THEN** Tabview treats the result definition as changed rather than retaining stale type metadata
+- **THEN** Tview treats the result definition as changed rather than retaining stale type metadata
 
 #### Scenario: Saved column remapping
 - **WHEN** a new result definition retains unambiguous compatible source identities

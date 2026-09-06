@@ -1,12 +1,12 @@
 ## Context
 
-Tabview opens data through `SourceAdapter`, represents an opened source as `OpenedSource`/`OpenedTable`, describes its schema with `TableDefinition`, preserves raw values in typed `CellValue`s, and accesses rows through `TableStore`. The same table/view model now feeds both the TUI and source-neutral batch output adapters.
+Tview opens data through `SourceAdapter`, represents an opened source as `OpenedSource`/`OpenedTable`, describes its schema with `TableDefinition`, preserves raw values in typed `CellValue`s, and accesses rows through `TableStore`. The same table/view model now feeds both the TUI and source-neutral batch output adapters.
 
-SQLite adds a query-native source that may contain millions of rows. Treating every sort or filter as a universal local operation would either materialize the database or make the user wait for unbounded work. At the same time, Tabview's regex, natural ordering, rendered-value matching, numeric suffix handling, and other presentation-aware operations should remain available independently of source capabilities.
+SQLite adds a query-native source that may contain millions of rows. Treating every sort or filter as a universal local operation would either materialize the database or make the user wait for unbounded work. At the same time, Tview's regex, natural ordering, rendered-value matching, numeric suffix handling, and other presentation-aware operations should remain available independently of source capabilities.
 
 The data path therefore needs two explicit stages: source operations decide which bounded working set is fetched, and view operations transform only that working set locally. The same distinction belongs in saved-view configuration and query provenance.
 
-Turso's local Rust API is asynchronous and supports both reads and writes. Tabview needs a narrow application boundary that exposes only viewing operations and keeps potentially expensive source queries from blocking the terminal event loop.
+Turso's local Rust API is asynchronous and supports both reads and writes. Tview needs a narrow application boundary that exposes only viewing operations and keeps potentially expensive source queries from blocking the terminal event loop.
 
 This change covers local SQLite-format files. Turso Cloud and `libsql://` URLs remain outside scope.
 
@@ -15,10 +15,10 @@ This change covers local SQLite-format files. Turso Cloud and `libsql://` URLs r
 **Goals:**
 
 - Open a local SQLite database through Turso and view one selected ordinary table or compatible ordinary view.
-- Guarantee that Tabview opens SQLite files at the storage boundary as read-only, cannot modify logical schema or data, does not convert rollback-journal databases to WAL, and does not create or modify engine sidecars.
+- Guarantee that Tview opens SQLite files at the storage boundary as read-only, cannot modify logical schema or data, does not convert rollback-journal databases to WAL, and does not create or modify engine sidecars.
 - Bound every SQLite working set with a configurable source limit that defaults to 1,000 rows.
 - Apply source-native filters and sorting before the source limit.
-- Apply universal Tabview filters and sorting after the fixed source result is fetched.
+- Apply universal Tview filters and sorting after the fixed source result is fetched.
 - Never expand the source limit automatically when local view filtering hides rows.
 - Preserve and expose the final generated SQLite source query for reuse.
 - Keep expensive source-query replacement asynchronous and retain the last valid result until its replacement is ready.
@@ -26,7 +26,7 @@ This change covers local SQLite-format files. Turso Cloud and `libsql://` URLs r
 - Organize saved-view YAML into top-level `source` and `view` sections.
 - Present a simple table-selection modal in interactive execution only when multiple selectable user-facing relations remain unresolved.
 - Support SQLite in direct batch output and post-interactive output without a source-specific exporter.
-- Disable Turso's default feature set, retain mimalloc explicitly as Tabview's global allocator, and omit Tantivy-backed FTS because it is unrelated to the read-only table source.
+- Disable Turso's default feature set, retain mimalloc explicitly as Tview's global allocator, and omit Tantivy-backed FTS because it is unrelated to the read-only table source.
 
 **Non-Goals:**
 
@@ -196,7 +196,7 @@ enum ResultExtent {
 }
 ```
 
-A view filter that reduces 1,000 fetched rows to 17 leaves 17 visible rows. Tabview does not fetch another 983. Status and information views distinguish visible rows from fetched source rows, for example `17 visible / 1,000 source rows (limited)`.
+A view filter that reduces 1,000 fetched rows to 17 leaves 17 visible rows. Tview does not fetch another 983. Status and information views distinguish visible rows from fetched source rows, for example `17 visible / 1,000 source rows (limited)`.
 
 `goto-bottom`, exact reductions, local materialization, search, and view transforms stop at the fixed source-result boundary.
 
@@ -204,7 +204,7 @@ A view filter that reduces 1,000 fetched rows to 17 leaves 17 visible rows. Tabv
 
 The SQLite facade compiles the selected relation, typed source predicates, source sort keys, stable tie-breaker, and limit into one parameterized `SELECT`. Identifiers come only from resolved source metadata and values are bound parameters.
 
-The source-filter vocabulary includes direct operations such as equality, inequality, ordered comparison, contains, prefix, and null tests. It does not attempt to reproduce view-filter semantics. Likewise, source sorting uses SQLite-native value and collation behavior rather than Tabview's natural or presentation-aware comparators.
+The source-filter vocabulary includes direct operations such as equality, inequality, ordered comparison, contains, prefix, and null tests. It does not attempt to reproduce view-filter semantics. Likewise, source sorting uses SQLite-native value and collation behavior rather than Tview's natural or presentation-aware comparators.
 
 This is a query renderer over a closed typed model, not a parser or validator for arbitrary user SQL.
 
@@ -268,9 +268,9 @@ SQLite declared types are advisory metadata, not conversion rules. The adapter p
 | NUMERIC affinity | `Unknown` |
 | No declaration or `ANY` | `Unknown` |
 
-`TypeOrigin::Declared` means that the initial hint came from schema metadata; it does not assert that every value has that type. Semantic-looking NUMERIC declarations such as `BOOLEAN`, `DATE`, `DATETIME`, and `DECIMAL` remain `Unknown`. Tabview does not infer Boolean, date, time, or exact-decimal behavior from the spelling alone.
+`TypeOrigin::Declared` means that the initial hint came from schema metadata; it does not assert that every value has that type. Semantic-looking NUMERIC declarations such as `BOOLEAN`, `DATE`, `DATETIME`, and `DECIMAL` remain `Unknown`. Tview does not infer Boolean, date, time, or exact-decimal behavior from the spelling alone.
 
-Runtime Turso values remain authoritative. As values arrive, the normal column profile widens from the hint: compatible values preserve it, numeric integer/real combinations widen to `Float`, and contradictory storage classes widen to `Mixed`. `NULL` does not contradict a hint. The same rule applies to non-STRICT and STRICT tables; STRICT improves the database's enforcement but does not change Tabview's ingestion contract. A view expression without reliable declared metadata begins `Unknown` and is inferred only from returned values.
+Runtime Turso values remain authoritative. As values arrive, the normal column profile widens from the hint: compatible values preserve it, numeric integer/real combinations widen to `Float`, and contradictory storage classes widen to `Mixed`. `NULL` does not contradict a hint. The same rule applies to non-STRICT and STRICT tables; STRICT improves the database's enforcement but does not change Tview's ingestion contract. A view expression without reliable declared metadata begins `Unknown` and is inferred only from returned values.
 
 Binary display remains a source-neutral presentation concern.
 
@@ -318,9 +318,9 @@ view:
 
 The pre-change flat saved-view shape is not retained. CLI source options merge into `source`, while interactive operations serialize back into the layer they modify.
 
-### Enforce read-only behavior at the Tabview boundary
+### Enforce read-only behavior at the Tview boundary
 
-The raw Turso connection is private to a Tabview-owned facade. The facade exposes typed relation discovery, schema inspection, source-query compilation, and row-query operations; it exposes no general execute method and accepts no user SQL.
+The raw Turso connection is private to a Tview-owned facade. The facade exposes typed relation discovery, schema inspection, source-query compilation, and row-query operations; it exposes no general execute method and accepts no user SQL.
 
 The facade bypasses the high-level `turso::Builder::new_local` path because Turso 0.7.1 opens that path with create/write flags and may convert a legacy rollback-journal database to WAL before a connection exists. Instead, it constructs a Turso core database with `OpenFlags::ReadOnly` before connecting. Existing WAL files remain readable, but a missing WAL or shared-coordination file is not created.
 
@@ -329,7 +329,7 @@ Immediately after connecting, the facade enables and verifies `PRAGMA query_only
 ### Select Turso features explicitly
 
 Add `turso` with default features disabled, then explicitly enable mimalloc as
-Tabview's global allocator while leaving Tantivy-backed FTS out of the release
+Tview's global allocator while leaving Tantivy-backed FTS out of the release
 dependency graph. Existing SQLite FTS3/4/5 virtual tables remain unselectable.
 Keep only the Tokio features required by the standard runtime boundary and
 record binary-size, compile-time, allocator, and platform effects.

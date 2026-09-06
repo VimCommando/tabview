@@ -27,7 +27,7 @@ When compiled with the `saved-views` feature, the system SHALL bind `v` to a mod
 - **THEN** the viewer opens a modal showing the current view YAML and a placeholder filename based on the opened input basename with a `.yml` extension
 
 #### Scenario: Saved view modal unavailable with no-view
-- **WHEN** the user invoked `tabview --no-view data.csv`
+- **WHEN** the user invoked `tview --no-view data.csv`
 - **THEN** the `v` binding is unavailable for that session
 
 #### Scenario: Close saved view modal

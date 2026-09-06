@@ -6,11 +6,11 @@ default-enabled `sqlite` Cargo feature. Tokio SHALL remain a standard
 application dependency used for source-query background work in every build.
 
 #### Scenario: Default build
-- **WHEN** Tabview is compiled with its default features
+- **WHEN** Tview is compiled with its default features
 - **THEN** SQLite format selection, signature detection, and table selection are available
 
 #### Scenario: SQLite feature is disabled
-- **WHEN** Tabview is compiled without the `sqlite` feature
+- **WHEN** Tview is compiled without the `sqlite` feature
 - **THEN** Turso is absent from the normal dependency graph, Tokio remains available to file-backed sources, and the binary does not accept `--format sqlite`, expose `--table`, or dispatch the SQLite signature
 
 ### Requirement: SQLite source resolution
@@ -117,7 +117,7 @@ Every SQLite table view SHALL be produced from an application-generated source q
 - **THEN** the adapter does not fetch additional database rows to refill the visible result
 
 ### Requirement: SQLite-native source operations
-The SQLite adapter SHALL compile supported typed source filters and source sort keys directly into parameterized SQLite `WHERE` and `ORDER BY` behavior without attempting to reproduce Tabview view semantics.
+The SQLite adapter SHALL compile supported typed source filters and source sort keys directly into parameterized SQLite `WHERE` and `ORDER BY` behavior without attempting to reproduce Tview view semantics.
 
 #### Scenario: Supported source predicate
 - **WHEN** a source filter uses a supported equality, inequality, ordered comparison, contains, prefix, or null-test operation
@@ -133,7 +133,7 @@ The SQLite adapter SHALL compile supported typed source filters and source sort 
 
 #### Scenario: Complex local operation
 - **WHEN** the user applies regex, rendered-value, natural, semantic-version, IP, date, boolean, or custom numeric behavior as a view operation
-- **THEN** Tabview evaluates it only over the bounded SQLite source result
+- **THEN** Tview evaluates it only over the bounded SQLite source result
 
 ### Requirement: SQLite result extent
 The SQLite result SHALL distinguish a complete source result from one truncated by the configured source limit and SHALL report visible rows separately.
@@ -144,7 +144,7 @@ The SQLite result SHALL distinguish a complete source result from one truncated 
 
 #### Scenario: Query exceeds its limit
 - **WHEN** the source query has more matching rows than the configured limit
-- **THEN** Tabview retains at most the limit and reports the source result as truncated
+- **THEN** Tview retains at most the limit and reports the source result as truncated
 
 #### Scenario: Local filter hides rows
 - **WHEN** a view filter leaves 17 visible rows from 1,000 fetched source rows
@@ -203,15 +203,15 @@ SQLite result rows SHALL use a stable database identity when available and SHALL
 - **WHEN** an ordinary view is selected or another relation cannot provide stable row identity across source-query replacements
 - **THEN** cursor and mark state are reset rather than mapped by result position
 
-### Requirement: Tabview-enforced read-only behavior
+### Requirement: Tview-enforced read-only behavior
 The SQLite adapter SHALL open the database through Turso core with `OpenFlags::ReadOnly` before creating a connection, keep the raw connection private, expose only typed discovery, schema, source-query, and row-fetch operations, enable and verify `PRAGMA query_only=ON` as defense in depth, and provide no production path for arbitrary or mutating SQL.
 
 #### Scenario: Sidecar-free rollback database remains unchanged
-- **WHEN** Tabview opens and queries a rollback-journal database that has no engine sidecars
+- **WHEN** Tview opens and queries a rollback-journal database that has no engine sidecars
 - **THEN** the main database bytes remain unchanged and no journal, WAL, shared-memory, coordination, or logical-log sidecar is created
 
 #### Scenario: Existing WAL database remains unchanged
-- **WHEN** Tabview opens and queries a WAL database with existing WAL and shared-memory files
+- **WHEN** Tview opens and queries a WAL database with existing WAL and shared-memory files
 - **THEN** it reads the current logical contents without changing the main database, WAL, or shared-memory bytes and without creating another sidecar
 
 #### Scenario: Non-writable source remains readable
@@ -281,7 +281,7 @@ The SQLite adapter SHALL preserve a column's raw declared type for inspection an
 
 #### Scenario: Semantic-looking numeric declaration
 - **WHEN** a column is declared `BOOLEAN`, `DATE`, `DATETIME`, `DECIMAL`, or another spelling with NUMERIC affinity
-- **THEN** its initial logical type is `Unknown` and Tabview does not infer Boolean, temporal, or exact-decimal semantics from the spelling
+- **THEN** its initial logical type is `Unknown` and Tview does not infer Boolean, temporal, or exact-decimal semantics from the spelling
 
 #### Scenario: Untyped or ANY column
 - **WHEN** a column has no declared type or is declared `ANY`
@@ -297,7 +297,7 @@ The SQLite adapter SHALL preserve a column's raw declared type for inspection an
 
 #### Scenario: Strict table declaration
 - **WHEN** a column belongs to a STRICT table
-- **THEN** Tabview uses the same hint and runtime-value rules rather than adding a separate cell conversion path
+- **THEN** Tview uses the same hint and runtime-value rules rather than adding a separate cell conversion path
 
 #### Scenario: View expression lacks declaration
 - **WHEN** prepared metadata for a view expression provides no reliable declared type

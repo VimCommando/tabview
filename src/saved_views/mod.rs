@@ -21,7 +21,7 @@ use crate::theme::{
 };
 
 pub const MAX_SORT_KEYS: usize = 3;
-const VIEW_DIR: &str = "tabview/views";
+const VIEW_DIR: &str = "tview/views";
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SavedView {
@@ -2405,10 +2405,10 @@ view:
     }
 
     #[test]
-    fn saved_view_dir_uses_tabview_views_under_config_root() {
+    fn saved_view_dir_uses_tview_views_under_config_root() {
         assert_eq!(
             saved_view_dir(Some(Path::new("/tmp/config"))),
-            Some(PathBuf::from("/tmp/config/tabview/views"))
+            Some(PathBuf::from("/tmp/config/tview/views"))
         );
     }
 

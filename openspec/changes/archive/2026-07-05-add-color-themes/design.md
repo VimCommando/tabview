@@ -1,13 +1,13 @@
 ## Context
 
-`tabview` renders the Ratatui interface from a small set of hard-coded `Style::default()` values in `src/ui/mod.rs`. Saved views already provide sparse column metadata under `~/.config/tabview/views`, and the current schema covers column type, formatting, width, alignment, visibility, sort, and filter state.
+`tview` renders the Ratatui interface from a small set of hard-coded `Style::default()` values in `src/ui/mod.rs`. Saved views already provide sparse column metadata under `~/.config/tview/views`, and the current schema covers column type, formatting, width, alignment, visibility, sort, and filter state.
 
-Color themes add a second configuration surface under the same tabview config root. The default visual language should be derived from `cmdzro.vim`: dark background, neutral gray cell text, cyan UI accents, blue only for UI surfaces, yellow only for search or UI emphasis, and red only for errors or unhealthy states.
+Color themes add a second configuration surface under the same tview config root. The default visual language should be derived from `cmdzro.vim`: dark background, neutral gray cell text, cyan UI accents, blue only for UI surfaces, yellow only for search or UI emphasis, and red only for errors or unhealthy states.
 
 ## Goals / Non-Goals
 
 **Goals:**
-- Load named YAML themes from `$XDG_CONFIG_HOME/tabview/themes` or `~/.config/tabview/themes`.
+- Load named YAML themes from `$XDG_CONFIG_HOME/tview/themes` or `~/.config/tview/themes`.
 - Provide a built-in `cmdzro` default theme so the TUI is themed even when no config exists.
 - Parse color values from 16-color names, 256-color indexes, and `#RRGGBBAA` hex values.
 - Resolve colors to terminal-capable Ratatui colors with predictable fallback.
@@ -85,13 +85,13 @@ Fallback should be deterministic:
 - `hex32` on truecolor terminals uses `Color::Rgb`.
 - `hex32` on 256-color terminals maps to the nearest xterm-256 color.
 - `hex32` or `ansi256` on 16-color terminals maps to the nearest configured 16-color fallback.
-- 16-color values use tabview's built-in cmdzro base palette; in truecolor and 256-color modes they resolve through those RGB values, while explicit `ansi16` mode emits ANSI colors for the terminal palette.
+- 16-color values use tview's built-in cmdzro base palette; in truecolor and 256-color modes they resolve through those RGB values, while explicit `ansi16` mode emits ANSI colors for the terminal palette.
 
 Alternative considered: store only Ratatui `Color` immediately. Rejected because doing so loses the original mode, alpha, and alias information needed for validation messages and terminal fallback.
 
 ### Configuration selection
 
-Add a small top-level YAML config file for tabview runtime settings, likely `$XDG_CONFIG_HOME/tabview/config.yml` or `~/.config/tabview/config.yml`:
+Add a small top-level YAML config file for tview runtime settings, likely `$XDG_CONFIG_HOME/tview/config.yml` or `~/.config/tview/config.yml`:
 
 ```yaml
 theme: cmdzro

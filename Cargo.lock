@@ -3655,38 +3655,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tabview"
-version = "2.0.0-alpha.1"
-dependencies = [
- "anyhow",
- "arboard",
- "assert_cmd",
- "clap",
- "crossterm",
- "csv",
- "elasticsearch",
- "encoding_rs",
- "insta",
- "libc",
- "num-format",
- "predicates",
- "ratatui",
- "regex",
- "rusqlite",
- "semver",
- "serde",
- "serde_json",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "turso",
- "unicode-width 0.2.2",
- "url",
- "windows-sys 0.61.2",
- "yaml_serde",
-]
-
-[[package]]
 name = "tap"
 version = "1.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4264,6 +4232,38 @@ dependencies = [
  "turso_sdk_kit",
  "turso_sdk_kit_macros",
  "turso_sync_engine",
+]
+
+[[package]]
+name = "tview"
+version = "2.0.0-alpha.1"
+dependencies = [
+ "anyhow",
+ "arboard",
+ "assert_cmd",
+ "clap",
+ "crossterm",
+ "csv",
+ "elasticsearch",
+ "encoding_rs",
+ "insta",
+ "libc",
+ "num-format",
+ "predicates",
+ "ratatui",
+ "regex",
+ "rusqlite",
+ "semver",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "turso",
+ "unicode-width 0.2.2",
+ "url",
+ "windows-sys 0.61.2",
+ "yaml_serde",
 ]
 
 [[package]]

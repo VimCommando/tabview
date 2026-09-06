@@ -1,6 +1,6 @@
 ## 1. Rust Project Scaffold
 
-- [x] 1.1 Create a single Cargo crate that builds a `tabview` binary.
+- [x] 1.1 Create a single Cargo crate that builds a `tview` binary.
 - [x] 1.2 Add initial dependencies for argument parsing, Ratatui, crossterm, CSV parsing, encoding, Unicode width, error handling, and testing.
 - [x] 1.3 Define module boundaries for `cli`, `ingest`, `table`, `view`, `command`, `ops`, `ui`, and `compat`.
 - [x] 1.4 Add `cargo fmt`, `cargo clippy`, and `cargo test` commands to the documented development workflow.
@@ -15,7 +15,7 @@
 
 ## 3. CLI Compatibility
 
-- [x] 3.1 Implement `tabview` argument parsing for filename, `-`, `--encoding`/`-e`, `--delimiter`/`-d`, `--quoting`, `--start_pos`/`-s`, `--width`/`-w`, `--double_width`, and `--quote-char`/`-q`, with default `--width mode`.
+- [x] 3.1 Implement `tview` argument parsing for filename, `-`, `--encoding`/`-e`, `--delimiter`/`-d`, `--quoting`, `--start_pos`/`-s`, `--width`/`-w`, `--double_width`, and `--quote-char`/`-q`, with default `--width mode`.
 - [x] 3.2 Implement classic `+y:x`, `+y:`, and related start-position parsing.
 - [x] 3.3 Map Python-style quoting names to Rust parser configuration.
 - [x] 3.4 Implement stdin loading while restoring terminal input for the interactive TUI.

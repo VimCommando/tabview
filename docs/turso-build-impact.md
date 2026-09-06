@@ -1,8 +1,8 @@
 # Turso build and runtime impact
 
-Tabview's default-enabled `sqlite` Cargo feature activates the optional
+Tview's default-enabled `sqlite` Cargo feature activates the optional
 `turso` 0.7.1 dependency with default features disabled, explicitly enables
-Turso's mimalloc integration as Tabview's global allocator, and uses Tabview's
+Turso's mimalloc integration as Tview's global allocator, and uses Tview's
 standard Tokio multi-thread runtime for background source-query work. Tokio is
 an unconditional dependency so SQLite and file-backed sources share the same
 runtime boundary. A build without `sqlite` omits Turso and mimalloc but retains
@@ -25,8 +25,8 @@ promise.
 | Release binary | 19,968,208 bytes (19 MiB reported by `ls`) |
 | Incremental release rebuild after runtime change | 7.15 seconds wall clock |
 
-Turso's optional FTS feature is disabled because Tabview does not expose its
-functionality. Tabview also does not select existing virtual tables, including
+Turso's optional FTS feature is disabled because Tview does not expose its
+functionality. Tview also does not select existing virtual tables, including
 FTS5 and RTree tables, because their behavior and module availability cannot
 be treated like an ordinary table under the read-only source contract. Virtual
 shadow tables and SQLite-internal objects are omitted from selection.
@@ -40,7 +40,7 @@ disabled. The reference fixture does not ship in the release binary.
 The runtime SQLite surface is intentionally narrow. A private facade opens the
 database through Turso core with `OpenFlags::ReadOnly` before creating a
 connection, verifies `PRAGMA query_only` as defense in depth, and exposes only
-typed schema discovery, prepared query, and row-fetch operations. Tabview does
+typed schema discovery, prepared query, and row-fetch operations. Tview does
 not expose arbitrary SQL execution. This storage-level boundary prevents
 rollback-to-WAL conversion, sidecar creation, and writes to existing database
 or sidecar bytes.
@@ -54,6 +54,6 @@ Fedora's optional `util-linux-script` package was represented by an isolated
 PTY shim for the six integration tests that require the `script` command; no
 system packages were installed. A refresh of that Linux result is pending
 because the configured host was unreachable when the runtime change was made.
-Tabview's other target environment is WSL, which is the same supported Linux
+Tview's other target environment is WSL, which is the same supported Linux
 target family; native Windows and MinGW are not compatibility targets for this
 change.

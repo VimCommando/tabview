@@ -30,7 +30,7 @@
 ## 4. Establish Turso and read-only access
 
 - [x] 4.1 Pin the candidate `turso` version with defaults disabled, explicitly enable mimalloc without FTS, and make the minimal Tokio runtime a standard dependency for background source work.
-- [x] 4.2 Introduce a Tabview-owned SQLite facade that keeps the raw Turso connection private and exposes typed discovery, schema, source-query, and row-fetch operations without a general execute or arbitrary-SQL API.
+- [x] 4.2 Introduce a Tview-owned SQLite facade that keeps the raw Turso connection private and exposes typed discovery, schema, source-query, and row-fetch operations without a general execute or arbitrary-SQL API.
 - [x] 4.3 Enable and verify `PRAGMA query_only=ON` immediately after connecting, failing source opening when confinement cannot be verified.
 - [x] 4.4 Centralize reviewed read-only SQL templates, typed parameter binding, identifier quoting, and copyable SQL rendering.
 - [x] 4.5 Add a logical snapshot harness proving mutation attempts are rejected and supported actions do not change schema or table contents.

@@ -1,9 +1,9 @@
 ## 1. Theme Configuration
 
-- [x] 1.1 Add theme/config dependencies and module structure for loading tabview YAML configuration and theme YAML files.
-- [x] 1.2 Implement config root discovery for `$XDG_CONFIG_HOME/tabview` and `~/.config/tabview`.
+- [x] 1.1 Add theme/config dependencies and module structure for loading tview YAML configuration and theme YAML files.
+- [x] 1.2 Implement config root discovery for `$XDG_CONFIG_HOME/tview` and `~/.config/tview`.
 - [x] 1.3 Implement built-in `cmdzro` theme data from the `cmdzro.vim` baseline.
-- [x] 1.4 Implement theme discovery from `tabview/themes/*.yml` and `*.yaml` with deterministic theme names from file stems.
+- [x] 1.4 Implement theme discovery from `tview/themes/*.yml` and `*.yaml` with deterministic theme names from file stems.
 - [x] 1.5 Implement selected theme resolution from `config.yml`, with built-in default fallback and fatal errors for missing explicitly selected themes.
 
 ## 2. Color Parsing And Fallback

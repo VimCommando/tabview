@@ -5,14 +5,14 @@ Define configurable color themes for Ratatui rendering, terminal color-mode fall
 ## Requirements
 
 ### Requirement: Theme discovery
-The system SHALL discover color theme YAML files from `$XDG_CONFIG_HOME/tabview/themes`, or `~/.config/tabview/themes` when `XDG_CONFIG_HOME` is unset, and SHALL provide a built-in default theme when no user theme is selected.
+The system SHALL discover color theme YAML files from `$XDG_CONFIG_HOME/tview/themes`, or `~/.config/tview/themes` when `XDG_CONFIG_HOME` is unset, and SHALL provide a built-in default theme when no user theme is selected.
 
 #### Scenario: Built-in default theme
 - **WHEN** a user opens an input without selecting a theme and no theme configuration is present
 - **THEN** the system applies the built-in `cmdzro` theme
 
 #### Scenario: Discover user themes
-- **WHEN** `solarized-dark.yml` exists under `~/.config/tabview/themes`
+- **WHEN** `solarized-dark.yml` exists under `~/.config/tview/themes`
 - **THEN** the system makes a theme named `solarized-dark` available for selection
 
 #### Scenario: Missing theme directory
@@ -23,11 +23,11 @@ The system SHALL discover color theme YAML files from `$XDG_CONFIG_HOME/tabview/
 The system SHALL allow selecting a theme by name through configuration and SHALL fail clearly when a user explicitly selects a missing theme.
 
 #### Scenario: Select configured theme
-- **WHEN** tabview configuration selects `theme: ops-dark` and `ops-dark.yml` exists in the theme directory
+- **WHEN** tview configuration selects `theme: ops-dark` and `ops-dark.yml` exists in the theme directory
 - **THEN** the system applies the `ops-dark` theme to the TUI session
 
 #### Scenario: Missing selected theme
-- **WHEN** tabview configuration selects `theme: missing` and no discovered or built-in theme has that name
+- **WHEN** tview configuration selects `theme: missing` and no discovered or built-in theme has that name
 - **THEN** the system reports a clear configuration error and does not start the viewer
 
 #### Scenario: Invalid unselected theme
@@ -127,4 +127,4 @@ The system SHALL support style modifiers for theme tokens, including bold, itali
 
 #### Scenario: Unsupported terminal modifier
 - **WHEN** the terminal backend cannot visibly render a configured modifier
-- **THEN** tabview continues rendering with the configured colors and does not fail the session
+- **THEN** tview continues rendering with the configured colors and does not fail the session

@@ -1,6 +1,6 @@
 ## Why
 
-Tabview can open delimited and structured text through `SourceAdapter`, `OpenedSource`, and `OpenedTable`, with stable source identities, typed cells, incremental access through `TableStore`, and source-neutral interactive or batch output. Users must still export SQLite tables before inspecting them, even though these contracts can support a query-native relational source directly.
+Tview can open delimited and structured text through `SourceAdapter`, `OpenedSource`, and `OpenedTable`, with stable source identities, typed cells, incremental access through `TableStore`, and source-neutral interactive or batch output. Users must still export SQLite tables before inspecting them, even though these contracts can support a query-native relational source directly.
 
 Local SQLite support can therefore be added as a Turso-backed adapter and store without introducing a second table model or leaking database behavior into `TableView`.
 
@@ -19,14 +19,14 @@ Local SQLite support can therefore be added as a Turso-backed adapter and store 
 - Preserve the existing format-neutral object interpretation option by moving `object_mode` into the nested `source` section with the other source-opening options.
 - Implement `TursoTableStore` with asynchronous query replacement, bounded fetching, cached rows, stable identity where available, and local materialization bounded by the source result rather than the full database.
 - Make SQLite available through the existing source-neutral output adapters. Direct batch output auto-selects a sole selectable relation but fails clearly when multiple selectable relations remain unresolved; interactive and interactive-export modes may use the table picker.
-- Enforce the read-only user contract inside Tabview: open the database through Turso core with `OpenFlags::ReadOnly` before creating a connection, keep that connection behind a read-only application facade, expose only schema inspection and generated `SELECT` operations, enable and verify `PRAGMA query_only=ON` as defense in depth, and regression-test that supported actions neither change database bytes nor create or modify engine sidecars.
-- Disable Turso's default feature set, explicitly retaining mimalloc as Tabview's global allocator while omitting Tantivy-backed FTS because Tabview does not expose it.
+- Enforce the read-only user contract inside Tview: open the database through Turso core with `OpenFlags::ReadOnly` before creating a connection, keep that connection behind a read-only application facade, expose only schema inspection and generated `SELECT` operations, enable and verify `PRAGMA query_only=ON` as defense in depth, and regression-test that supported actions neither change database bytes nor create or modify engine sidecars.
+- Disable Turso's default feature set, explicitly retaining mimalloc as Tview's global allocator while omitting Tantivy-backed FTS because Tview does not expose it.
 
 ## Capabilities
 
 ### New Capabilities
 
-- `sqlite-data-source`: Local SQLite detection, Turso connection behavior, relation discovery and selection, bounded SQL source queries, query provenance, Tabview-enforced read-only behavior, typed rows, incremental storage, and reload/error behavior.
+- `sqlite-data-source`: Local SQLite detection, Turso connection behavior, relation discovery and selection, bounded SQL source queries, query provenance, Tview-enforced read-only behavior, typed rows, incremental storage, and reload/error behavior.
 
 ### Modified Capabilities
 

@@ -9,7 +9,7 @@
 
 ## 2. Discovery and Matching
 
-- [x] 2.1 Add saved view discovery for `tabview/views/*.yml` and `tabview/views/*.yaml` under `$XDG_CONFIG_HOME` or `~/.config` on every platform.
+- [x] 2.1 Add saved view discovery for `tview/views/*.yml` and `tview/views/*.yaml` under `$XDG_CONFIG_HOME` or `~/.config` on every platform.
 - [x] 2.2 Add test-only config root override support for deterministic saved view tests.
 - [x] 2.3 Implement `.yml` before `.yaml` duplicate stem handling with logging and TUI warnings.
 - [x] 2.4 Implement basename-only filename pattern classification for exact, glob, and regex patterns using platform filename case behavior.
@@ -63,7 +63,7 @@
 - [x] 7.1 Serialize only non-default current runtime view state to schema-valid YAML, including modified widths, visibility, alignment, type, format, mask, explicit locale, ordered sort keys, and filters.
 - [x] 7.2 Track whether the active view was loaded from a saved view file and retain its source path for save.
 - [x] 7.3 Generate a placeholder save path by replacing only the opened input's last extension with `.yml` when no saved view was loaded.
-- [x] 7.4 Create `config_dir/tabview/views` on save when the directory does not exist.
+- [x] 7.4 Create `config_dir/tview/views` on save when the directory does not exist.
 - [x] 7.5 Write saved view files atomically with a temporary file and rename or an equivalent failure-safe approach, and keep the modal open on save failures.
 - [x] 7.6 Preserve the header comment block and matching inline comments when updating an existing saved view file.
 - [x] 7.7 Save immediately and report a footer success message when the target file does not exist.

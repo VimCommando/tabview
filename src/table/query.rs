@@ -385,7 +385,7 @@ fn source_runtime_handle() -> tokio::runtime::Handle {
             .get_or_init(|| {
                 tokio::runtime::Builder::new_multi_thread()
                     .worker_threads(2)
-                    .thread_name("tabview-runtime")
+                    .thread_name("tview-runtime")
                     .enable_all()
                     .build()
                     .expect("fallback Tokio runtime")

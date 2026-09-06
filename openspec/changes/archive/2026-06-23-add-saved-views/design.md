@@ -1,15 +1,15 @@
 ## Context
 
-`tabview` currently loads a single tabular input and lets users adjust view state interactively. There is no persistent configuration layer for file-specific column metadata, so repeated operational views must be recreated every session.
+`tview` currently loads a single tabular input and lets users adjust view state interactively. There is no persistent configuration layer for file-specific column metadata, so repeated operational views must be recreated every session.
 
-Saved views add a small user configuration surface under `~/.config/tabview/views/`. A view is selected by matching the opened input filename, then its sparse column configuration is applied to headers present in the loaded table.
+Saved views add a small user configuration surface under `~/.config/tview/views/`. A view is selected by matching the opened input filename, then its sparse column configuration is applied to headers present in the loaded table.
 
 The existing codebase already depends on `regex` and has table, view, sort, and UI modules. This change should add a focused config module behind a Cargo `saved-views` feature and pass resolved metadata into existing table/view initialization rather than spreading config file parsing through the TUI.
 
 ## Goals / Non-Goals
 
 **Goals:**
-- Load `*.yml` and `*.yaml` saved view files from the user's tabview config directory.
+- Load `*.yml` and `*.yaml` saved view files from the user's tview config directory.
 - Treat each saved view file as one view whose unique name is the filename stem.
 - Validate saved views with strongly typed Rust structures plus semantic validation for regexes, globs, masks, and enum combinations.
 - Ship a schema file that YAML-aware editors and tests can use to validate view files and include it in documentation.
@@ -93,7 +93,7 @@ Alternative considered: TOML. It would reduce YAML parser dependency risk, but t
 
 ### Discovery and Matching
 
-Discover files in `config_dir/tabview/views`, where `config_dir` is `$XDG_CONFIG_HOME` when set, otherwise `~/.config`, on every platform including macOS. In tests, allow overriding the config root so behavior is deterministic. Discovery is compiled and run only when the `saved-views` Cargo feature is enabled.
+Discover files in `config_dir/tview/views`, where `config_dir` is `$XDG_CONFIG_HOME` when set, otherwise `~/.config`, on every platform including macOS. In tests, allow overriding the config root so behavior is deterministic. Discovery is compiled and run only when the `saved-views` Cargo feature is enabled.
 
 Each entry in `filenames` is classified as:
 - Regex if it starts with `^` or ends with `$`.
@@ -175,14 +175,14 @@ When serializing generated YAML, include sort and filter state only when the use
 Bind `v` to a saved view modal when the `saved-views` feature is enabled. The modal displays:
 - The current view configuration as YAML.
 - The source filename when the view was loaded from a saved view file.
-- The target filename when the view was not loaded from a file, using the opened input filename with only the last extension replaced by `.yml` under `config_dir/tabview/views/`.
+- The target filename when the view was not loaded from a file, using the opened input filename with only the last extension replaced by `.yml` under `config_dir/tview/views/`.
 - Available actions: `s` to save and `Esc` to close.
 
 The modal is read-only YAML, but scrollable when the generated content is larger than the modal viewport.
 
 The displayed YAML should be generated from the current runtime view state, not only the initially loaded file. It should be sparse: include `name`, `filenames`, and only values that differ from defaults or represent explicit view state. Include top-level `locale` only when the user configured an explicit locale rather than auto-detected/default locale. Include a column only if its view state was modified, including width, visibility, alignment, type, format, mask, sort participation, or active filter participation. Interactive changes such as hiding/showing columns and width adjustments should be reflected in the generated YAML. Generated YAML should include only the current input filename in `filenames`, not the originally loaded view's filename patterns.
 
-Saving writes to the loaded view file when the view came from disk. When updating an existing file, preserve the header comment block and matching inline comments while allowing generated YAML to use canonical field order. If the current view did not come from disk, saving writes to `~/.config/tabview/views/<input-name-with-last-extension-replaced>.yml`. For example, `cat_shards.txt` becomes `cat_shards.yml` and `foo.bar.csv` becomes `foo.bar.yml`. The implementation should create the view directory if it does not exist.
+Saving writes to the loaded view file when the view came from disk. When updating an existing file, preserve the header comment block and matching inline comments while allowing generated YAML to use canonical field order. If the current view did not come from disk, saving writes to `~/.config/tview/views/<input-name-with-last-extension-replaced>.yml`. For example, `cat_shards.txt` becomes `cat_shards.yml` and `foo.bar.csv` becomes `foo.bar.yml`. The implementation should create the view directory if it does not exist.
 
 If the target file does not exist, pressing `s` saves immediately and reports success in the footer notification line. If the target file already exists, the modal must ask for overwrite confirmation with `y` and `n` before writing. A declined overwrite returns to the modal without changing the file. A successful save updates the active view source path and reports success through the footer message line.
 
@@ -200,7 +200,7 @@ Initial formats:
 - Number family: `locale`, `mask`
 - Boolean family: `char`, `bit`, `word`
 
-For user-definable numeric masks, use a small tabview-owned mask grammar for the first implementation:
+For user-definable numeric masks, use a small tview-owned mask grammar for the first implementation:
 - `0`
 - `0.0`, `0.00`, etc. for fixed decimal places.
 - `#,##0`
@@ -276,7 +276,7 @@ Examples:
 7. Add tests using a temporary config directory.
 8. Document the saved view directory, examples, and schema path.
 
-Rollback is simple: if config loading is disabled or fails, `tabview` keeps current behavior.
+Rollback is simple: if config loading is disabled or fails, `tview` keeps current behavior.
 
 ## Open Questions
 

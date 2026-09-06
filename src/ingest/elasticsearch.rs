@@ -624,7 +624,7 @@ async fn execute_esql_async(
         .map_err(|error| anyhow::anyhow!("invalid ES|QL response: {error}"))?;
     let generation = SourceGeneration::new();
     request.generation = generation;
-    let relation_name = target.unwrap_or_else(|| "__tabview_esql_query".to_owned());
+    let relation_name = target.unwrap_or_else(|| "__tview_esql_query".to_owned());
     let definition = definition_from_esql_columns(generation, &relation_name, &parsed.columns);
     request.filters = resolve_esql_filters(&definition, &filters)?;
     request.order_by = resolve_esql_sort(&definition, &sorts)?;

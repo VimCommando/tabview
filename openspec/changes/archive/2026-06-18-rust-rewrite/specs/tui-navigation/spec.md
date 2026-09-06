@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Ratatui terminal viewer
-The system SHALL render a spreadsheet-like terminal viewer using Ratatui and crossterm while preserving the original Tabview screen structure as closely as practical.
+The system SHALL render a spreadsheet-like terminal viewer using Ratatui and crossterm while preserving the upstream screen structure as closely as practical.
 
 #### Scenario: Initial screen layout
 - **WHEN** a file is opened

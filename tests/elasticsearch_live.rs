@@ -4,18 +4,17 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn endpoint() -> String {
-    std::env::var("TABVIEW_ELASTICSEARCH_URL")
-        .unwrap_or_else(|_| "http://localhost:19200".to_owned())
+    std::env::var("TVIEW_ELASTICSEARCH_URL").unwrap_or_else(|_| "http://localhost:19200".to_owned())
 }
 
-fn tabview() -> Command {
-    Command::cargo_bin("tabview").unwrap()
+fn tview() -> Command {
+    Command::cargo_bin("tview").unwrap()
 }
 
 #[test]
 #[ignore = "requires tests/fixtures/elasticsearch"]
 fn generated_esql_reads_a_selected_index_without_mutating_it() {
-    tabview()
+    tview()
         .args([
             "--format",
             "elasticsearch",
@@ -34,7 +33,7 @@ fn generated_esql_reads_a_selected_index_without_mutating_it() {
 #[test]
 #[ignore = "requires tests/fixtures/elasticsearch"]
 fn complete_user_esql_supports_transforms_and_a_hard_limit() {
-    tabview()
+    tview()
         .args([
             "--format",
             "elasticsearch",
@@ -52,7 +51,7 @@ fn complete_user_esql_supports_transforms_and_a_hard_limit() {
 #[test]
 #[ignore = "requires tests/fixtures/elasticsearch"]
 fn aliases_and_data_streams_work_as_explicit_from_targets() {
-    tabview()
+    tview()
         .args([
             "--format",
             "elasticsearch",
@@ -70,14 +69,14 @@ fn aliases_and_data_streams_work_as_explicit_from_targets() {
 #[test]
 #[ignore = "requires tests/fixtures/elasticsearch"]
 fn discovery_mapping_field_caps_authentication_and_alias_passthrough_are_live() {
-    tabview()
+    tview()
         .args(["--format", "elasticsearch", &endpoint()])
         .assert()
         .failure()
         .stdout("")
         .stderr(predicate::str::contains("--table or --query"));
 
-    tabview()
+    tview()
         .env("ELASTIC_USERNAME", "fixture-user")
         .env("ELASTIC_PASSWORD", "fixture-password")
         .args([
@@ -93,7 +92,7 @@ fn discovery_mapping_field_caps_authentication_and_alias_passthrough_are_live() 
         .success()
         .stdout(predicate::str::contains("[\"api\",\"prod\"]"));
 
-    tabview()
+    tview()
         .args([
             "--format",
             "elasticsearch",
@@ -112,7 +111,7 @@ fn discovery_mapping_field_caps_authentication_and_alias_passthrough_are_live() 
 #[ignore = "requires tests/fixtures/elasticsearch"]
 fn live_queries_apply_limits_transforms_and_remain_read_only() {
     let count = || {
-        tabview()
+        tview()
             .args([
                 "--format",
                 "elasticsearch",
@@ -128,7 +127,7 @@ fn live_queries_apply_limits_transforms_and_remain_read_only() {
     let before = count();
     assert!(before.status.success());
 
-    tabview()
+    tview()
         .args([
             "--format",
             "elasticsearch",
@@ -154,7 +153,7 @@ fn live_queries_apply_limits_transforms_and_remain_read_only() {
 #[test]
 #[ignore = "requires tests/fixtures/elasticsearch"]
 fn live_conflict_partial_and_error_paths_keep_stdout_clean() {
-    tabview()
+    tview()
         .args([
             "--format",
             "elasticsearch",
@@ -166,7 +165,7 @@ fn live_conflict_partial_and_error_paths_keep_stdout_clean() {
         .failure()
         .stdout("");
 
-    tabview()
+    tview()
         .args([
             "--format",
             "elasticsearch",
@@ -178,7 +177,7 @@ fn live_conflict_partial_and_error_paths_keep_stdout_clean() {
         .success()
         .stdout(predicate::str::contains("conflicted"));
 
-    tabview()
+    tview()
         .args([
             "--format",
             "elasticsearch",

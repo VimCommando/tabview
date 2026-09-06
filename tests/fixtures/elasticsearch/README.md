@@ -8,6 +8,6 @@ conflict.
 ```sh
 docker compose -f tests/fixtures/elasticsearch/docker-compose.yml up -d --wait
 tests/fixtures/elasticsearch/setup.sh
-TABVIEW_ELASTICSEARCH_URL=http://localhost:19200 \
+TVIEW_ELASTICSEARCH_URL=http://localhost:19200 \
   cargo test --features elasticsearch --test elasticsearch_live -- --ignored
 ```

@@ -1,6 +1,6 @@
 ## Purpose
 
-Define table model behavior and user-facing table operations for the Rust `tabview` viewer.
+Define table model behavior and user-facing table operations for the Rust `tview` viewer.
 
 ## Requirements
 
@@ -85,7 +85,7 @@ The system SHALL use the generic local executor as the canonical implementation 
 - **WHEN** a store accepts a source query but execution fails, or local view execution fails
 - **THEN** the error is reported and the previously successful operation state, result, cursor, and viewport remain active
 ### Requirement: Deterministic typed operation semantics
-The system SHALL use one canonical comparator and predicate behavior for view operations across all sources. Source operations SHALL use documented source-native typed semantics and SHALL NOT be required to reproduce advanced view behavior such as rendered-value matching, Rust regex, natural sort, or Tabview-specific numeric parsing.
+The system SHALL use one canonical comparator and predicate behavior for view operations across all sources. Source operations SHALL use documented source-native typed semantics and SHALL NOT be required to reproduce advanced view behavior such as rendered-value matching, Rust regex, natural sort, or Tview-specific numeric parsing.
 
 #### Scenario: Equal view-sort keys
 - **WHEN** two rows compare equal under every active view-sort key
@@ -104,7 +104,7 @@ The system SHALL use one canonical comparator and predicate behavior for view op
 - **THEN** it uses the existing local case sensitivity, string ordering, natural tokenizer, Rust `regex` behavior, and requested raw or rendered domain
 
 #### Scenario: Native source semantics differ
-- **WHEN** SQLite collation, null placement, type affinity, or comparison semantics differ from Tabview's view semantics
+- **WHEN** SQLite collation, null placement, type affinity, or comparison semantics differ from Tview's view semantics
 - **THEN** the source operation uses SQLite behavior and the UI identifies it as a source operation
 ### Requirement: Configurable sort null placement
 The viewer SHALL support direction-independent `first` or `last` null placement as a view-wide sorting default with an optional per-column override, and SHALL include the resolved policy in every sort key.

@@ -1,6 +1,6 @@
 ## Context
 
-Tabview currently treats the positional CLI value as a local `PathBuf` or stdin marker. `SourceAdapter` opens it into `OpenedSource`/`OpenedTable`, `TableDefinition` describes a generation-scoped fixed schema, and `TableStore` supplies typed rows. SQLite added relation discovery, bounded source operations, query provenance, and revisioned asynchronous replacement, but its replacement contract assumes every query keeps the selected relation's schema.
+Tview currently treats the positional CLI value as a local `PathBuf` or stdin marker. `SourceAdapter` opens it into `OpenedSource`/`OpenedTable`, `TableDefinition` describes a generation-scoped fixed schema, and `TableStore` supplies typed rows. SQLite added relation discovery, bounded source operations, query provenance, and revisioned asynchronous replacement, but its replacement contract assumes every query keeps the selected relation's schema.
 
 Elasticsearch introduces two related changes. First, the positional target is a remote HTTP(S) endpoint rather than a file. Second, ES|QL is a complete pipeline language whose result columns can differ from the selected index mappings. A user query can select multiple indices and can add, remove, rename, reorder, aggregate, or retype columns. Mapping discovery is still valuable for generated queries and source editing, but returned ES|QL column metadata must define the rendered result.
 
@@ -32,7 +32,7 @@ The CLI should not acquire a separate family of endpoint-, index-, and query-spe
 - Exact total-hit counts for ES|QL results.
 - Persisting credentials in saved views or adding source-specific credential CLI flags.
 - Named connection profiles or per-endpoint credential configuration.
-- Making source-native SQL/ES|QL comparison semantics equal Tabview's local view semantics.
+- Making source-native SQL/ES|QL comparison semantics equal Tview's local view semantics.
 
 ## Decisions
 
@@ -66,7 +66,7 @@ The alternative of treating every URL as `PathBuf` preserves fewer types but rep
 Add `elasticsearch` as a feature-gated input format and expose:
 
 ```text
-tabview <target> [--format <format>] [--table <name> | --query <text>]
+tview <target> [--format <format>] [--table <name> | --query <text>]
 ```
 
 `--table` means a source-native selectable relation or target. `--query` means a complete native query interpreted by the resolved adapter. They conflict because allowing both would create two authorities for relation selection.
@@ -102,7 +102,7 @@ When `--table` or the picker selects one target, the adapter obtains:
 
 This produces an Elasticsearch field catalog used by source configuration, completion, type-aware operator availability, and diagnostics. It is not installed directly as the active `TableDefinition`.
 
-The successful ES|QL response `columns` array defines the active table. Each result column retains its raw ES|QL type and ordinal. A best-effort link to one mapping field is stored only when name and type lineage are unambiguous. Query-only startup without `--table` skips mapping discovery and builds directly from response columns; Tabview does not implement a partial ES|QL parser that would fail on patterns, subqueries, joins, or future syntax.
+The successful ES|QL response `columns` array defines the active table. Each result column retains its raw ES|QL type and ordinal. A best-effort link to one mapping field is stored only when name and type lineage are unambiguous. Query-only startup without `--table` skips mapping discovery and builds directly from response columns; Tview does not implement a partial ES|QL parser that would fail on patterns, subqueries, joins, or future syntax.
 
 Schema-changing source replacement returns a complete result bundle:
 
@@ -142,13 +142,13 @@ Elasticsearch composition is:
 | LIMIT <hard boundary>
 ```
 
-TUI-generated identifiers and values use ES|QL parameters where supported and adapter-owned safe identifier construction otherwise. A user base query may already contain sorting, aggregation, or limiting; those stages remain inside the opaque base, and Tabview's final limit remains the hard result boundary.
+TUI-generated identifiers and values use ES|QL parameters where supported and adapter-owned safe identifier construction otherwise. A user base query may already contain sorting, aggregation, or limiting; those stages remain inside the opaque base, and Tview's final limit remains the hard result boundary.
 
 SQLite composition treats a valid native row query as a derived input:
 
 ```sql
 SELECT *
-FROM (<native query>) AS "__tabview_source"
+FROM (<native query>) AS "__tview_source"
 WHERE <bound source predicates>
 ORDER BY <quoted result columns>
 LIMIT ?
@@ -200,7 +200,7 @@ Superseding a request aborts its client future when possible; a response that st
 
 Response JSON maps null, boolean, signed integral values, finite floating-point values, and strings to existing typed cells when lossless. Arrays and objects use the structured JSON cell representation. Values that do not fit an existing numeric representation remain lossless structured/text values with their raw ES|QL column type rather than being truncated.
 
-Mapping and response type strings remain inspectable source metadata. Tabview does not invent exact local date, IP, spatial, unsigned, or union semantics; existing local modes may operate on rendered forms when explicitly selected.
+Mapping and response type strings remain inspectable source metadata. Tview does not invent exact local date, IP, spatial, unsigned, or union semantics; existing local modes may operate on rendered forms when explicitly selected.
 
 ### Model limit extent and partial execution independently
 

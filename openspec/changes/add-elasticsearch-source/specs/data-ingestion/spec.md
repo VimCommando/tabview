@@ -4,11 +4,11 @@
 The system SHALL represent positional source targets as filesystem paths, `file://` URI paths, standard input, or parsed remote URLs and SHALL pass the target to the resolved format adapter without interpreting a remote URL as a local path.
 
 #### Scenario: File URI path
-- **WHEN** a user runs `tabview file:///tmp/data.csv`
+- **WHEN** a user runs `tview file:///tmp/data.csv`
 - **THEN** the system reads `/tmp/data.csv`
 
 #### Scenario: Standard input target
-- **WHEN** a user runs `tabview -`
+- **WHEN** a user runs `tview -`
 - **THEN** the system treats standard input as the source byte stream
 
 #### Scenario: Remote URL target
@@ -17,7 +17,7 @@ The system SHALL represent positional source targets as filesystem paths, `file:
 
 #### Scenario: Remote URL is not a path
 - **WHEN** an HTTP(S) or `libsql://` target is parsed
-- **THEN** Tabview does not call local filesystem metadata or file-opening operations for that target
+- **THEN** Tview does not call local filesystem metadata or file-opening operations for that target
 
 ## ADDED Requirements
 
@@ -34,7 +34,7 @@ Format resolution SHALL use explicit CLI or saved format first, then an unambigu
 
 #### Scenario: Ambiguous HTTPS scheme
 - **WHEN** an HTTPS target has no explicit or saved format
-- **THEN** Tabview requires format selection instead of guessing Elasticsearch, JSON, or another HTTP-backed source
+- **THEN** Tview requires format selection instead of guessing Elasticsearch, JSON, or another HTTP-backed source
 
 #### Scenario: Local format probing remains
 - **WHEN** the target is a local path without an explicit format

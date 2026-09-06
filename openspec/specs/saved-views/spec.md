@@ -5,10 +5,10 @@ Define user-defined saved view configuration files, matching, validation, applic
 ## Requirements
 
 ### Requirement: Saved view discovery
-When compiled with the `saved-views` feature, the system SHALL discover user-defined saved view files from `$XDG_CONFIG_HOME/tabview/views`, or `~/.config/tabview/views` when `XDG_CONFIG_HOME` is unset, including files ending in `.yml` or `.yaml`.
+When compiled with the `saved-views` feature, the system SHALL discover user-defined saved view files from `$XDG_CONFIG_HOME/tview/views`, or `~/.config/tview/views` when `XDG_CONFIG_HOME` is unset, including files ending in `.yml` or `.yaml`.
 
 #### Scenario: Discover views from config directory
-- **WHEN** a user opens a file and saved views exist under `~/.config/tabview/views`
+- **WHEN** a user opens a file and saved views exist under `~/.config/tview/views`
 - **THEN** the system loads candidate `.yml` and `.yaml` view files before initializing the table view
 
 #### Scenario: Missing view directory
@@ -100,19 +100,19 @@ When compiled with the `saved-views` feature, the system SHALL apply matching sa
 - **THEN** the system applies the matching saved view automatically
 
 #### Scenario: Force saved view by name
-- **WHEN** a user runs `tabview --view cat-shards cat_nodes.txt` and `cat-shards.yml` exists
+- **WHEN** a user runs `tview --view cat-shards cat_nodes.txt` and `cat-shards.yml` exists
 - **THEN** the system applies that saved view even if the input basename does not match the view's `filenames`
 
 #### Scenario: Force saved view with extension
-- **WHEN** a user runs `tabview --view cat-shards.yaml cat_nodes.txt` and `cat-shards.yml` exists
+- **WHEN** a user runs `tview --view cat-shards.yaml cat_nodes.txt` and `cat-shards.yml` exists
 - **THEN** the system normalizes away the `.yaml` extension and applies the `cat-shards` saved view
 
 #### Scenario: Disable saved views
-- **WHEN** a user runs `tabview --no-view cat_shards.txt`
+- **WHEN** a user runs `tview --no-view cat_shards.txt`
 - **THEN** the system opens the input without discovering or applying saved views
 
 #### Scenario: Missing forced view
-- **WHEN** a user runs `tabview --view missing data.txt` and no saved view has that name
+- **WHEN** a user runs `tview --view missing data.txt` and no saved view has that name
 - **THEN** the system reports a clear CLI error and does not start the viewer
 ### Requirement: Saved source options
 A saved view SHALL apply source-opening and source-query options from `source` before constructing the active source result. Explicit CLI source options SHALL override matching saved values for that invocation.
@@ -355,15 +355,15 @@ The system SHALL serialize the current runtime configuration as saved-view YAML 
 - **WHEN** a SQLite source exposes the SQL generated from saved source operations
 - **THEN** serialization persists the structured source operations rather than a duplicated generated SQL string
 ### Requirement: Saved view writing
-The system SHALL save the current runtime view configuration to `config_dir/tabview/views` from the view modal.
+The system SHALL save the current runtime view configuration to `config_dir/tview/views` from the view modal.
 
 #### Scenario: Save loaded view
-- **WHEN** a view was loaded from `/home/user/.config/tabview/views/cat-shards.yml` and the user saves from the view modal
+- **WHEN** a view was loaded from `/home/user/.config/tview/views/cat-shards.yml` and the user saves from the view modal
 - **THEN** the system writes the current view configuration atomically to that file after any required overwrite confirmation while preserving the header comment block and matching inline comments
 
 #### Scenario: Save new placeholder view
 - **WHEN** no view was loaded for `foo.bar.csv` and the user saves from the view modal
-- **THEN** the system writes the current view configuration atomically to `~/.config/tabview/views/foo.bar.yml`
+- **THEN** the system writes the current view configuration atomically to `~/.config/tview/views/foo.bar.yml`
 
 #### Scenario: Create saved view directory on save
 - **WHEN** the saved views directory does not exist and the user saves from the view modal
@@ -382,7 +382,7 @@ The system SHALL save the current runtime view configuration to `config_dir/tabv
 - **THEN** the system logs the error, reports it through the modal or footer message line, keeps the modal open, and keeps the viewer running
 
 #### Scenario: No-view disables saving
-- **WHEN** the user invoked `tabview --no-view data.csv`
+- **WHEN** the user invoked `tview --no-view data.csv`
 - **THEN** saved view authoring and saving are disabled for that session
 ### Requirement: Non-fatal saved view failures
 The system SHALL treat saved view loading, validation, matching, and application failures as non-fatal unless the user explicitly requests a missing view through `--view`.

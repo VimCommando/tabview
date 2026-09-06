@@ -62,7 +62,7 @@ fn run_in_pty(command: &str, keys: &[u8]) -> Output {
 fn interactive_export_applies_edits_and_waits_for_late_stdin() {
     let dir = tempfile::tempdir().expect("tempdir");
     let output_path = dir.path().join("output.txt");
-    let binary = shell_quote(Path::new(env!("CARGO_BIN_EXE_tabview")));
+    let binary = shell_quote(Path::new(env!("CARGO_BIN_EXE_tview")));
     let destination = shell_quote(&output_path);
     let command = format!(
         "(printf 'A,B\\n1,2\\n'; sleep 1; printf '3,4\\n') | {binary} -i -o table - > {destination}"
@@ -80,7 +80,7 @@ fn interactive_export_applies_edits_and_waits_for_late_stdin() {
 fn post_start_ingestion_failure_does_not_export_partial_output() {
     let dir = tempfile::tempdir().expect("tempdir");
     let output_path = dir.path().join("output.txt");
-    let binary = shell_quote(Path::new(env!("CARGO_BIN_EXE_tabview")));
+    let binary = shell_quote(Path::new(env!("CARGO_BIN_EXE_tview")));
     let destination = shell_quote(&output_path);
     let command = format!(
         "(printf '[\\n{{\"a\":1}},\\n'; sleep 1; printf '{{broken]\\n') | {binary} --format json -i -o table - > {destination}"
@@ -99,9 +99,9 @@ fn cancelled_interactive_transform_does_not_export() {
     let dir = tempfile::tempdir().expect("tempdir");
     let input_path = dir.path().join("input.csv");
     let output_path = dir.path().join("output.txt");
-    let pid_path = dir.path().join("tabview.pid");
+    let pid_path = dir.path().join("tview.pid");
     std::fs::write(&input_path, "A,B\n1,2\n").expect("input");
-    let binary = shell_quote(Path::new(env!("CARGO_BIN_EXE_tabview")));
+    let binary = shell_quote(Path::new(env!("CARGO_BIN_EXE_tview")));
     let input = shell_quote(&input_path);
     let destination = shell_quote(&output_path);
     let pid_file = shell_quote(&pid_path);
@@ -129,7 +129,7 @@ fn cancelled_interactive_transform_does_not_export() {
             }
             pid
         })
-        .expect("tabview pid");
+        .expect("tview pid");
     std::thread::sleep(Duration::from_millis(300));
     // SAFETY: the PID was emitted by the test's child shell and SIGTERM has no
     // memory-safety preconditions.
@@ -146,7 +146,7 @@ fn explicit_view_only_mode_does_not_export() {
     let input_path = dir.path().join("input.csv");
     let output_path = dir.path().join("output.txt");
     std::fs::write(&input_path, "A,B\n1,2\n").expect("input");
-    let binary = shell_quote(Path::new(env!("CARGO_BIN_EXE_tabview")));
+    let binary = shell_quote(Path::new(env!("CARGO_BIN_EXE_tview")));
     let input = shell_quote(&input_path);
     let destination = shell_quote(&output_path);
     let command = format!("{binary} -i {input} > {destination}");
@@ -161,7 +161,7 @@ fn terminal_stdout_selects_automatic_view_only_tui() {
     let dir = tempfile::tempdir().expect("tempdir");
     let input_path = dir.path().join("input.csv");
     std::fs::write(&input_path, "A,B\n1,2\n").expect("input");
-    let binary = shell_quote(Path::new(env!("CARGO_BIN_EXE_tabview")));
+    let binary = shell_quote(Path::new(env!("CARGO_BIN_EXE_tview")));
     let input = shell_quote(&input_path);
 
     let output = run_in_pty(&format!("{binary} {input}"), b"q");
@@ -183,7 +183,7 @@ fn interactive_mode_without_a_controlling_terminal_fails_without_output() {
     let dir = tempfile::tempdir().expect("tempdir");
     let input_path = dir.path().join("input.csv");
     std::fs::write(&input_path, "A,B\n1,2\n").expect("input");
-    let mut command = Command::new(env!("CARGO_BIN_EXE_tabview"));
+    let mut command = Command::new(env!("CARGO_BIN_EXE_tview"));
     command
         .args(["-i", "-o", "table"])
         .arg(input_path)
@@ -203,7 +203,7 @@ fn interactive_mode_without_a_controlling_terminal_fails_without_output() {
         });
     }
 
-    let output = command.output().expect("run detached tabview");
+    let output = command.output().expect("run detached tview");
     assert!(!output.status.success());
     assert!(output.stdout.is_empty());
     assert!(!output.stderr.is_empty());

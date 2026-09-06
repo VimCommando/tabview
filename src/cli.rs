@@ -8,7 +8,7 @@ use crate::output::{ColorOutput, OutputFormat};
 use crate::view::ColumnWidthMode;
 
 #[derive(Debug, Clone, PartialEq, Eq, Parser)]
-#[command(name = "tabview", disable_help_subcommand = true)]
+#[command(name = "tview", disable_help_subcommand = true)]
 #[cfg_attr(
     all(feature = "sqlite", not(feature = "elasticsearch")),
     command(about = "View delimited, JSON, NDJSON, or local SQLite data.")
@@ -449,27 +449,27 @@ mod tests {
 
     #[test]
     fn default_width_is_mode() {
-        let config = parse(&["tabview", "sample/data_ohlcv.csv"]);
+        let config = parse(&["tview", "sample/data_ohlcv.csv"]);
         assert_eq!(config.width, ColumnWidthMode::Mode);
     }
 
     #[test]
     fn parses_composable_runtime_and_output_options() {
-        let automatic = parse(&["tabview", "sample/data_ohlcv.csv"]);
+        let automatic = parse(&["tview", "sample/data_ohlcv.csv"]);
         assert!(!automatic.interactive);
         assert_eq!(automatic.output, None);
         assert_eq!(automatic.color, ColorOutput::Auto);
 
-        let interactive = parse(&["tabview", "-i", "sample/data_ohlcv.csv"]);
+        let interactive = parse(&["tview", "-i", "sample/data_ohlcv.csv"]);
         assert!(interactive.interactive);
         assert_eq!(interactive.output, None);
 
-        let direct = parse(&["tabview", "-o", "table", "sample/data_ohlcv.csv"]);
+        let direct = parse(&["tview", "-o", "table", "sample/data_ohlcv.csv"]);
         assert!(!direct.interactive);
         assert_eq!(direct.output, Some(OutputFormat::Table));
 
         let composed = parse(&[
-            "tabview",
+            "tview",
             "--interactive",
             "--output",
             "table",
@@ -485,14 +485,14 @@ mod tests {
     #[test]
     fn rejects_runtime_names_and_unknown_output_formats() {
         assert!(
-            Args::try_parse_from(["tabview", "--output", "tui", "sample/data_ohlcv.csv"]).is_err()
+            Args::try_parse_from(["tview", "--output", "tui", "sample/data_ohlcv.csv"]).is_err()
         );
         assert!(
-            Args::try_parse_from(["tabview", "--output", "markdown", "sample/data_ohlcv.csv"])
+            Args::try_parse_from(["tview", "--output", "markdown", "sample/data_ohlcv.csv"])
                 .is_err()
         );
         assert!(
-            Args::try_parse_from(["tabview", "--color", "sometimes", "sample/data_ohlcv.csv"])
+            Args::try_parse_from(["tview", "--color", "sometimes", "sample/data_ohlcv.csv"])
                 .is_err()
         );
     }
@@ -500,7 +500,7 @@ mod tests {
     #[test]
     fn rejects_zero_fixed_width() {
         assert_eq!(
-            parse_config_error(&["tabview", "--width", "0", "sample/data_ohlcv.csv"]),
+            parse_config_error(&["tview", "--width", "0", "sample/data_ohlcv.csv"]),
             CliError::InvalidWidth {
                 value: "0".to_owned()
             }
@@ -510,7 +510,7 @@ mod tests {
     #[test]
     fn rejects_non_ascii_quote_character() {
         assert_eq!(
-            parse_config_error(&["tabview", "--quote-char", "“", "sample/data_ohlcv.csv"]),
+            parse_config_error(&["tview", "--quote-char", "“", "sample/data_ohlcv.csv"]),
             CliError::InvalidChar {
                 what: "quote character",
                 value: "“".to_owned()
@@ -521,7 +521,7 @@ mod tests {
     #[test]
     fn parses_readme_start_position() {
         let config = parse(&[
-            "tabview",
+            "tview",
             "sample/data_ohlcv.csv",
             "--start_pos",
             "6,5",
@@ -541,13 +541,13 @@ mod tests {
     #[test]
     fn rejects_start_position_with_extra_components() {
         assert_eq!(
-            parse_config_error(&["tabview", "--start_pos", "1,2,3", "sample/data_ohlcv.csv"]),
+            parse_config_error(&["tview", "--start_pos", "1,2,3", "sample/data_ohlcv.csv"]),
             CliError::InvalidStartPosition {
                 value: "1,2,3".to_owned()
             }
         );
         assert_eq!(
-            parse_config_error(&["tabview", "sample/data_ohlcv.csv", "+1:2:3"]),
+            parse_config_error(&["tview", "sample/data_ohlcv.csv", "+1:2:3"]),
             CliError::InvalidStartPosition {
                 value: "+1:2:3".to_owned()
             }
@@ -556,7 +556,7 @@ mod tests {
 
     #[test]
     fn parses_classic_start_position() {
-        let config = parse(&["tabview", "sample/data_ohlcv.csv", "+6:5"]);
+        let config = parse(&["tview", "sample/data_ohlcv.csv", "+6:5"]);
         assert_eq!(
             config.start_position,
             StartPosition {
@@ -568,7 +568,7 @@ mod tests {
 
     #[test]
     fn parses_classic_row_only_start_position() {
-        let config = parse(&["tabview", "sample/data_ohlcv.csv", "+6:"]);
+        let config = parse(&["tview", "sample/data_ohlcv.csv", "+6:"]);
         assert_eq!(
             config.start_position,
             StartPosition {
@@ -580,7 +580,7 @@ mod tests {
 
     #[test]
     fn parses_mysql_pager_shape() {
-        let config = parse(&["tabview", "-d", r"\t", "--quoting", "QUOTE_NONE", "-"]);
+        let config = parse(&["tview", "-d", r"\t", "--quoting", "QUOTE_NONE", "-"]);
         assert_eq!(config.target, SourceTarget::Stdin);
         assert_eq!(config.delimiter, Some(b'\t'));
         assert_eq!(config.quoting, Some(Quoting::None));
@@ -590,7 +590,7 @@ mod tests {
     #[test]
     fn parses_source_open_options() {
         let config = parse(&[
-            "tabview",
+            "tview",
             "--format",
             "json",
             "--json-path",
@@ -617,13 +617,11 @@ mod tests {
 
     #[test]
     fn validates_object_mode_values_and_explicit_row_stream_conflicts() {
-        assert!(
-            Args::try_parse_from(["tabview", "--object-mode", "rows", "response.json"]).is_err()
-        );
+        assert!(Args::try_parse_from(["tview", "--object-mode", "rows", "response.json"]).is_err());
         for format in ["delimited", "ndjson"] {
             assert_eq!(
                 parse_config_error(&[
-                    "tabview",
+                    "tview",
                     "--format",
                     format,
                     "--object-mode",
@@ -649,7 +647,7 @@ mod tests {
     #[test]
     fn sqlite_feature_exposes_its_cli_surface() {
         let config = parse(&[
-            "tabview",
+            "tview",
             "--format",
             "sqlite",
             "--table",
@@ -659,7 +657,7 @@ mod tests {
         assert_eq!(config.source_options.format, Some(InputFormat::Sqlite));
         assert_eq!(config.source_options.table.as_deref(), Some("users"));
         let query = parse(&[
-            "tabview",
+            "tview",
             "--format",
             "sqlite",
             "--query",
@@ -681,7 +679,7 @@ mod tests {
     #[test]
     fn native_query_and_table_conflict_at_argument_parsing() {
         assert!(Args::try_parse_from([
-            "tabview",
+            "tview",
             "--table",
             "users",
             "--query",
@@ -695,7 +693,7 @@ mod tests {
     #[test]
     fn elasticsearch_feature_exposes_remote_target_and_query() {
         let config = parse(&[
-            "tabview",
+            "tview",
             "https://elastic.example:9200",
             "--format",
             "elasticsearch",
@@ -725,7 +723,7 @@ mod tests {
     #[test]
     fn table_can_be_combined_with_explicit_auto_format() {
         let config = parse(&[
-            "tabview",
+            "tview",
             "--format",
             "auto",
             "--table",
@@ -740,11 +738,9 @@ mod tests {
     #[cfg(not(any(feature = "sqlite", feature = "elasticsearch")))]
     #[test]
     fn native_source_features_remove_their_cli_surface() {
-        assert!(Args::try_parse_from(["tabview", "--format", "sqlite", "application.db"]).is_err());
-        assert!(Args::try_parse_from(["tabview", "--table", "users", "application.db"]).is_err());
-        assert!(
-            Args::try_parse_from(["tabview", "--query", "SELECT 1", "application.db"]).is_err()
-        );
+        assert!(Args::try_parse_from(["tview", "--format", "sqlite", "application.db"]).is_err());
+        assert!(Args::try_parse_from(["tview", "--table", "users", "application.db"]).is_err());
+        assert!(Args::try_parse_from(["tview", "--query", "SELECT 1", "application.db"]).is_err());
 
         let help = Args::command().render_long_help().to_string();
         assert!(!help.contains("--table <TABLE>"));
@@ -753,7 +749,7 @@ mod tests {
 
     #[test]
     fn object_mode_does_not_imply_a_format_for_stdin() {
-        let config = parse(&["tabview", "--object-mode", "entries", "-"]);
+        let config = parse(&["tview", "--object-mode", "entries", "-"]);
         assert_eq!(config.target, SourceTarget::Stdin);
         assert_eq!(config.source_options.format, None);
         assert_eq!(config.source_options.object_mode, Some(ObjectMode::Entries));
@@ -765,7 +761,7 @@ mod tests {
             .join("sample/json/elasticsearch-response.json");
         let fixture_arg = fixture.to_string_lossy().into_owned();
         let config = parse(&[
-            "tabview",
+            "tview",
             "--format",
             "json",
             "--json-path",
@@ -801,7 +797,7 @@ mod tests {
     #[test]
     fn rejects_invalid_json_pointer_during_argument_parsing() {
         assert!(
-            Args::try_parse_from(["tabview", "--json-path", "hits/hits", "response.json"]).is_err()
+            Args::try_parse_from(["tview", "--json-path", "hits/hits", "response.json"]).is_err()
         );
     }
 
@@ -809,7 +805,7 @@ mod tests {
     fn rejects_json_path_with_implicit_delimited_options() {
         let error = Config::from_args(
             Args::try_parse_from([
-                "tabview",
+                "tview",
                 "--json-path",
                 "/rows",
                 "--delimiter",
@@ -835,7 +831,7 @@ mod tests {
 
     #[test]
     fn explicit_delimited_options_override_saved_format_with_auto_resolution() {
-        let config = parse(&["tabview", "--delimiter", "|", "data.unknown"]);
+        let config = parse(&["tview", "--delimiter", "|", "data.unknown"]);
         assert_eq!(config.source_options.format, Some(InputFormat::Auto));
 
         let options = crate::ingest::OpenOptions::merge(
@@ -852,14 +848,7 @@ mod tests {
     #[test]
     fn rejects_delimited_options_with_structured_format() {
         assert_eq!(
-            parse_config_error(&[
-                "tabview",
-                "--format",
-                "json",
-                "--delimiter",
-                ",",
-                "data.json"
-            ]),
+            parse_config_error(&["tview", "--format", "json", "--delimiter", ",", "data.json"]),
             CliError::IncompatibleOptions {
                 format: InputFormat::Json,
                 option: "delimited parsing options"
@@ -867,7 +856,7 @@ mod tests {
         );
         assert_eq!(
             parse_config_error(&[
-                "tabview",
+                "tview",
                 "--format",
                 "delimited",
                 "--json-path",
@@ -884,17 +873,17 @@ mod tests {
     #[cfg(feature = "saved-views")]
     #[test]
     fn parses_saved_view_selection_flags() {
-        let config = parse(&["tabview", "--view", "cat-shards.yml", "sample/data.csv"]);
+        let config = parse(&["tview", "--view", "cat-shards.yml", "sample/data.csv"]);
         assert_eq!(
             config.saved_view,
             SavedViewSelection::Force("cat-shards".to_owned())
         );
 
-        let config = parse(&["tabview", "--no-view", "sample/data.csv"]);
+        let config = parse(&["tview", "--no-view", "sample/data.csv"]);
         assert_eq!(config.saved_view, SavedViewSelection::Disabled);
 
         assert!(Args::try_parse_from([
-            "tabview",
+            "tview",
             "--view",
             "cat-shards",
             "--no-view",

@@ -1,11 +1,11 @@
 ## Purpose
 
-Define terminal viewer rendering, navigation, popups, help, search prompt, and reload behavior for the Rust `tabview` TUI.
+Define terminal viewer rendering, navigation, popups, help, search prompt, and reload behavior for the Rust `tview` TUI.
 
 ## Requirements
 
 ### Requirement: Ratatui terminal viewer
-The system SHALL render a spreadsheet-like terminal viewer using Ratatui and crossterm while preserving the original Tabview screen structure as closely as practical.
+The system SHALL render a spreadsheet-like terminal viewer using Ratatui and crossterm while preserving the upstream screen structure as closely as practical.
 
 #### Scenario: Initial screen layout
 - **WHEN** a file is opened
@@ -81,7 +81,7 @@ When compiled with the `saved-views` feature, the system SHALL bind `v` to a mod
 - **THEN** the viewer opens a modal showing the current view YAML and a placeholder filename based on the opened input basename with a `.yml` extension
 
 #### Scenario: Saved view modal unavailable with no-view
-- **WHEN** the user invoked `tabview --no-view data.csv`
+- **WHEN** the user invoked `tview --no-view data.csv`
 - **THEN** the `v` binding is unavailable for that session
 
 #### Scenario: Close saved view modal

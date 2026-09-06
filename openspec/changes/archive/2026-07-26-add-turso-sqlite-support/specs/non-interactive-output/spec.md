@@ -44,7 +44,7 @@ Before writing the first table line, table output SHALL complete the active boun
 
 #### Scenario: Incremental result is fully traversed
 - **WHEN** an incremental SQLite store supplies table output
-- **THEN** Tabview traverses the complete bounded result for rows and width profiling without relying on a terminal viewport
+- **THEN** Tview traverses the complete bounded result for rows and width profiling without relying on a terminal viewport
 
 ### Requirement: Supported-source conversion
 Every output adapter SHALL consume every compatible source format, including SQLite, through the shared table/view model rather than implementing source-specific exporters.

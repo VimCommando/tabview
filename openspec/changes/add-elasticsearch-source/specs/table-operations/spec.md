@@ -13,7 +13,7 @@ For a query-native source, Source Configuration SHALL compose supported source f
 
 #### Scenario: Native query already contains limiting behavior
 - **WHEN** a user-supplied native query contains its own `LIMIT` or equivalent stage
-- **THEN** that behavior remains part of the opaque base query and Tabview still applies its final hard source-result limit
+- **THEN** that behavior remains part of the opaque base query and Tview still applies its final hard source-result limit
 
 #### Scenario: Unsupported composition
 - **WHEN** an adapter cannot represent a requested source operation safely over the native base query

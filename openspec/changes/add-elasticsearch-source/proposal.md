@@ -1,6 +1,6 @@
 ## Why
 
-Tabview can inspect local files and SQLite databases through a shared typed table model, but it cannot connect directly to Elasticsearch or use a source-native query supplied uniformly from the CLI. Adding a URL-aware source target and a generic native-query boundary lets Elasticsearch use ES|QL without proliferating source-specific arguments and prepares the same architecture for future remote database adapters.
+Tview can inspect local files and SQLite databases through a shared typed table model, but it cannot connect directly to Elasticsearch or use a source-native query supplied uniformly from the CLI. Adding a URL-aware source target and a generic native-query boundary lets Elasticsearch use ES|QL without proliferating source-specific arguments and prepares the same architecture for future remote database adapters.
 
 ## What Changes
 

@@ -4,13 +4,13 @@ Users often reopen recurring operational files and reapply the same column width
 
 ## What Changes
 
-- Add user-defined saved view files under `~/.config/tabview/views/*.yml` and `*.yaml`.
+- Add user-defined saved view files under `~/.config/tview/views/*.yml` and `*.yaml`.
 - Match saved views automatically to opened file basenames by exact filename, glob, or regular expression patterns.
 - Gate saved view support behind a Cargo `saved-views` feature.
 - Add CLI overrides to force a named saved view or disable saved view loading for a run when saved views are enabled.
 - Treat the view file stem as the unique view name, with one view definition per file.
 - Add a `v` keybinding that opens a view modal showing the current view configuration and source/destination filename.
-- Allow saving sparse current view configuration from the view modal into `~/.config/tabview/views/`, with immediate save for new files, `y`/`n` overwrite confirmation for existing files, and atomic writes.
+- Allow saving sparse current view configuration from the view modal into `~/.config/tview/views/`, with immediate save for new files, `y`/`n` overwrite confirmation for existing files, and atomic writes.
 - Allow sparse per-column configuration keyed by exact header or wildcard header patterns, matched case-insensitively.
 - Allow saved views to set per-column visibility with `visible: true|false`.
 - Persist sort and filter state in saved views while keeping search session-only.
@@ -34,7 +34,7 @@ Users often reopen recurring operational files and reapply the same column width
 
 ## Impact
 
-- Adds configuration discovery under `$XDG_CONFIG_HOME/tabview/views`, or `~/.config/tabview/views` when `XDG_CONFIG_HOME` is unset, on every platform.
+- Adds configuration discovery under `$XDG_CONFIG_HOME/tview/views`, or `~/.config/tview/views` when `XDG_CONFIG_HOME` is unset, on every platform.
 - Adds optional `yaml_serde`, locale formatting, SemVer parsing, and IP parsing support behind the saved views feature.
 - Extends table initialization with optional view-derived column metadata for width, alignment, formatting, type-aware sorting, and display rendering.
 - Adds serialization of the current runtime view state back to saved view YAML.

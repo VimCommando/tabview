@@ -1,6 +1,6 @@
 ## Purpose
 
-Define data source, decoding, parsing, normalization, and large-file groundwork behavior for the Rust `tabview` implementation.
+Define data source, decoding, parsing, normalization, and large-file groundwork behavior for the Rust `tview` implementation.
 
 ## Requirements
 
@@ -8,7 +8,7 @@ Define data source, decoding, parsing, normalization, and large-file groundwork 
 The system SHALL load tabular data from filesystem paths, `file://` URI paths, and standard input.
 
 #### Scenario: File URI path
-- **WHEN** a user runs `tabview file:///tmp/data.csv`
+- **WHEN** a user runs `tview file:///tmp/data.csv`
 - **THEN** the system reads `/tmp/data.csv`
 
 ### Requirement: Encoding detection and override

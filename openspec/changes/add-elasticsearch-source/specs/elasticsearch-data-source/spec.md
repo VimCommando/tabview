@@ -4,11 +4,11 @@
 The system SHALL place Elasticsearch support and the official Elasticsearch Rust client dependency graph behind an optional `elasticsearch` Cargo feature.
 
 #### Scenario: Elasticsearch feature enabled
-- **WHEN** Tabview is compiled with the `elasticsearch` feature
+- **WHEN** Tview is compiled with the `elasticsearch` feature
 - **THEN** `elasticsearch` format parsing, HTTP(S) dispatch, target discovery, mappings, and ES|QL execution are available
 
 #### Scenario: Elasticsearch feature disabled
-- **WHEN** Tabview is compiled without the `elasticsearch` feature
+- **WHEN** Tview is compiled without the `elasticsearch` feature
 - **THEN** the Elasticsearch client dependency graph and Elasticsearch-specific CLI format value, dispatch, discovery, and tests are omitted
 
 ### Requirement: Elasticsearch endpoint resolution
@@ -16,11 +16,11 @@ The Elasticsearch adapter SHALL accept an HTTP(S) positional source target only 
 
 #### Scenario: Explicit Elasticsearch endpoint
 - **WHEN** a user opens `https://elastic.example:9200` with `--format elasticsearch`
-- **THEN** Tabview constructs an Elasticsearch client for that endpoint
+- **THEN** Tview constructs an Elasticsearch client for that endpoint
 
 #### Scenario: Ambiguous HTTP URL
 - **WHEN** an HTTP(S) target has no explicit or saved format
-- **THEN** Tabview does not assume that the endpoint is Elasticsearch and reports that the remote target requires an explicit format
+- **THEN** Tview does not assume that the endpoint is Elasticsearch and reports that the remote target requires an explicit format
 
 #### Scenario: Unsupported target kind
 - **WHEN** Elasticsearch format is selected for stdin or a local filesystem path
@@ -35,7 +35,7 @@ The Elasticsearch adapter SHALL configure the official client's authenticated TL
 
 #### Scenario: Environment-only configuration
 - **WHEN** a user configures Elasticsearch authentication or a custom CA
-- **THEN** Tabview reads the documented environment variables and does not resolve a named connection profile
+- **THEN** Tview reads the documented environment variables and does not resolve a named connection profile
 
 #### Scenario: Saved Elasticsearch view
 - **WHEN** an authenticated Elasticsearch source is serialized as a saved view
@@ -58,19 +58,19 @@ When Elasticsearch has neither a native query nor a selected table, the interact
 
 #### Scenario: Dot-prefixed resource
 - **WHEN** discovery returns an index or data stream whose name begins with `.`
-- **THEN** Tabview excludes it from the picker even if the endpoint returns it
+- **THEN** Tview excludes it from the picker even if the endpoint returns it
 
 #### Scenario: Hidden or closed index
 - **WHEN** an index is hidden or is not open
-- **THEN** Tabview does not offer it as a selectable target
+- **THEN** Tview does not offer it as a selectable target
 
 #### Scenario: Alias is returned
 - **WHEN** resolve-index returns an alias
-- **THEN** Tabview does not add that alias to the picker
+- **THEN** Tview does not add that alias to the picker
 
 #### Scenario: Discovery has no candidates
 - **WHEN** discovery returns no selectable indices or data streams
-- **THEN** Tabview reports that no visible ES|QL targets are available
+- **THEN** Tview reports that no visible ES|QL targets are available
 
 ### Requirement: Elasticsearch target and query selection
 The adapter SHALL execute a complete user-supplied ES|QL query when `source.query` is present; otherwise it SHALL generate a bounded `FROM` query from a selected index or data stream.
@@ -81,15 +81,15 @@ The adapter SHALL execute a complete user-supplied ES|QL query when `source.quer
 
 #### Scenario: Selected index
 - **WHEN** `source.table` selects `application-events` and no native query is supplied
-- **THEN** Tabview generates a bounded ES|QL query whose `FROM` source is that index
+- **THEN** Tview generates a bounded ES|QL query whose `FROM` source is that index
 
 #### Scenario: Selected data stream
 - **WHEN** the picker selects `logs-nginx.access-prod`
-- **THEN** Tabview generates a bounded ES|QL query whose `FROM` source is that data stream
+- **THEN** Tview generates a bounded ES|QL query whose `FROM` source is that data stream
 
 #### Scenario: Explicit target pass-through
 - **WHEN** `source.table` contains a target that was not offered by the picker
-- **THEN** Tabview safely uses that value as the generated ES|QL `FROM` target without pre-validating its existence, visibility, or resource kind
+- **THEN** Tview safely uses that value as the generated ES|QL `FROM` target without pre-validating its existence, visibility, or resource kind
 
 #### Scenario: Explicit alias
 - **WHEN** `source.table` names an Elasticsearch alias accepted by mappings, field capabilities, and ES|QL
@@ -97,10 +97,10 @@ The adapter SHALL execute a complete user-supplied ES|QL query when `source.quer
 
 #### Scenario: Explicit target rejected by Elasticsearch
 - **WHEN** mappings, field capabilities, or ES|QL rejects an explicit target
-- **THEN** Tabview reports the Elasticsearch error through normal source-opening failure handling
+- **THEN** Tview reports the Elasticsearch error through normal source-opening failure handling
 
 ### Requirement: Mapping-aware Elasticsearch schema
-For an explicitly selected index or data stream, Tabview SHALL read mappings and field capabilities to construct a complete field catalog with mapped type, multivalue-compatible metadata, and cross-index conflicts, while treating the ES|QL response `columns` array as authoritative for the active rendered result.
+For an explicitly selected index or data stream, Tview SHALL read mappings and field capabilities to construct a complete field catalog with mapped type, multivalue-compatible metadata, and cross-index conflicts, while treating the ES|QL response `columns` array as authoritative for the active rendered result.
 
 #### Scenario: Selected index mapping
 - **WHEN** an index is selected before query execution
@@ -108,7 +108,7 @@ For an explicitly selected index or data stream, Tabview SHALL read mappings and
 
 #### Scenario: Selected data stream mapping
 - **WHEN** a data stream is selected
-- **THEN** Tabview obtains its effective field catalog from its backing-index mappings and field capabilities
+- **THEN** Tview obtains its effective field catalog from its backing-index mappings and field capabilities
 
 #### Scenario: Conflicting field mappings
 - **WHEN** a target pattern maps the same field incompatibly across concrete indices
@@ -120,7 +120,7 @@ For an explicitly selected index or data stream, Tabview SHALL read mappings and
 
 #### Scenario: Query-only source
 - **WHEN** a complete ES|QL query is supplied without `source.table`
-- **THEN** Tabview can open the result from response column metadata without implementing an ES|QL parser to infer every `FROM` target
+- **THEN** Tview can open the result from response column metadata without implementing an ES|QL parser to infer every `FROM` target
 
 ### Requirement: Bounded ES|QL execution
 Every Elasticsearch source result SHALL have an explicit positive application limit applied after application-composed source operations, defaulting to 1,000 rows, and SHALL distinguish limit truncation from Elasticsearch partial execution.
@@ -135,30 +135,30 @@ Every Elasticsearch source result SHALL have an explicit positive application li
 
 #### Scenario: Truncation probe
 - **WHEN** the endpoint permits an `N + 1` probe for a configured limit of `N`
-- **THEN** Tabview retains at most `N` rows and reports whether another result row existed
+- **THEN** Tview retains at most `N` rows and reports whether another result row existed
 
 #### Scenario: Partial Elasticsearch result
 - **WHEN** Elasticsearch returns `is_partial: true`
-- **THEN** Tabview reports the result as partial independently of whether the application limit was reached
+- **THEN** Tview reports the result as partial independently of whether the application limit was reached
 
 #### Scenario: View filter reduces result
 - **WHEN** a local view filter hides rows from a bounded ES|QL result
-- **THEN** Tabview does not issue another ES|QL request to refill the visible result
+- **THEN** Tview does not issue another ES|QL request to refill the visible result
 
 ### Requirement: Typed ES|QL values
 The adapter SHALL map ES|QL response values into typed cells without first converting the response to delimited text and SHALL preserve multivalued and otherwise structured JSON values losslessly.
 
 #### Scenario: Scalar values
 - **WHEN** a response row contains null, boolean, integral, floating-point, and string values
-- **THEN** Tabview preserves their corresponding typed value categories
+- **THEN** Tview preserves their corresponding typed value categories
 
 #### Scenario: Multivalued field
 - **WHEN** an ES|QL cell is a JSON array
-- **THEN** Tabview preserves the complete array as a structured cell rather than selecting one member or joining it ambiguously
+- **THEN** Tview preserves the complete array as a structured cell rather than selecting one member or joining it ambiguously
 
 #### Scenario: Source-specific type
 - **WHEN** a response column has an ES|QL type such as `date`, `date_nanos`, `ip`, `version`, `geo_point`, or `unsupported`
-- **THEN** Tabview retains the raw ES|QL type for inspection while mapping display and local-operation behavior conservatively
+- **THEN** Tview retains the raw ES|QL type for inspection while mapping display and local-operation behavior conservatively
 
 ### Requirement: Elasticsearch result identity
 Document-producing ES|QL results SHALL use `_index` plus `_id` as stable row identity when both metadata fields are present and unique; results without usable document identity SHALL explicitly reset row-bound state across replacement.
@@ -173,7 +173,7 @@ Document-producing ES|QL results SHALL use `_index` plus `_id` as stable row ide
 
 #### Scenario: Duplicate metadata tuple
 - **WHEN** a result repeats the same purported `_index` and `_id` tuple
-- **THEN** Tabview does not silently treat it as stable identity
+- **THEN** Tview does not silently treat it as stable identity
 
 ### Requirement: Asynchronous ES|QL replacement
 Elasticsearch discovery and query work SHALL run without blocking the terminal event loop; native-query replacement SHALL retain the last successful result, activate only the latest successful revision, and cancel or discard superseded remote work.

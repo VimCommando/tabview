@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://tabview.local/schemas/view.schema.json",
-  "title": "Tabview Saved View",
+  "$id": "https://tview.local/schemas/view.schema.json",
+  "title": "Tview Saved View",
   "type": "object",
   "additionalProperties": false,
   "required": ["name", "filenames"],

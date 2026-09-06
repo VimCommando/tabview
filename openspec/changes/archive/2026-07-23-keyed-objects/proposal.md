@@ -1,6 +1,6 @@
 ## Why
 
-Many JSON APIs encode tables as objects whose keys identify records and whose values contain similarly shaped child objects. Tabview currently flattens such a selected object into one extremely wide row, making common Elasticsearch diagnostic files such as repositories, pipelines, index settings, aliases, mappings, and node maps difficult to inspect.
+Many JSON APIs encode tables as objects whose keys identify records and whose values contain similarly shaped child objects. Tview currently flattens such a selected object into one extremely wide row, making common Elasticsearch diagnostic files such as repositories, pipelines, index settings, aliases, mappings, and node maps difficult to inspect.
 
 ## What Changes
 

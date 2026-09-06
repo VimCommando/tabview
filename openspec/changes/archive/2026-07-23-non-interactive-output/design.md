@@ -70,7 +70,7 @@ The interactive branch preserves the requirement to enter the terminal before po
 
 Alternative considered: render a very large virtual Ratatui `Buffer` and print it. That retains unwanted screen chrome, requires arbitrary dimensions, loses streaming writes, and conflates terminal viewport behavior with a document format.
 
-Alternative considered: include `auto` and `tui` in the `--output` value enum. Those are runtime policies rather than serialization formats, prevent natural composition such as `tabview -i -o csv`, and force special cases when an interactive session should also emit data. Dedicated `--interactive` plus format-only `--output` keeps each option single-purpose.
+Alternative considered: include `auto` and `tui` in the `--output` value enum. Those are runtime policies rather than serialization formats, prevent natural composition such as `tview -i -o csv`, and force special cases when an interactive session should also emit data. Dedicated `--interactive` plus format-only `--output` keeps each option single-purpose.
 
 ### 2. Separate UI channels from data channels
 
@@ -80,7 +80,7 @@ For non-seekable stdin, read enough data to establish the provisional schema and
 
 The UI never writes control sequences, loading text, or diagnostics to redirected stdout. Restore raw mode and the alternate screen before invoking the final output adapter, so stdout contains only the final table when redirected.
 
-The shell opens redirection targets before starting the pipeline. Therefore commands such as `cat file.csv | tabview -i -o table - > file.csv` or `tabview -i -o table file.csv > file.csv` are unsafe: they may truncate the input before Tabview can read it. Documentation uses a distinct destination, for example `cat file.csv | tabview -i -o table - > edited.txt`. Because this change's table adapter emits fixed-width text rather than CSV, callers must not replace the original CSV with that output. A caller-controlled atomic rename is appropriate only when a future selected adapter preserves the intended destination format, such as `-i -o csv` once CSV output exists.
+The shell opens redirection targets before starting the pipeline. Therefore commands such as `cat file.csv | tview -i -o table - > file.csv` or `tview -i -o table file.csv > file.csv` are unsafe: they may truncate the input before Tview can read it. Documentation uses a distinct destination, for example `cat file.csv | tview -i -o table - > edited.txt`. Because this change's table adapter emits fixed-width text rather than CSV, callers must not replace the original CSV with that output. A caller-controlled atomic rename is appropriate only when a future selected adapter preserves the intended destination format, such as `-i -o csv` once CSV output exists.
 
 ### 3. Use one configured-view preparation path
 
@@ -98,7 +98,7 @@ Common preparation produces a source-neutral configured result after source opti
 
 The fixed-width table adapter requires stable widths before the header and first row are written. It therefore requests complete logical traversal and width/profile reduction, then emits the header and rows through a buffered writer. The adapter applies no terminal-derived or aggregate output-width limit and never wraps or reflows rows. Explicitly configured per-column fixed or maximum widths remain authoritative; without such a cap, a column expands to the widest normalized header or rendered value in the complete result. A future Markdown adapter can build its own layout from the same prepared result without inheriting fixed-width padding or ANSI behavior.
 
-This deliberately allows very wide rows. Shell tools, pagers, files, and other consumers can truncate, wrap, scroll, or reflow according to their own environment without Tabview guessing a downstream viewport.
+This deliberately allows very wide rows. Shell tools, pagers, files, and other consumers can truncate, wrap, scroll, or reflow according to their own environment without Tview guessing a downstream viewport.
 
 The implementation should prefer store scan/fold and repeatable indexed row access over cloning an extra `Vec<Vec<String>>`. Query fallback may already materialize a derived result, but the text renderer does not require another full copy. Non-seekable input is already materialized by its adapter where repeatable access is required.
 
@@ -148,7 +148,7 @@ Output adapters receive the completed view projection and never branch on CSV, J
 
 - **[Automatic non-interactive behavior changes existing redirected invocations]** → Document stdout detection; no flags with redirection selects immediate table output, while `-i` independently opts into controlling-terminal interaction and `-o` independently requests final serialization.
 - **[Piped stdin can block while the user is interacting]** → Drain/materialize stdin concurrently after provisional schema detection and complete ingestion before final export.
-- **[Input and output redirection can name the same file]** → Document that the shell truncates the target before Tabview starts; require a distinct output path, identify the fixed-width result as text, and permit caller-controlled atomic replacement only with a format-appropriate adapter.
+- **[Input and output redirection can name the same file]** → Document that the shell truncates the target before Tview starts; require a distinct output path, identify the fixed-width result as text, and permit caller-controlled atomic replacement only with a format-appropriate adapter.
 - **[Exact width calculation delays first output]** → Treat stable alignment as the contract, reuse scan/fold reductions, and avoid unnecessary row clones.
 - **[Very large results require two logical passes]** → Use indexed stores and buffered output; the command already must traverse all rows to emit them.
 - **[Unconstrained cells can produce extremely wide rows]** → Preserve complete data by default, honor explicit per-column caps, and leave aggregate truncation, wrapping, paging, or reflow to the consumer.

@@ -5,21 +5,21 @@ set -eu
 repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
 
-tabview() {
-    if [ -n "${TABVIEW_BIN:-}" ]; then
-        "$TABVIEW_BIN" "$@"
+tview() {
+    if [ -n "${TVIEW_BIN:-}" ]; then
+        "$TVIEW_BIN" "$@"
     else
         cargo run --quiet --manifest-path "$repo_root/Cargo.toml" -- "$@"
     fi
 }
 
 render() {
-    printf 'Command: tabview --output table'
+    printf 'Command: tview --output table'
     for argument do
         printf ' %s' "$argument"
     done
     printf '\nReformatted table:\n'
-    tabview --output table "$@"
+    tview --output table "$@"
     printf '\n'
 }
 

@@ -4,11 +4,11 @@
 The Rust executable SHALL accept the existing command-line interface: positional filename, `-` for stdin, `--encoding`/`-e`, `--delimiter`/`-d`, `--quoting`, `--start_pos`/`-s`, `--width`/`-w`, `--double_width`, `--quote-char`/`-q`, and extra classic start-position arguments in `+y:x` form, plus `--format`, `--json-path`, and `--schema-scan` source options. A build with the default-enabled `sqlite` feature SHALL additionally accept `--table`.
 
 #### Scenario: Current README invocation remains valid
-- **WHEN** a user runs `tabview sample/data_ohlcv.csv --start_pos 6,5 --encoding utf-8`
+- **WHEN** a user runs `tview sample/data_ohlcv.csv --start_pos 6,5 --encoding utf-8`
 - **THEN** the command is accepted and the viewer starts at row 6, column 5 using the requested encoding
 
 #### Scenario: Classic start position remains valid
-- **WHEN** a user runs `tabview sample/data_ohlcv.csv +6:5`
+- **WHEN** a user runs `tview sample/data_ohlcv.csv +6:5`
 - **THEN** the viewer starts at row 6, column 5
 
 #### Scenario: Existing CSV options remain valid
@@ -19,15 +19,15 @@ The Rust executable SHALL accept the existing command-line interface: positional
 The Rust executable SHALL accept `--format auto|delimited|json|ndjson`, using `auto` by default, and SHALL reject incompatible format-specific argument combinations clearly. A build with the default-enabled `sqlite` feature SHALL additionally accept `sqlite`.
 
 #### Scenario: Force JSON format
-- **WHEN** a user runs `tabview --format json response.data`
+- **WHEN** a user runs `tview --format json response.data`
 - **THEN** the JSON adapter is selected without relying on the filename extension
 
 #### Scenario: Force delimited format
-- **WHEN** a `.json`-named file actually contains delimited data and the user runs `tabview --format delimited data.json`
+- **WHEN** a `.json`-named file actually contains delimited data and the user runs `tview --format delimited data.json`
 - **THEN** the delimited adapter is selected
 
 #### Scenario: Force SQLite format
-- **WHEN** a user runs `tabview --format sqlite --table users application.data`
+- **WHEN** a user runs `tview --format sqlite --table users application.data`
 - **THEN** the local SQLite adapter is selected without relying on the filename extension
 
 #### Scenario: SQLite feature is disabled
@@ -47,7 +47,7 @@ view from a SQLite input and SHALL report a classified unsupported object
 distinctly from a missing name.
 
 #### Scenario: Select SQLite table
-- **WHEN** a user runs `tabview application.db --table users`
+- **WHEN** a user runs `tview application.db --table users`
 - **THEN** the command opens the `users` relation when the input is SQLite and that relation exists
 
 #### Scenario: Table option on non-relational input

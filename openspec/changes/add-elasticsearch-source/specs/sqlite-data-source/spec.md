@@ -28,23 +28,23 @@ The SQLite adapter SHALL accept `source.query` as one complete, single-statement
 - **THEN** its result is treated as the single selected implicit relation and no SQLite relation picker is displayed
 
 ### Requirement: Bounded native SQLite query
-Tabview SHALL compose its supported source filters, source sorting, and positive source limit over a valid native SQLite base query without changing the base query's internal semantics or escaping read-only confinement.
+Tview SHALL compose its supported source filters, source sorting, and positive source limit over a valid native SQLite base query without changing the base query's internal semantics or escaping read-only confinement.
 
 #### Scenario: Default native query limit
 - **WHEN** a native SQLite query has no configured source limit
-- **THEN** the outer Tabview query retains at most 1,000 rows
+- **THEN** the outer Tview query retains at most 1,000 rows
 
 #### Scenario: Source filter over query result
 - **WHEN** a source filter references an unambiguous native-query result column
-- **THEN** the adapter applies a bound outer predicate before the final Tabview source limit
+- **THEN** the adapter applies a bound outer predicate before the final Tview source limit
 
 #### Scenario: Source sort over query result
 - **WHEN** a source sort references an unambiguous native-query result column
-- **THEN** the adapter applies safely quoted outer ordering before the final Tabview source limit
+- **THEN** the adapter applies safely quoted outer ordering before the final Tview source limit
 
 #### Scenario: Query contains its own limit
 - **WHEN** the native SQL base query contains `LIMIT`
-- **THEN** its limit remains inside the derived result and Tabview's hard source limit is still applied outside it
+- **THEN** its limit remains inside the derived result and Tview's hard source limit is still applied outside it
 
 ### Requirement: Native SQLite result schema and identity
 Native SQLite query result metadata SHALL define the table columns directly, and stable row identity SHALL be unavailable unless the adapter can prove a unique durable identity from explicit result metadata.

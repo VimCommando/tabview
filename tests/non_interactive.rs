@@ -27,8 +27,8 @@ fn fixture(contents: &str, suffix: &str) -> tempfile::NamedTempFile {
     file
 }
 
-fn tabview_command() -> Command {
-    let mut command = Command::cargo_bin("tabview").expect("binary");
+fn tview_command() -> Command {
+    let mut command = Command::cargo_bin("tview").expect("binary");
     command.env(
         "XDG_CONFIG_HOME",
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-empty-config"),
@@ -64,7 +64,7 @@ fn direct_table_and_automatic_redirection_match() {
     let file = fixture("Name,Count\nalpha,2\nbeta,10\n", ".csv");
     let expected = "Name   Count\nalpha      2\nbeta      10\n";
 
-    tabview_command()
+    tview_command()
         .args(["-o", "table"])
         .arg(file.path())
         .assert()
@@ -72,7 +72,7 @@ fn direct_table_and_automatic_redirection_match() {
         .stdout(expected)
         .stderr("");
 
-    tabview_command()
+    tview_command()
         .arg(file.path())
         .assert()
         .success()
@@ -82,7 +82,7 @@ fn direct_table_and_automatic_redirection_match() {
 
 #[test]
 fn stdin_pipeline_uses_data_stream_without_terminal_access() {
-    tabview_command()
+    tview_command()
         .args(["-o", "table", "-"])
         .write_stdin("A,B\n1,2\n3,4\n")
         .assert()
@@ -95,14 +95,14 @@ fn stdin_pipeline_uses_data_stream_without_terminal_access() {
 fn stdin_pipeline_preserves_keyed_object_modes() {
     let input = r#"{"alpha":{"stars":1},"beta":{"stars":2},"gamma":{"stars":3}}"#;
 
-    tabview_command()
+    tview_command()
         .args(["--format", "json", "-o", "table", "-"])
         .write_stdin(input)
         .assert()
         .success()
         .stdout("name   stars\nalpha      1\nbeta       2\ngamma      3\n");
 
-    tabview_command()
+    tview_command()
         .args([
             "--format",
             "json",
@@ -124,7 +124,7 @@ fn structured_sources_include_late_columns_and_ignore_start_position() {
         "[{\"id\":1,\"name\":\"alpha\"},{\"id\":2,\"name\":\"beta\",\"late\":true}]",
         ".json",
     );
-    tabview_command()
+    tview_command()
         .args(["-o", "table", "--start_pos", "2,2"])
         .arg(json.path())
         .assert()
@@ -135,7 +135,7 @@ fn structured_sources_include_late_columns_and_ignore_start_position() {
         "{\"id\":1,\"name\":\"alpha\"}\n{\"id\":2,\"name\":\"beta\",\"late\":true}\n",
         ".ndjson",
     );
-    tabview_command()
+    tview_command()
         .args(["-o", "table"])
         .arg(ndjson.path())
         .assert()
@@ -146,14 +146,14 @@ fn structured_sources_include_late_columns_and_ignore_start_position() {
 #[test]
 fn color_is_plain_by_default_and_opt_in() {
     let file = fixture("A,B\n1,2\n", ".csv");
-    tabview_command()
+    tview_command()
         .args(["-o", "table"])
         .arg(file.path())
         .assert()
         .success()
         .stdout(predicate::str::contains("\u{1b}[").not());
 
-    tabview_command()
+    tview_command()
         .args(["-o", "table", "--color", "always"])
         .arg(file.path())
         .assert()
@@ -163,13 +163,13 @@ fn color_is_plain_by_default_and_opt_in() {
 
 #[test]
 fn unsupported_formats_and_colors_fail_during_cli_parsing() {
-    tabview_command()
+    tview_command()
         .args(["-o", "tui", "-"])
         .assert()
         .failure()
         .stderr(predicate::str::contains("invalid value 'tui'"));
 
-    tabview_command()
+    tview_command()
         .args(["--color", "sometimes", "-"])
         .assert()
         .failure()
@@ -179,7 +179,7 @@ fn unsupported_formats_and_colors_fail_during_cli_parsing() {
 #[test]
 fn source_errors_leave_stdout_empty() {
     let file = fixture("[{ broken]", ".json");
-    tabview_command()
+    tview_command()
         .args(["-o", "table"])
         .arg(file.path())
         .assert()
@@ -197,7 +197,7 @@ fn elasticsearch_direct_native_query_waits_and_emits_only_table_bytes() {
         std::time::Duration::from_millis(40),
     )]);
     let started = std::time::Instant::now();
-    tabview_command()
+    tview_command()
         .args([
             "--format",
             "elasticsearch",
@@ -233,7 +233,7 @@ fn elasticsearch_selected_target_preserves_multivalues_and_warns_partial_on_stde
             r#"{"columns":[{"name":"tags","type":"keyword"}],"values":[[["prod","api"]]],"is_partial":true,"warnings":["fixture shard warning"]}"#,
         ),
     ]);
-    tabview_command()
+    tview_command()
         .args([
             "--format",
             "elasticsearch",
@@ -262,7 +262,7 @@ fn elasticsearch_direct_output_without_selection_and_query_failures_keep_stdout_
         r#"{"indices":[],"aliases":[],"data_streams":[]}"#,
     ] {
         let discovery = ElasticsearchServer::start(vec![ElasticsearchResponse::ok(discovery_body)]);
-        tabview_command()
+        tview_command()
             .args(["--format", "elasticsearch", discovery.endpoint()])
             .assert()
             .failure()
@@ -274,7 +274,7 @@ fn elasticsearch_direct_output_without_selection_and_query_failures_keep_stdout_
         400,
         r#"{"error":{"reason":"invalid ES|QL fixture"}}"#,
     )]);
-    tabview_command()
+    tview_command()
         .args([
             "--format",
             "elasticsearch",
@@ -298,7 +298,7 @@ fn sqlite_batch_selects_a_sole_table() {
         "INSERT INTO users VALUES (3, 'Linus')",
     ]);
 
-    tabview_command()
+    tview_command()
         .args(["-o", "table"])
         .arg(&path)
         .assert()
@@ -318,7 +318,7 @@ fn bundled_sqlite_sample_opens_as_one_thousand_rows() {
     let directory = tempfile::tempdir().expect("sample copy directory");
     let path = directory.path().join("us-counties.sqlite3");
     std::fs::copy(source, &path).expect("copy bundled SQLite sample");
-    let output = tabview_command()
+    let output = tview_command()
         .args(["-o", "table"])
         .arg(path)
         .output()
@@ -344,7 +344,7 @@ fn sqlite_ambiguous_batch_requires_table_without_emitting_stdout() {
         "CREATE TABLE events(id INTEGER PRIMARY KEY)",
     ]);
 
-    tabview_command()
+    tview_command()
         .args(["-o", "table"])
         .arg(&path)
         .assert()
@@ -352,7 +352,7 @@ fn sqlite_ambiguous_batch_requires_table_without_emitting_stdout() {
         .stdout("")
         .stderr(predicate::str::contains("--table"));
 
-    tabview_command()
+    tview_command()
         .args(["--table", "events", "-o", "table"])
         .arg(&path)
         .assert()
@@ -363,7 +363,7 @@ fn sqlite_ambiguous_batch_requires_table_without_emitting_stdout() {
 #[cfg(feature = "sqlite")]
 #[test]
 fn sqlite_stdin_and_remote_sources_are_rejected_cleanly() {
-    tabview_command()
+    tview_command()
         .args(["--format", "sqlite", "-o", "table", "-"])
         .write_stdin(b"SQLite format 3\0".as_slice())
         .assert()
@@ -371,7 +371,7 @@ fn sqlite_stdin_and_remote_sources_are_rejected_cleanly() {
         .stdout("")
         .stderr(predicate::str::contains("stdin"));
 
-    tabview_command()
+    tview_command()
         .args([
             "--format",
             "sqlite",
@@ -388,7 +388,7 @@ fn sqlite_stdin_and_remote_sources_are_rejected_cleanly() {
 #[test]
 fn warnings_use_stderr_without_corrupting_table_bytes() {
     let config = tempfile::tempdir().expect("config dir");
-    let themes = config.path().join("tabview/themes");
+    let themes = config.path().join("tview/themes");
     std::fs::create_dir_all(&themes).expect("themes dir");
     std::fs::write(themes.join("broken.yml"), "name: broken\nstyles: nope\n")
         .expect("broken theme");
@@ -399,12 +399,12 @@ fn warnings_use_stderr_without_corrupting_table_bytes() {
     .expect("second broken theme");
     let file = fixture("A,B\n1,2\n", ".csv");
 
-    let output = tabview_command()
+    let output = tview_command()
         .env("XDG_CONFIG_HOME", config.path())
         .args(["-o", "table"])
         .arg(file.path())
         .output()
-        .expect("run tabview");
+        .expect("run tview");
     assert!(output.status.success());
     assert_eq!(output.stdout, b"A  B\n1  2\n");
     let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
@@ -418,7 +418,7 @@ fn early_closing_consumer_is_a_clean_exit() {
         contents.push_str(&format!("{index},row-{index}\n"));
     }
     let file = fixture(&contents, ".csv");
-    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_tabview"))
+    let mut child = std::process::Command::new(env!("CARGO_BIN_EXE_tview"))
         .env(
             "XDG_CONFIG_HOME",
             std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("target/test-empty-config"),
@@ -428,7 +428,7 @@ fn early_closing_consumer_is_a_clean_exit() {
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("spawn tabview");
+        .expect("spawn tview");
     let mut stdout = std::io::BufReader::new(child.stdout.take().expect("stdout"));
     let mut first_line = String::new();
     stdout.read_line(&mut first_line).expect("first line");
@@ -444,7 +444,7 @@ fn early_closing_consumer_is_a_clean_exit() {
 #[test]
 fn saved_view_controls_non_interactive_projection_and_can_be_disabled() {
     let config = tempfile::tempdir().expect("config dir");
-    let views = config.path().join("tabview/views");
+    let views = config.path().join("tview/views");
     std::fs::create_dir_all(&views).expect("views dir");
     std::fs::write(
         views.join("scripted.yml"),
@@ -481,7 +481,7 @@ view:
         ".csv",
     );
 
-    tabview_command()
+    tview_command()
         .env("XDG_CONFIG_HOME", config.path())
         .args(["-o", "table", "--view", "scripted"])
         .arg(file.path())
@@ -490,7 +490,7 @@ view:
         .stdout("NAME   Coun\nBETA     10\nGAMMA     5\n")
         .stderr("");
 
-    tabview_command()
+    tview_command()
         .env("XDG_CONFIG_HOME", config.path())
         .args(["-o", "table", "--no-view"])
         .arg(file.path())
@@ -504,7 +504,7 @@ view:
 #[test]
 fn sqlite_saved_source_and_view_layers_apply_in_order() {
     let config = tempfile::tempdir().expect("config dir");
-    let views = config.path().join("tabview/views");
+    let views = config.path().join("tview/views");
     std::fs::create_dir_all(&views).expect("views dir");
     std::fs::write(
         views.join("sqlite.yml"),
@@ -543,7 +543,7 @@ view:
         "INSERT INTO events VALUES (4, 'delta', 1)",
     ]);
 
-    tabview_command()
+    tview_command()
         .env("XDG_CONFIG_HOME", config.path())
         .args(["--view", "sqlite", "-o", "table"])
         .arg(&path)
@@ -559,7 +559,7 @@ view:
 #[test]
 fn saved_view_warnings_are_emitted_once() {
     let config = tempfile::tempdir().expect("config dir");
-    let views = config.path().join("tabview/views");
+    let views = config.path().join("tview/views");
     std::fs::create_dir_all(&views).expect("views dir");
     std::fs::write(
         views.join("warning.yml"),
@@ -576,12 +576,12 @@ view:
     .expect("saved view");
     let file = fixture("A,B\n1,2\n", ".csv");
 
-    let output = tabview_command()
+    let output = tview_command()
         .env("XDG_CONFIG_HOME", config.path())
         .args(["-o", "table", "--view", "warning"])
         .arg(file.path())
         .output()
-        .expect("run tabview");
+        .expect("run tview");
     assert!(output.status.success());
     let stderr = String::from_utf8(output.stderr).expect("utf8 stderr");
     assert_eq!(

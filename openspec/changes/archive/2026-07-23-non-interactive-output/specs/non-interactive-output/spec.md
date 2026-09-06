@@ -1,34 +1,34 @@
 ## ADDED Requirements
 
 ### Requirement: Output mode resolution
-Tabview SHALL resolve the independent `--interactive` flag and optional `--output <format>` before entering a terminal session. With neither option, terminal stdout SHALL select a view-only TUI and non-terminal stdout SHALL select immediate `table` output. `--interactive` alone SHALL select a view-only TUI. `--output <format>` alone SHALL select that batch adapter. Their combination SHALL run the TUI and serialize its final live view through that adapter on normal quit.
+Tview SHALL resolve the independent `--interactive` flag and optional `--output <format>` before entering a terminal session. With neither option, terminal stdout SHALL select a view-only TUI and non-terminal stdout SHALL select immediate `table` output. `--interactive` alone SHALL select a view-only TUI. `--output <format>` alone SHALL select that batch adapter. Their combination SHALL run the TUI and serialize its final live view through that adapter on normal quit.
 
 #### Scenario: Terminal stdout remains automatically interactive
 - **WHEN** neither `--interactive` nor `--output` is supplied and stdout is a terminal
-- **THEN** Tabview enters the interactive TUI using existing behavior
+- **THEN** Tview enters the interactive TUI using existing behavior
 
 #### Scenario: Redirected stdout selects table output
 - **WHEN** neither `--interactive` nor `--output` is supplied and stdout is redirected to a file
-- **THEN** Tabview writes a non-interactive table to stdout without entering the TUI
+- **THEN** Tview writes a non-interactive table to stdout without entering the TUI
 
 #### Scenario: Pipeline selects table output
 - **WHEN** neither `--interactive` nor `--output` is supplied and stdout is connected to another process
-- **THEN** Tabview writes a non-interactive table to the pipe
+- **THEN** Tview writes a non-interactive table to the pipe
 
 #### Scenario: Explicit table output to terminal
 - **WHEN** `--output table` is supplied without `--interactive` and stdout is a terminal
-- **THEN** Tabview writes the table once and exits without entering the TUI
+- **THEN** Tview writes the table once and exits without entering the TUI
 
 #### Scenario: Interactive transform with redirected stdout
 - **WHEN** `--interactive --output table` is supplied, stdout is not a terminal, and a controlling terminal is available
-- **THEN** Tabview runs the UI on the controlling terminal and reserves stdout for final table serialization
+- **THEN** Tview runs the UI on the controlling terminal and reserves stdout for final table serialization
 
 #### Scenario: Interactive mode without a controlling terminal
 - **WHEN** `--interactive` is supplied, stdin/stdout are data streams, and no controlling terminal is available
-- **THEN** Tabview fails before consuming input or entering raw mode, writes a clear diagnostic to stderr, and emits no stdout
+- **THEN** Tview fails before consuming input or entering raw mode, writes a clear diagnostic to stderr, and emits no stdout
 
 ### Requirement: Explicit interactive transformation
-Combining `--interactive` with `--output <format>` SHALL treat the TUI as an interactive transformation stage. On normal quit, Tabview SHALL restore the terminal, complete input ingestion and late schema resolution, freeze the final live view state, prepare the complete logical result, and serialize it through the selected output adapter to stdout. Interactive sessions without `--output` SHALL NOT serialize their final live state.
+Combining `--interactive` with `--output <format>` SHALL treat the TUI as an interactive transformation stage. On normal quit, Tview SHALL restore the terminal, complete input ingestion and late schema resolution, freeze the final live view state, prepare the complete logical result, and serialize it through the selected output adapter to stdout. Interactive sessions without `--output` SHALL NOT serialize their final live state.
 
 #### Scenario: Live modifications control final output
 - **WHEN** a user combines `--interactive` with an output format, then hides columns, changes formats, filters rows, or changes sort order before normal quit
@@ -40,29 +40,29 @@ Combining `--interactive` with `--output <format>` SHALL treat the TUI as an int
 
 #### Scenario: Interactive mode without output does not export
 - **WHEN** automatic mode or explicit `--interactive` selects the TUI without `--output` and the user quits normally
-- **THEN** Tabview restores the terminal and exits without serializing the final live view to stdout
+- **THEN** Tview restores the terminal and exits without serializing the final live view to stdout
 
 #### Scenario: Cancellation or failure does not export
 - **WHEN** an interactive transform is cancelled or fails during terminal use, ingestion, final preparation, or terminal restoration
-- **THEN** Tabview emits no final table and exits according to the failure or cancellation contract
+- **THEN** Tview emits no final table and exits according to the failure or cancellation contract
 
 ### Requirement: Terminal and data channel separation
-When interactive input or output occupies standard streams, Tabview SHALL use an available controlling terminal for UI events and drawing while reserving stdin for source bytes and stdout for serialized result bytes. UI control sequences, loading indicators, and screen content SHALL NOT be written to redirected stdout.
+When interactive input or output occupies standard streams, Tview SHALL use an available controlling terminal for UI events and drawing while reserving stdin for source bytes and stdout for serialized result bytes. UI control sequences, loading indicators, and screen content SHALL NOT be written to redirected stdout.
 
 #### Scenario: Provisional schema from piped stdin
 - **WHEN** interactive mode receives a non-seekable stdin source
-- **THEN** Tabview buffers enough input to establish a provisional schema and display the table, then continues draining and materializing input while interaction proceeds
+- **THEN** Tview buffers enough input to establish a provisional schema and display the table, then continues draining and materializing input while interaction proceeds
 
 #### Scenario: Quit completes finite input
 - **WHEN** the user normally quits an interactive transform before a finite stdin producer reaches EOF
-- **THEN** Tabview completes ingestion and late-schema application before preparing and writing the final result
+- **THEN** Tview completes ingestion and late-schema application before preparing and writing the final result
 
 #### Scenario: Terminal restored before output
 - **WHEN** an interactive transform quits normally
 - **THEN** raw mode and alternate-screen state are restored before the output adapter writes any final bytes
 
 ### Requirement: Non-interactive execution path
-In any batch output format, Tabview SHALL NOT enable raw mode, enter the alternate screen, draw loading/footer chrome, read terminal events, access the clipboard, or wait for user input.
+In any batch output format, Tview SHALL NOT enable raw mode, enter the alternate screen, draw loading/footer chrome, read terminal events, access the clipboard, or wait for user input.
 
 #### Scenario: Table mode has no terminal side effects
 - **WHEN** table output is selected
@@ -70,7 +70,7 @@ In any batch output format, Tabview SHALL NOT enable raw mode, enter the alterna
 
 #### Scenario: Piped stdin and stdout
 - **WHEN** input is read from stdin and table output is piped to another process
-- **THEN** Tabview consumes stdin as data, writes the formatted table to stdout, and never attempts to read interactive input
+- **THEN** Tview consumes stdin as data, writes the formatted table to stdout, and never attempts to read interactive input
 
 ### Requirement: Complete configured logical result
 Table mode SHALL render the complete logical result after applying source options and selected view configuration, including labels, column visibility and order, formats, widths, alignment, header visibility, filters, sort order, null placement, and source-derived schema updates. Cursor position, viewport origin, selection styling, search state, and TUI-only start position SHALL NOT limit or decorate the output.
@@ -104,15 +104,15 @@ Before writing the first table line, table mode SHALL complete the required sour
 
 #### Scenario: Wide output remains unconstrained
 - **WHEN** the complete result requires a row wider than the terminal or downstream viewport and no per-column cap is configured
-- **THEN** Tabview emits the full-width row without wrapping, reflowing, or clipping it to an aggregate limit
+- **THEN** Tview emits the full-width row without wrapping, reflowing, or clipping it to an aggregate limit
 
 #### Scenario: Consumer controls presentation width
 - **WHEN** a caller wants truncation, wrapping, paging, horizontal scrolling, or reflow
-- **THEN** the caller composes table output with an appropriate downstream consumer rather than relying on terminal-width detection in Tabview
+- **THEN** the caller composes table output with an appropriate downstream consumer rather than relying on terminal-width detection in Tview
 
 #### Scenario: Incremental input is fully traversed
 - **WHEN** an incremental store supplies table output
-- **THEN** Tabview performs controlled complete traversal for rows, pending schema, query semantics, and width profiling before emission without relying on a terminal viewport
+- **THEN** Tview performs controlled complete traversal for rows, pending schema, query semantics, and width profiling before emission without relying on a terminal viewport
 
 ### Requirement: Deterministic fixed-width text format
 Plain table output SHALL emit zero or more newline-terminated physical lines. Each included header or data row SHALL contain visible cells in configured order, aligned and clipped by Unicode display width, separated by exactly the configured column gap, with no leading location field, borders, divider line, hidden-column markers, footer, or trailing spaces after the final cell.
@@ -150,7 +150,7 @@ Plain table output SHALL emit zero or more newline-terminated physical lines. Ea
 - **THEN** table mode replaces it with a visible escaped representation so one logical row remains one physical output line
 
 ### Requirement: Non-interactive color policy
-Tabview SHALL resolve color mode as `auto`, `always`, or `never`. In table output, `auto` and `never` SHALL emit no ANSI control sequences, while `always` SHALL emit ANSI styles derived from the resolved theme for headers, ordinary cells, and configured conditional cell colors.
+Tview SHALL resolve color mode as `auto`, `always`, or `never`. In table output, `auto` and `never` SHALL emit no ANSI control sequences, while `always` SHALL emit ANSI styles derived from the resolved theme for headers, ordinary cells, and configured conditional cell colors.
 
 #### Scenario: Piped output is plain by default
 - **WHEN** table output uses default `auto` color mode
@@ -181,18 +181,18 @@ Batch output and interactive final export SHALL reserve stdout for adapter bytes
 
 #### Scenario: Downstream consumer exits early
 - **WHEN** a command such as `head` closes the stdout pipe before all rows are written
-- **THEN** Tabview stops writing and exits cleanly without printing a broken-pipe error
+- **THEN** Tview stops writing and exits cleanly without printing a broken-pipe error
 
 #### Scenario: Other write failure
 - **WHEN** stdout writing fails for a reason other than `BrokenPipe`
-- **THEN** Tabview reports the failure on stderr and exits nonzero
+- **THEN** Tview reports the failure on stderr and exits nonzero
 
 #### Scenario: Same-file shell redirection is not supported
 - **WHEN** a caller redirects final output to the same pathname used as input
-- **THEN** safe in-place replacement is outside Tabview's contract because the shell may truncate the file before process startup; documentation directs callers to a distinct destination and notes that fixed-width table output does not preserve CSV or JSON source format
+- **THEN** safe in-place replacement is outside Tview's contract because the shell may truncate the file before process startup; documentation directs callers to a distinct destination and notes that fixed-width table output does not preserve CSV or JSON source format
 
 ### Requirement: Modular output adapters
-Tabview SHALL dispatch each selected `OutputFormat` through a source-neutral output adapter in both direct and post-interactive lifecycles. Shared orchestration SHALL open the source, apply the saved or frozen live view, satisfy the adapter's declared preparation requirements, validate adapter capabilities, provide an immutable prepared projection, and own stdout, stderr, broken-pipe, and exit-status behavior. Format-specific adapters SHALL own only their layout, escaping, styling, and byte serialization rules.
+Tview SHALL dispatch each selected `OutputFormat` through a source-neutral output adapter in both direct and post-interactive lifecycles. Shared orchestration SHALL open the source, apply the saved or frozen live view, satisfy the adapter's declared preparation requirements, validate adapter capabilities, provide an immutable prepared projection, and own stdout, stderr, broken-pipe, and exit-status behavior. Format-specific adapters SHALL own only their layout, escaping, styling, and byte serialization rules.
 
 #### Scenario: Fixed-width table adapter
 - **WHEN** resolved output format is `table`
@@ -208,7 +208,7 @@ Tabview SHALL dispatch each selected `OutputFormat` through a source-neutral out
 
 #### Scenario: Unsupported adapter capability
 - **WHEN** an output option such as `--color always` is incompatible with the selected adapter
-- **THEN** Tabview rejects the invocation before writing stdout with a clear diagnostic on stderr
+- **THEN** Tview rejects the invocation before writing stdout with a clear diagnostic on stderr
 
 ### Requirement: Supported-source conversion
 Every output adapter SHALL consume every compatible source format supported by the normal format-aware opening path through the source-neutral table/view model rather than implementing input-format-specific exporters.

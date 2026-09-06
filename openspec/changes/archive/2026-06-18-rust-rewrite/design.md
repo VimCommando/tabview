@@ -1,6 +1,6 @@
 ## Context
 
-Tabview currently ships as a Python package with a `tabview` script and one primary curses implementation file. The supported user-facing behavior is the CLI/TUI experience documented in `README.rst`: load CSV-like tabular data, view it in a spreadsheet-like terminal interface, navigate with vim-like keys, search, sort, adjust column widths, reload, inspect cells, and yank cell contents.
+The upstream viewer ships as a Python package with a command-line script and one primary curses implementation file. The supported user-facing behavior is the CLI/TUI experience documented in `README.rst`: load CSV-like tabular data, view it in a spreadsheet-like terminal interface, navigate with vim-like keys, search, sort, adjust column widths, reload, inspect cells, and yank cell contents.
 
 The Rust rewrite is a hard replacement for the executable, not a translation of the Python internals. The Python import API is out of scope. The first Rust release targets `cargo install` on macOS, Linux, and WSL.
 
@@ -8,7 +8,7 @@ The Rust rewrite is a hard replacement for the executable, not a translation of 
 
 **Goals:**
 
-- Preserve the `tabview` binary name and command-line compatibility.
+- Use the `tview` binary name and preserve command-line argument compatibility.
 - Preserve the current TUI layout, keybindings, and stateful interactions as closely as practical.
 - Use Ratatui with the crossterm backend for terminal rendering and input.
 - Build one Rust crate with one binary, organized around domain concepts rather than Python module structure.
@@ -27,7 +27,7 @@ The Rust rewrite is a hard replacement for the executable, not a translation of 
 
 ### One crate, explicit internal modules
 
-Use a single Cargo package that builds one `tabview` binary. Organize internals by responsibility:
+Use a single Cargo package that builds one `tview` binary. Organize internals by responsibility:
 
 ```text
 src/
@@ -111,9 +111,9 @@ Python uses `csv.Sniffer`, which has no exact standard equivalent. The implement
 
 Decision: use Option C with a custom, fixture-tuned Rust heuristic and the standard `csv` crate for actual parsing.
 
-The runtime sniffer should be intentionally small: honor explicit `--delimiter` first; otherwise sample decoded input, score common delimiter candidates such as comma, tab, semicolon, pipe, and space by quote-aware consistency of field counts, then apply Tabview's existing space-delimited normalization rule when space wins. Feed the selected delimiter, quote character, quoting mode, and flexible-row behavior into `csv::ReaderBuilder`.
+The runtime sniffer should be intentionally small: honor explicit `--delimiter` first; otherwise sample decoded input, score common delimiter candidates such as comma, tab, semicolon, pipe, and space by quote-aware consistency of field counts, then apply Tview's existing space-delimited normalization rule when space wins. Feed the selected delimiter, quote character, quoting mode, and flexible-row behavior into `csv::ReaderBuilder`.
 
-Do not use `csv-sniffer` as the core runtime architecture. It infers more metadata than Tabview needs, such as header and type information, its reader path is less natural for stdin and lazy/streaming sources because it expects seekable readers, and it still would not match Python `csv.Sniffer` exactly. It may be used in a spike or compatibility comparison, but accepted behavior must be defined by Tabview fixtures and documented compatibility decisions.
+Do not use `csv-sniffer` as the core runtime architecture. It infers more metadata than Tview needs, such as header and type information, its reader path is less natural for stdin and lazy/streaming sources because it expects seekable readers, and it still would not match Python `csv.Sniffer` exactly. It may be used in a spike or compatibility comparison, but accepted behavior must be defined by Tview fixtures and documented compatibility decisions.
 
 ### Dynamic key registry and help
 
@@ -123,7 +123,7 @@ Define keybindings once in a command registry. Render the help popup from that r
 
 Provide a `clipboard` Cargo feature backed by `arboard`. When enabled, use `arboard` to copy the current cell text to the system clipboard. When disabled, when clipboard initialization fails, or when setting text fails, `y` must be a no-op or display a non-fatal status message; it must not crash the viewer.
 
-Rationale: `arboard` provides a small OS-independent clipboard API, supports the macOS and Linux targets needed for the first Rust release, has Linux selection support for future refinement, and is focused enough for Tabview's current "copy this cell" behavior. Terminal-only or SSH-specific mechanisms such as OSC52 are out of scope for the first rewrite and can be considered later.
+Rationale: `arboard` provides a small OS-independent clipboard API, supports the macOS and Linux targets needed for the first Rust release, has Linux selection support for future refinement, and is focused enough for Tview's current "copy this cell" behavior. Terminal-only or SSH-specific mechanisms such as OSC52 are out of scope for the first rewrite and can be considered later.
 
 ### Compatibility harness
 

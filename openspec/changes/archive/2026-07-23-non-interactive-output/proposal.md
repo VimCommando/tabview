@@ -1,6 +1,6 @@
 ## Why
 
-Tabview currently always enters an interactive terminal UI, so its format detection, saved views, column formatting, sorting, filtering, and table layout cannot be reused in pipelines or scripts. A non-interactive output path would make Tabview a convenient converter from CSV, JSON, NDJSON, and future table sources into readable fixed-width text.
+Tview currently always enters an interactive terminal UI, so its format detection, saved views, column formatting, sorting, filtering, and table layout cannot be reused in pipelines or scripts. A non-interactive output path would make Tview a convenient converter from CSV, JSON, NDJSON, and future table sources into readable fixed-width text.
 
 ## What Changes
 

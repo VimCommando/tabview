@@ -262,10 +262,7 @@ impl ResolvedTheme {
 
 pub fn load_active_theme(config_root: Option<&Path>) -> Result<ThemeLoad, ThemeError> {
     let terminal_mode = terminal_color_mode_from_env();
-    let Some(root) = config_root
-        .map(Path::to_path_buf)
-        .or_else(tabview_config_dir)
-    else {
+    let Some(root) = config_root.map(Path::to_path_buf).or_else(tview_config_dir) else {
         return Ok(ThemeLoad {
             theme: default_theme_for_terminal(terminal_mode),
             warnings: Vec::new(),
@@ -330,7 +327,7 @@ fn terminal_color_mode_from_values(
     }
 }
 
-pub fn tabview_config_dir() -> Option<PathBuf> {
+pub fn tview_config_dir() -> Option<PathBuf> {
     std::env::var_os("XDG_CONFIG_HOME")
         .filter(|value| !value.is_empty())
         .map(PathBuf::from)
@@ -339,7 +336,7 @@ pub fn tabview_config_dir() -> Option<PathBuf> {
                 .filter(|value| !value.is_empty())
                 .map(|home| PathBuf::from(home).join(".config"))
         })
-        .map(|root| root.join("tabview"))
+        .map(|root| root.join("tview"))
 }
 
 fn selected_theme_from_config(root: &Path) -> Result<Option<String>, ThemeError> {
@@ -359,14 +356,14 @@ fn selected_theme_from_config(root: &Path) -> Result<Option<String>, ThemeError>
 }
 
 pub fn parse_config_theme(input: &str) -> Result<Option<String>, String> {
-    let raw: Option<RawTabviewConfig> =
+    let raw: Option<RawTviewConfig> =
         yaml_serde::from_str(input).map_err(|err| format!("invalid config yaml: {err}"))?;
     Ok(raw.and_then(|config| config.theme))
 }
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RawTabviewConfig {
+struct RawTviewConfig {
     theme: Option<String>,
 }
 

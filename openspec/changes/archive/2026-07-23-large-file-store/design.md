@@ -300,7 +300,7 @@ Before consulting a store, the coordinator validates every `ColumnId`, predicate
 
 Unsupported execution is not an error: the coordinator fully indexes or materializes the base store and runs the generic local executor. Returning `Unsupported` may retain monotonic indexing or cache progress, but may not change base row order or active view/query state. Current delimited, JSON, and NDJSON stores use that fallback. Partial pushdown and SQL translation are deferred with SQLite.
 
-This exact-or-fallback rule is important because a superficially similar source operator may not be equivalent to Tabview behavior. For example, text and regex filters may inspect rendered values, while natural, numeric-suffix, date, semantic-version, IP, and boolean sorting have viewer-defined comparisons. An adapter that cannot reproduce those semantics must return unsupported rather than an approximate result.
+This exact-or-fallback rule is important because a superficially similar source operator may not be equivalent to Tview behavior. For example, text and regex filters may inspect rendered values, while natural, numeric-suffix, date, semantic-version, IP, and boolean sorting have viewer-defined comparisons. An adapter that cannot reproduce those semantics must return unsupported rather than an approximate result.
 
 Query execution produces a derived logical result row set and never changes the base store's source order. `TableView` retains the base store plus the last successful result. Clearing sort/filter state re-executes the remaining query or returns to source order without reopening the source. Query state and replacement results are built separately and become active atomically; an execution failure preserves the prior query, row set, cursor, and viewport.
 

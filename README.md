@@ -1,4 +1,4 @@
-# Tabview
+# Tview
 
 View delimited text, JSON, NDJSON, local SQLite databases, and Elasticsearch in a
 spreadsheet-like terminal interface.
@@ -7,7 +7,9 @@ spreadsheet-like terminal interface.
 limited. For a more fully featured CSV viewer/spreadsheet app, check out the
 [Visidata project](https://github.com/saulpw/visidata).**
 
-Posted by Scott Hansen <tech@firecat53.net>
+Rust rewrite of [Tabview](https://github.com/Tabviewer/tabview).
+
+Upstream posted by Scott Hansen <tech@firecat53.net>
 
 Original code forked from <http://www.amk.ca/files/simple/tabview.txt>.
 
@@ -25,7 +27,7 @@ contents of that cell are shown next to it.
 
 ## Features
 
-- Rust command-line application distributed as the `tabview` binary.
+- Rust command-line application distributed as the `tview` binary.
 - Spreadsheet-like view for visualizing tabular data.
 - Automatic or explicit delimited, JSON, and NDJSON input selection.
 - Read-only browsing of local SQLite databases through Turso.
@@ -63,7 +65,7 @@ contents of that cell are shown next to it.
 Install the latest published release:
 
 ```sh
-cargo install tabview
+cargo install tview
 ```
 
 Install from a local checkout:
@@ -75,8 +77,8 @@ cargo install --path .
 Build with clipboard support:
 
 ```sh
-cargo install tabview --features clipboard
-cargo install tabview --features elasticsearch
+cargo install tview --features clipboard
+cargo install tview --features elasticsearch
 ```
 
 ## Usage
@@ -84,38 +86,38 @@ cargo install tabview --features elasticsearch
 From the command line:
 
 ```sh
-tabview <filename>
-tabview <filename> --start_pos 6,5
-tabview <filename> +6:5
-tabview <filename> --encoding iso8859-1 +6:
-tabview <filename> --delimiter '\t' --quoting QUOTE_NONE
-tabview <filename> --width mode
-tabview <filename> --width max
-tabview <filename> --width 20
-tabview <filename> --view cat-shards
-tabview <filename> --no-view
-tabview response.json --json-path /hits/hits
-tabview repositories.json --object-mode entries
-tabview settings.json --object-mode record
-tabview records.ndjson --format ndjson
-tabview response.data --format json --schema-scan full
-tabview sample/us-counties.sqlite3
-tabview sample/us-counties.sqlite3 --format sqlite --table counties
-tabview --format elasticsearch https://localhost:9200 --table logs-*
-tabview --format elasticsearch https://localhost:9200 \
+tview <filename>
+tview <filename> --start_pos 6,5
+tview <filename> +6:5
+tview <filename> --encoding iso8859-1 +6:
+tview <filename> --delimiter '\t' --quoting QUOTE_NONE
+tview <filename> --width mode
+tview <filename> --width max
+tview <filename> --width 20
+tview <filename> --view cat-shards
+tview <filename> --no-view
+tview response.json --json-path /hits/hits
+tview repositories.json --object-mode entries
+tview settings.json --object-mode record
+tview records.ndjson --format ndjson
+tview response.data --format json --schema-scan full
+tview sample/us-counties.sqlite3
+tview sample/us-counties.sqlite3 --format sqlite --table counties
+tview --format elasticsearch https://localhost:9200 --table logs-*
+tview --format elasticsearch https://localhost:9200 \
   --query 'FROM logs-* | WHERE log.level == "error" | SORT @timestamp DESC'
-tabview data.csv --output table
-tabview --interactive data.csv
-tabview --interactive --output table data.csv > edited.txt
+tview data.csv --output table
+tview --interactive data.csv
+tview --interactive --output table data.csv > edited.txt
 ```
 
 Read from standard input:
 
 ```sh
-cat data.csv | tabview -
-cat records.ndjson | tabview --format ndjson -
-cat data.csv | tabview --output table - > table.txt
-cat data.csv | tabview --interactive --output table - > edited.txt
+cat data.csv | tview -
+cat records.ndjson | tview --format ndjson -
+cat data.csv | tview --output table - > table.txt
+cat data.csv | tview --interactive --output table - > edited.txt
 ```
 
 Runtime and serialization are separate. `--interactive`/`-i` forces the TUI;
@@ -131,11 +133,11 @@ uses no aggregate terminal-width limit, and leaves wrapping, paging, or
 truncation to downstream tools. `--color auto` and `--color never` produce plain
 bytes; `--color always` opts into theme-derived ANSI styling.
 
-When stdin supplies table data during interactive operation, Tabview uses the
+When stdin supplies table data during interactive operation, Tview uses the
 controlling terminal for UI input and drawing. It continues draining finite
 stdin in the background while the TUI is active, and an explicit final export
 waits for EOF so late rows and columns are included. Redirect output to a
-different path from the input: shells truncate redirection targets before Tabview starts.
+different path from the input: shells truncate redirection targets before Tview starts.
 The current `table` format is fixed-width text and does not preserve CSV or JSON
 syntax, so write it to a text destination rather than replacing the source.
 Future serializers such as CSV and Markdown can be added as new `--output`
@@ -144,7 +146,7 @@ values without changing `--interactive`.
 `--format auto|delimited|json|ndjson|sqlite|elasticsearch` defaults to `auto`.
 An unambiguous URL scheme can select a source format: `libsql://` resolves to
 SQLite and `file://` resolves to a local path. HTTP(S) remains ambiguous and
-therefore requires `--format elasticsearch`; Tabview never probes arbitrary
+therefore requires `--format elasticsearch`; Tview never probes arbitrary
 remote content to guess its type. Filename
 extensions are considered before bounded content probing; SQLite's
 `SQLite format 3` signature is recognized before any text decoding. An explicit
@@ -154,7 +156,7 @@ explicitly selected structured formats.
 
 ### SQLite sources
 
-Tabview opens local SQLite-format files through Turso. If a database contains
+Tview opens local SQLite-format files through Turso. If a database contains
 one selectable table or compatible ordinary view, it is selected
 automatically. If several are available, the interactive application presents
 a simple table picker; direct batch output instead requires
@@ -186,7 +188,7 @@ parameters, and a safely rendered copyable statement. It also calls out active
 local view transforms, because they are intentionally absent from the SQL.
 The private extra-row truncation probe is never shown in the reusable SQL.
 
-Tabview opens SQLite through Turso with storage-level read-only flags before
+Tview opens SQLite through Turso with storage-level read-only flags before
 creating a connection, so viewing does not convert a rollback-journal database
 to WAL, create journal/WAL/shared-memory sidecars, or modify existing database
 or sidecar bytes. The connection is confined behind a read-only facade,
@@ -195,9 +197,9 @@ source predicates use bound parameters.
 Ordinary tables and capability-probed ordinary views are selectable. Virtual
 tables—including existing FTS5 and RTree tables—are reported as unsupported;
 shadow and SQLite-internal objects are hidden.
-Turso's optional FTS support is disabled because Tabview does not select
+Turso's optional FTS support is disabled because Tview does not select
 existing SQLite FTS virtual tables. SQLite-enabled builds use Turso's mimalloc
-feature as Tabview's global allocator.
+feature as Tview's global allocator.
 
 SQLite declared types are displayed as source metadata and used only as
 conservative initial hints. SQLite values remain dynamically typed at runtime,
@@ -215,9 +217,9 @@ column-selection details.
 Build with `--features elasticsearch`, then provide an HTTP(S) cluster endpoint:
 
 ```sh
-tabview --format elasticsearch https://elastic.example:9200
-tabview --format elasticsearch https://elastic.example:9200 --table logs-*
-tabview --format elasticsearch https://elastic.example:9200 \
+tview --format elasticsearch https://elastic.example:9200
+tview --format elasticsearch https://elastic.example:9200 --table logs-*
+tview --format elasticsearch https://elastic.example:9200 \
   --query 'FROM logs-* | KEEP @timestamp, message | SORT @timestamp DESC'
 ```
 
@@ -229,13 +231,13 @@ Direct non-interactive output requires `--table` or `--query`, because it
 cannot ask the user to choose a target.
 
 `--table` generates an ES|QL `FROM` query with `_index` and `_id` metadata.
-`--query` is a complete opaque ES|QL base query; Tabview does not parse or
+`--query` is a complete opaque ES|QL base query; Tview does not parse or
 validate its `FROM` targets. Source Configuration can add safely quoted filters
-and sorts and change the hard limit (1,000 rows by default). Tabview privately
+and sorts and change the hard limit (1,000 rows by default). Tview privately
 requests one extra row to distinguish a complete result from a limited one;
 the reusable query shown by the Query popup retains the configured limit.
 
-For a selected index or data stream, Tabview reads mappings and field
+For a selected index or data stream, Tview reads mappings and field
 capabilities to build a catalog including nested fields, multifields, runtime
 fields, and cross-index conflicts. ES|QL response columns remain authoritative
 for the displayed result schema because commands such as `STATS`, `EVAL`, and
@@ -246,11 +248,11 @@ leave the prior result visible.
 Authentication and custom trust are environment-only:
 
 ```sh
-ELASTIC_API_KEY=... tabview --format elasticsearch https://elastic.example:9200 --table logs-*
+ELASTIC_API_KEY=... tview --format elasticsearch https://elastic.example:9200 --table logs-*
 ELASTIC_USERNAME=elastic ELASTIC_PASSWORD=... \
-  tabview --format elasticsearch https://elastic.example:9200 --table logs-*
+  tview --format elasticsearch https://elastic.example:9200 --table logs-*
 ELASTIC_CA_CERT=/path/to/ca.pem \
-  tabview --format elasticsearch https://elastic.example:9200 --table logs-*
+  tview --format elasticsearch https://elastic.example:9200 --table logs-*
 ```
 
 API-key and username/password modes are mutually exclusive. Credentials in the
@@ -295,25 +297,25 @@ text values remain distinct; notably, JSON `null` is not an empty string.
 Use as the pager for MySQL by setting these options in `~/.my.cnf`:
 
 ```ini
-pager=tabview -d '\t' --quoting QUOTE_NONE -
+pager=tview -d '\t' --quoting QUOTE_NONE -
 silent
 ```
 
-The Rust rewrite supports the `tabview` CLI only. The former Python import API
-(`import tabview` and `tabview.view(...)`) is not part of the supported surface.
+The Rust rewrite supports the `tview` CLI only. The upstream Python import API
+is not supported.
 
 ## Color Themes
 
-Tabview loads theme settings from `$XDG_CONFIG_HOME/tabview/config.yml`, or
-`~/.config/tabview/config.yml` when `XDG_CONFIG_HOME` is unset:
+Tview loads theme settings from `$XDG_CONFIG_HOME/tview/config.yml`, or
+`~/.config/tview/config.yml` when `XDG_CONFIG_HOME` is unset:
 
 ```yaml
 theme: cmdzro
 ```
 
-Theme files live in `tabview/themes/*.yml` or `tabview/themes/*.yaml` under the
+Theme files live in `tview/themes/*.yml` or `tview/themes/*.yaml` under the
 same config directory. If both `name.yml` and `name.yaml` exist, `.yml` wins.
-If no theme is configured, tabview uses the built-in `cmdzro` theme based on
+If no theme is configured, tview uses the built-in `cmdzro` theme based on
 `~/.config/nvim/colors/cmdzro.vim`: neutral gray text, blue reserved for UI
 surfaces, yellow reserved for search and UI emphasis, and red reserved for
 errors or unhealthy states.
@@ -402,7 +404,7 @@ styles:
       bg: ui_blue
 ```
 
-Named 16-color values use tabview's built-in cmdzro base palette; in truecolor
+Named 16-color values use tview's built-in cmdzro base palette; in truecolor
 mode they resolve to those RGB values, while `mode: ansi16` emits ANSI colors
 for the terminal palette.
 
@@ -411,8 +413,8 @@ theme schema is shipped at `schemas/theme.schema.json`.
 
 ## Saved Views
 
-By default, tabview loads user-defined YAML views
-from `$XDG_CONFIG_HOME/tabview/views`, or `~/.config/tabview/views` when
+By default, tview loads user-defined YAML views
+from `$XDG_CONFIG_HOME/tview/views`, or `~/.config/tview/views` when
 `XDG_CONFIG_HOME` is unset. This POSIX-style path is used on every platform,
 including macOS. Files ending in `.yml` and `.yaml` are accepted. If both
 `name.yml` and `name.yaml` exist, `.yml` wins and a footer warning is shown.
@@ -489,7 +491,7 @@ Source options under `source` are selected before the table opens. View
 formatting and local operations live under `view`. Source-option precedence is
 explicit CLI options, then the selected saved view, then defaults. Supplying
 `--schema-scan default` therefore overrides a saved `source.schema_scan: full` for one
-invocation. When a view is written for an object table, tabview saves the
+invocation. When a view is written for an object table, tview saves the
 resolved explicit `source.object_mode` (`record` or `entries`) so later detector
 improvements do not change that view's shape. Non-object tables omit it.
 Native sources may persist either `source.table` or `source.query`, never both.

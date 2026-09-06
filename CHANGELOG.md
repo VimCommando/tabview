@@ -6,13 +6,16 @@ All notable changes to this project are documented in this file.
 
 ### Changed
 
-- Rewrote Tabview as a Rust CLI distributed as a single `tabview` binary.
+- Renamed the Rust rewrite to `tview`, including its crate, executable,
+  configuration directory, and environment variables.
+- Rewrote the upstream Python viewer as a Rust CLI distributed as a single
+  `tview` binary.
 - Preserved the existing command-line interface, including stdin mode, explicit
   encodings, delimiters, quoting options, and `+y:x` start-position syntax.
 - Rebuilt the spreadsheet-like terminal interface with Ratatui and crossterm
   while preserving the existing layout, navigation, search, sort, reload,
   column sizing, header, popup, and skip-to-change workflows.
-- Switched installation to `cargo install tabview`.
+- Switched installation to `cargo install tview`.
 - Made clipboard support an optional Cargo feature backed by Rust clipboard
   integration.
 - Made large seekable inputs open through incremental stores with partial row
@@ -32,8 +35,7 @@ All notable changes to this project are documented in this file.
 
 ### Removed
 
-- Removed the Python import API; `import tabview` and `tabview.view(...)` are no
-  longer supported.
+- Removed support for the upstream Python import API.
 - Removed Python packaging and runtime support from the maintained
   implementation path.
 - Removed the legacy Travis CI configuration.

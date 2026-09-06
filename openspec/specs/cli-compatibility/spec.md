@@ -1,24 +1,24 @@
 ## Purpose
 
-Define the supported command-line compatibility surface for the Rust `tabview` replacement.
+Define the supported command-line compatibility surface for the Rust `tview` replacement.
 
 ## Requirements
 
 ### Requirement: Replacement binary name
-The Rust implementation SHALL install and run as a `tabview` executable.
+The Rust implementation SHALL install and run as a `tview` executable.
 
-#### Scenario: User invokes tabview
-- **WHEN** a user runs `tabview <filename>` after installing the Rust package
+#### Scenario: User invokes tview
+- **WHEN** a user runs `tview <filename>` after installing the Rust package
 - **THEN** the Rust executable opens the target file in the terminal viewer
 ### Requirement: Existing CLI arguments
 The Rust executable SHALL accept the existing command-line interface: positional filename, `-` for stdin, `--encoding`/`-e`, `--delimiter`/`-d`, `--quoting`, `--start_pos`/`-s`, `--width`/`-w`, `--double_width`, `--quote-char`/`-q`, and extra classic start-position arguments in `+y:x` form, plus `--format`, `--json-path`, and `--schema-scan` source options. A build with the default-enabled `sqlite` feature SHALL additionally accept `--table`.
 
 #### Scenario: Current README invocation remains valid
-- **WHEN** a user runs `tabview sample/data_ohlcv.csv --start_pos 6,5 --encoding utf-8`
+- **WHEN** a user runs `tview sample/data_ohlcv.csv --start_pos 6,5 --encoding utf-8`
 - **THEN** the command is accepted and the viewer starts at row 6, column 5 using the requested encoding
 
 #### Scenario: Classic start position remains valid
-- **WHEN** a user runs `tabview sample/data_ohlcv.csv +6:5`
+- **WHEN** a user runs `tview sample/data_ohlcv.csv +6:5`
 - **THEN** the viewer starts at row 6, column 5
 
 #### Scenario: Existing CSV options remain valid
@@ -28,15 +28,15 @@ The Rust executable SHALL accept the existing command-line interface: positional
 The Rust executable SHALL accept `--format auto|delimited|json|ndjson`, using `auto` by default, and SHALL reject incompatible format-specific argument combinations clearly. A build with the default-enabled `sqlite` feature SHALL additionally accept `sqlite`.
 
 #### Scenario: Force JSON format
-- **WHEN** a user runs `tabview --format json response.data`
+- **WHEN** a user runs `tview --format json response.data`
 - **THEN** the JSON adapter is selected without relying on the filename extension
 
 #### Scenario: Force delimited format
-- **WHEN** a `.json`-named file actually contains delimited data and the user runs `tabview --format delimited data.json`
+- **WHEN** a `.json`-named file actually contains delimited data and the user runs `tview --format delimited data.json`
 - **THEN** the delimited adapter is selected
 
 #### Scenario: Force SQLite format
-- **WHEN** a user runs `tabview --format sqlite --table users application.data`
+- **WHEN** a user runs `tview --format sqlite --table users application.data`
 - **THEN** the local SQLite adapter is selected without relying on the filename extension
 
 #### Scenario: SQLite feature is disabled
@@ -50,7 +50,7 @@ The Rust executable SHALL accept `--format auto|delimited|json|ndjson`, using `a
 The Rust executable SHALL accept `--json-path <pointer>` using RFC 6901 syntax and SHALL apply it before JSON table construction.
 
 #### Scenario: Select Elasticsearch hits
-- **WHEN** a user runs `tabview --format json --json-path /hits/hits response.json`
+- **WHEN** a user runs `tview --format json --json-path /hits/hits response.json`
 - **THEN** the embedded search-hit array is used as the table
 
 #### Scenario: Invalid JSON pointer
@@ -64,7 +64,7 @@ The Rust executable SHALL accept `--json-path <pointer>` using RFC 6901 syntax a
 The Rust executable SHALL accept `--schema-scan default|full`, using the bounded format default when omitted, with explicit CLI values overriding matching saved-view values.
 
 #### Scenario: Force full JSON schema scan
-- **WHEN** a user runs `tabview --schema-scan full records.ndjson`
+- **WHEN** a user runs `tview --schema-scan full records.ndjson`
 - **THEN** the selected structured adapter scans through the selected table's end before marking its schema complete
 
 #### Scenario: Restore default scan for invocation
@@ -74,43 +74,43 @@ The Rust executable SHALL accept `--schema-scan default|full`, using the bounded
 The Rust executable SHALL use `mode` as the default column width mode when `--width` is not provided.
 
 #### Scenario: Width omitted
-- **WHEN** a user runs `tabview sample/data_ohlcv.csv` without `--width`
+- **WHEN** a user runs `tview sample/data_ohlcv.csv` without `--width`
 - **THEN** the viewer computes variable column widths using mode-based sizing
 ### Requirement: Python-style quoting names
 The Rust executable SHALL accept Python CSV quoting names used by the existing CLI, including `QUOTE_MINIMAL`, `QUOTE_NONNUMERIC`, `QUOTE_ALL`, and `QUOTE_NONE`.
 
 #### Scenario: MySQL pager quoting mode
-- **WHEN** a user runs `tabview -d '\t' --quoting QUOTE_NONE -`
+- **WHEN** a user runs `tview -d '\t' --quoting QUOTE_NONE -`
 - **THEN** the command is accepted and stdin is parsed with tab delimiters and no quote interpretation
 ### Requirement: Standard input mode
 The Rust executable SHALL support `-` as the filename to read data from standard input while still allowing interactive terminal input for the TUI.
 
-#### Scenario: Pipe into tabview
-- **WHEN** data is piped into `tabview -`
+#### Scenario: Pipe into tview
+- **WHEN** data is piped into `tview -`
 - **THEN** the data is loaded from stdin and the TUI remains interactive after loading
 ### Requirement: Python import API removal
-The Rust rewrite SHALL NOT provide or promise compatibility for `import tabview` or `tabview.view(...)`.
+The Rust rewrite SHALL NOT provide or promise compatibility for the upstream Python import API.
 
 #### Scenario: Documentation describes supported surface
 - **WHEN** users read the Rust rewrite installation and usage documentation
-- **THEN** the documented supported interface is the `tabview` CLI, not a Python module API
+- **THEN** the documented supported interface is the `tview` CLI, not a Python module API
 ### Requirement: Saved view CLI overrides
 When compiled with the `saved-views` feature, the Rust executable SHALL accept saved view override arguments that force a named saved view or disable saved view application for the current invocation.
 
 #### Scenario: Force saved view
-- **WHEN** a user runs `tabview --view cat-shards sample/data.csv`
+- **WHEN** a user runs `tview --view cat-shards sample/data.csv`
 - **THEN** the command is accepted and saved view selection uses the saved view named `cat-shards`
 
 #### Scenario: Force saved view with extension
-- **WHEN** a user runs `tabview --view cat-shards.yml sample/data.csv`
+- **WHEN** a user runs `tview --view cat-shards.yml sample/data.csv`
 - **THEN** the command is accepted and saved view selection uses the saved view named `cat-shards`
 
 #### Scenario: Disable saved views
-- **WHEN** a user runs `tabview --no-view sample/data.csv`
+- **WHEN** a user runs `tview --no-view sample/data.csv`
 - **THEN** the command is accepted and saved view discovery and application are skipped
 
 #### Scenario: Conflicting saved view flags
-- **WHEN** a user runs `tabview --view cat-shards --no-view sample/data.csv`
+- **WHEN** a user runs `tview --view cat-shards --no-view sample/data.csv`
 - **THEN** argument parsing rejects the invocation with a clear error
 
 #### Scenario: Saved views feature disabled
@@ -120,11 +120,11 @@ When compiled with the `saved-views` feature, the Rust executable SHALL accept s
 The Rust executable SHALL accept `--object-mode auto|record|entries` and use `auto` when omitted. The shared CLI and source-option names SHALL be independent of any one serialization format so object-capable adapters, including future YAML and TOON adapters, can reuse them. After format resolution and structured-value selection, an adapter SHALL apply the mode only to a selected object/map and SHALL reject explicit incompatible formats or selected shapes clearly. This option SHALL NOT alter stdin buffering or imply an input format.
 
 #### Scenario: Force keyed entries
-- **WHEN** a user runs `tabview --format json --object-mode entries repositories.json`
+- **WHEN** a user runs `tview --format json --object-mode entries repositories.json`
 - **THEN** the selected JSON object's direct members become table rows without automatic shape inference
 
 #### Scenario: Preserve record behavior
-- **WHEN** a user runs `tabview --format json --object-mode record object.json`
+- **WHEN** a user runs `tview --format json --object-mode record object.json`
 - **THEN** the selected object is represented as one flattened row
 
 #### Scenario: Default automatic mode
@@ -151,30 +151,30 @@ The Rust executable SHALL accept `--object-mode auto|record|entries` and use `au
 - **WHEN** a saved view selects one object mode and the user supplies a different `--object-mode`
 - **THEN** the explicit CLI value takes precedence for that invocation
 ### Requirement: Composable interactive and output options
-The Rust executable SHALL accept `--interactive`/`-i` as a runtime-mode flag and `--output <format>`/`-o <format>` as a serialization-format option. This change SHALL support `table`; future values such as `csv` and `markdown` SHALL extend the output format without becoming runtime modes. With neither option, Tabview SHALL retain automatic terminal detection.
+The Rust executable SHALL accept `--interactive`/`-i` as a runtime-mode flag and `--output <format>`/`-o <format>` as a serialization-format option. This change SHALL support `table`; future values such as `csv` and `markdown` SHALL extend the output format without becoming runtime modes. With neither option, Tview SHALL retain automatic terminal detection.
 
 #### Scenario: Explicit table output
-- **WHEN** a user runs `tabview -o table data.json`
+- **WHEN** a user runs `tview -o table data.json`
 - **THEN** the command writes one formatted table to stdout and exits without starting the TUI
 
 #### Scenario: Explicit view-only interaction
-- **WHEN** a user runs `tabview -i data.csv`
+- **WHEN** a user runs `tview -i data.csv`
 - **THEN** the command starts the interactive viewer and does not serialize the final live view after quitting
 
 #### Scenario: View-only interaction with redirected stdout
-- **WHEN** a user runs `tabview -i data.csv > unused.txt` from a controlling terminal without `--output`
-- **THEN** Tabview uses the controlling terminal for the viewer and leaves redirected stdout empty
+- **WHEN** a user runs `tview -i data.csv > unused.txt` from a controlling terminal without `--output`
+- **THEN** Tview uses the controlling terminal for the viewer and leaves redirected stdout empty
 
 #### Scenario: Automatic interactive output is view-only
-- **WHEN** a user runs `tabview data.csv` with terminal stdout and neither output option
+- **WHEN** a user runs `tview data.csv` with terminal stdout and neither output option
 - **THEN** the command starts the interactive viewer and does not serialize the final live view after quitting
 
 #### Scenario: Composed interactive table transform
-- **WHEN** a user runs `tabview -i -o table data.csv > edited.txt` from a controlling terminal
-- **THEN** Tabview uses the controlling terminal for interaction and writes only the final live view to redirected stdout after a normal quit
+- **WHEN** a user runs `tview -i -o table data.csv > edited.txt` from a controlling terminal
+- **THEN** Tview uses the controlling terminal for interaction and writes only the final live view to redirected stdout after a normal quit
 
 #### Scenario: Future composed CSV transform
-- **WHEN** a future CSV adapter is available and a user runs `tabview -i -o csv data.csv > edited.csv`
+- **WHEN** a future CSV adapter is available and a user runs `tview -i -o csv data.csv > edited.csv`
 - **THEN** the same interactive runtime writes the final live view through the CSV adapter without changing the meaning of `-i`
 
 #### Scenario: Invalid output value
@@ -182,17 +182,17 @@ The Rust executable SHALL accept `--interactive`/`-i` as a runtime-mode flag and
 - **THEN** argument parsing rejects the invocation and lists the currently supported values without preventing new adapter values from being added later
 
 #### Scenario: Redirect without explicit option
-- **WHEN** a user runs `tabview data.csv > table.txt` without `--output`
+- **WHEN** a user runs `tview data.csv > table.txt` without `--output`
 - **THEN** automatic runtime resolution selects default `table` output
 ### Requirement: Color mode option
 The Rust executable SHALL accept `--color auto|always|never` and use `auto` when omitted, with table-mode color disabled unless `always` is explicitly selected.
 
 #### Scenario: Force colored table
-- **WHEN** a user runs `tabview --output table --color always data.json`
+- **WHEN** a user runs `tview --output table --color always data.json`
 - **THEN** stdout contains theme-derived ANSI table styling
 
 #### Scenario: Force plain table
-- **WHEN** a user runs `tabview --color never data.csv` with redirected stdout
+- **WHEN** a user runs `tview --color never data.csv` with redirected stdout
 - **THEN** stdout contains no ANSI escape sequences
 
 #### Scenario: Invalid color value
@@ -202,16 +202,16 @@ The Rust executable SHALL accept `--color auto|always|never` and use `auto` when
 The existing `-` input mode SHALL compose with runtime and format selection so piped input remains interactive when stdout is a terminal, becomes non-interactive when stdout is redirected or piped under automatic mode, and can be interactively transformed when `-i` and `-o <format>` are combined.
 
 #### Scenario: Piped input to interactive viewer
-- **WHEN** a user runs `producer | tabview -` with terminal stdout and default output mode
-- **THEN** Tabview materializes or opens stdin data and starts the interactive viewer
+- **WHEN** a user runs `producer | tview -` with terminal stdout and default output mode
+- **THEN** Tview materializes or opens stdin data and starts the interactive viewer
 
 #### Scenario: Piped conversion
-- **WHEN** a user runs `producer | tabview - | consumer`
-- **THEN** Tabview reads source data from stdin and writes a plain formatted table to stdout without competing for terminal input
+- **WHEN** a user runs `producer | tview - | consumer`
+- **THEN** Tview reads source data from stdin and writes a plain formatted table to stdout without competing for terminal input
 
 #### Scenario: Piped interactive transformation
-- **WHEN** a user runs `producer | tabview -i -o table - > transformed.txt` from a controlling terminal
-- **THEN** Tabview drains stdin as table data, uses the controlling terminal for UI events and drawing, and writes the final live view to `transformed.txt` after normal quit
+- **WHEN** a user runs `producer | tview -i -o table - > transformed.txt` from a controlling terminal
+- **THEN** Tview drains stdin as table data, uses the controlling terminal for UI events and drawing, and writes the final live view to `transformed.txt` after normal quit
 ### Requirement: SQLite table selection argument
 When compiled with the `sqlite` feature, the Rust executable SHALL accept
 `--table <name>` to select a user-facing ordinary table or compatible ordinary
@@ -219,7 +219,7 @@ view from a SQLite input and SHALL report a classified unsupported object
 distinctly from a missing name.
 
 #### Scenario: Select SQLite table
-- **WHEN** a user runs `tabview application.db --table users`
+- **WHEN** a user runs `tview application.db --table users`
 - **THEN** the command opens the `users` relation when the input is SQLite and that relation exists
 
 #### Scenario: Table option on non-relational input
