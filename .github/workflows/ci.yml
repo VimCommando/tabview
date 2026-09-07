@@ -46,7 +46,7 @@ jobs:
           code=true
           if [ "$EVENT" = pull_request ]; then
             merge_base=$(git merge-base "$BASE" "$HEAD")
-            if ! git diff --name-only "$merge_base" "$HEAD" | rg -qv '^(docs/|openspec/|README.md$|CHANGELOG.md$|DEVELOPING.md$|AGENTS.md$|CLAUDE.md$)'; then
+            if ! git diff --name-only "$merge_base" "$HEAD" | rg -qv '^(docs/|openspec/|README.md$|CHANGELOG.md$|AGENTS.md$|CLAUDE.md$)'; then
               code=false
             fi
           fi

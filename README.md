@@ -660,5 +660,5 @@ cargo clippy --all-targets --all-features -- -D warnings
 | `[num]{` | Skip to the previous column value change. |
 | `[num]}` | Skip to the next column value change. |
 
-Contributor checks and policy are in [DEVELOPING.md](DEVELOPING.md).
+Contributor checks and policy are in [development policy](docs/development.md).
 The authored documentation starts at [docs/index.md](docs/index.md).
