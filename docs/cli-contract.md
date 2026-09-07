@@ -2,7 +2,7 @@
 type: Guide
 title: CLI output and compatibility
 description: Output schemas, exit codes, stream behavior, and compatibility rules.
-generated: { by: codex/gpt-6, at: 2026-09-07T02:19:31Z }
+generated: { by: codex/gpt-6, at: 2026-09-07T05:49:24Z }
 ---
 
 # CLI output and compatibility
@@ -38,7 +38,7 @@ in each JSONL record so each line describes itself.
 The schemas are [JSON](../schemas/output.schema.json) and
 [JSONL record](../schemas/output-record.schema.json). Additive fields may appear
 in future versions; consumers should ignore unknown fields. Existing field
-meanings and string cell types are stable within a major release. A native typed
+meanings and string cell types follow the compatibility policy below. A native typed
 export would require a separately documented format rather than changing these
 cells silently. TOON output is deferred until a measured consumer benefit exists.
 
@@ -72,6 +72,8 @@ and prompts before overwriting it. Shell redirection opens its destination befor
 Tview runs; choose a different path from the input. A dry-run mode for source
 mutations is not applicable because the viewer does not offer them.
 
-Stable CLI meanings follow semantic versioning after the 2.0 prerelease series.
-Prerelease changes still need explicit migration notes. Preserve existing defaults
-until a planned major compatibility change. See [migration](migration.md).
+Tview starts at 0.1.0 with an evolving CLI and configuration contract. During
+0.x, incompatible changes require a minor release and migration notes; compatible
+fixes use patch releases. Version 1.0.0 will establish the supported public
+contract, after which incompatible changes require a major release. Preserve
+existing defaults until a documented compatibility change. See [migration](migration.md).

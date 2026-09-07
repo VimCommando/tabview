@@ -2,7 +2,7 @@
 type: Guide
 title: Release process
 description: Reviewed tags, native packaging, checksums, and publication recovery.
-generated: { by: codex/gpt-6, at: 2026-09-07T05:29:37Z }
+generated: { by: codex/gpt-6, at: 2026-09-07T05:49:24Z }
 ---
 
 # Release process
@@ -68,10 +68,10 @@ After all release checks pass, an authorized maintainer publishes to crates.io:
 cargo publish --locked
 ```
 
-For the current prerelease, verify the published package with
-`cargo install tview --version 2.0.0-alpha.1 --locked --root /tmp/tview-release-check`
-and run the installed binary's version and offline stdin smoke checks. Once a
-stable release exists, also verify the ordinary `cargo install tview` command.
+For the first release, verify the published package with
+`cargo install tview --version 0.1.0 --locked --root /tmp/tview-release-check`
+and run the installed binary's version and offline stdin smoke checks. Also
+verify the ordinary `cargo install tview` command.
 Then publish the prepared GitHub release. Registry credentials belong in the
 maintainer's Cargo credential store or CI secrets, never in this repository.
 
@@ -83,7 +83,7 @@ open a formula PR, and pass supported-host installation tests before merge.
 ## Local release checks
 
 ```bash
-bash scripts/check-release.sh v2.0.0-alpha.1
+bash scripts/check-release.sh v0.1.0
 bash scripts/package-release.sh aarch64-apple-darwin dist
 ```
 

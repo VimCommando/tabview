@@ -2,13 +2,14 @@
 type: Guide
 title: Migration from Tabview
 description: Upgrade steps for the Rust binary and renamed configuration.
-generated: { by: codex/gpt-6, at: 2026-09-07T05:29:37Z }
+generated: { by: codex/gpt-6, at: 2026-09-07T05:49:24Z }
 ---
 
 # Migration from Tabview
 
 Tview is an independent Rust rewrite of Tabview. The first planned Tview release
-is `2.0.0-alpha.1`. Historical Tabview tags and MIT attribution remain intact.
+is `0.1.0`, starting an independent version sequence under the new name.
+Historical Tabview tags and MIT attribution remain intact.
 Crates.io is the primary distribution channel. GitHub archives provide native
 binaries alongside the crate.
 
