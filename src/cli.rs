@@ -8,7 +8,7 @@ use crate::output::{ColorOutput, OutputFormat};
 use crate::view::ColumnWidthMode;
 
 #[derive(Debug, Clone, PartialEq, Eq, Parser)]
-#[command(name = "tview", disable_help_subcommand = true)]
+#[command(name = "tview", version, disable_help_subcommand = true)]
 #[cfg_attr(
     all(feature = "sqlite", not(feature = "elasticsearch")),
     command(about = "View delimited, JSON, NDJSON, or local SQLite data.")

@@ -22,6 +22,7 @@ The system SHALL render and toggle a fixed header from source column definitions
 #### Scenario: Toggle header
 - **WHEN** a user presses `t` for a table with renderable column definitions
 - **THEN** the fixed header row is toggled on or off while preserving the selected data cell where possible
+
 ### Requirement: Operations over partial stores
 Table operations SHALL run against an explicit active source result. Source operations MAY query or incrementally scan the underlying source up to their configured limit; view operations, search, navigation, and reductions SHALL remain bounded by the active source result unless the user explicitly changes the source query.
 
@@ -44,6 +45,7 @@ Table operations SHALL run against an explicit active source result. Source oper
 #### Scenario: Current-cell yank remains local
 - **WHEN** a user yanks the current raw or rendered cell
 - **THEN** the viewer does not clone, materialize, or fetch unrelated rows
+
 ### Requirement: Source-neutral table queries
 The system SHALL model persistent table operations as a source query followed by a view transform. Both layers SHALL use stable column identity independently of source format, display label, and visible position, while allowing the source layer to expose only operations its adapter can execute natively.
 
@@ -62,6 +64,7 @@ The system SHALL model persistent table operations as a source query followed by
 #### Scenario: Structured column identity
 - **WHEN** an operation references a structured or relational column
 - **THEN** it resolves stable source identity rather than executing against the display label
+
 ### Requirement: Canonical execution and store fallback
 The system SHALL use the generic local executor as the canonical implementation of view filters and view sorts. A source query SHALL use adapter-defined native semantics, and unsupported source operations SHALL NOT fall back to unbounded local materialization.
 
@@ -84,6 +87,7 @@ The system SHALL use the generic local executor as the canonical implementation 
 #### Scenario: Execution fails
 - **WHEN** a store accepts a source query but execution fails, or local view execution fails
 - **THEN** the error is reported and the previously successful operation state, result, cursor, and viewport remain active
+
 ### Requirement: Deterministic typed operation semantics
 The system SHALL use one canonical comparator and predicate behavior for view operations across all sources. Source operations SHALL use documented source-native typed semantics and SHALL NOT be required to reproduce advanced view behavior such as rendered-value matching, Rust regex, natural sort, or Tview-specific numeric parsing.
 
@@ -106,6 +110,7 @@ The system SHALL use one canonical comparator and predicate behavior for view op
 #### Scenario: Native source semantics differ
 - **WHEN** SQLite collation, null placement, type affinity, or comparison semantics differ from Tview's view semantics
 - **THEN** the source operation uses SQLite behavior and the UI identifies it as a source operation
+
 ### Requirement: Configurable sort null placement
 The viewer SHALL support direction-independent `first` or `last` null placement as a view-wide sorting default with an optional per-column override, and SHALL include the resolved policy in every sort key.
 
@@ -128,6 +133,7 @@ The viewer SHALL support direction-independent `first` or `last` null placement 
 #### Scenario: Textual null placeholder
 - **WHEN** a delimited text cell contains a placeholder such as `null`
 - **THEN** null placement does not treat it as `CellValue::Null`; existing type-specific placeholder ordering remains applicable
+
 ### Requirement: Derived query results preserve source order
 The system SHALL apply view filters and view sorts to a derived logical row set without mutating active source-result order, and SHALL replace the source result only when a source operation changes.
 
@@ -146,6 +152,7 @@ The system SHALL apply view filters and view sorts to a derived logical row set 
 #### Scenario: Replacement construction fails
 - **WHEN** source execution, indexing, materialization, or local view execution fails before a replacement is complete
 - **THEN** the previous source result and derived view remain unchanged
+
 ### Requirement: Query transitions preserve row identity
 The viewer SHALL track cursor selection and marks by stable row and column identity across successful view transitions and compatible source-query replacements when the source provides stable row identity.
 
@@ -168,6 +175,7 @@ The viewer SHALL track cursor selection and marks by stable row and column ident
 #### Scenario: Generation changes
 - **WHEN** reload opens a new source generation
 - **THEN** old row identities and marks are invalidated
+
 ### Requirement: Operation categories remain distinct
 The system SHALL keep source queries, view transforms, progressive navigation, and scan or reduction operations distinct.
 
@@ -190,6 +198,7 @@ The system SHALL keep source queries, view transforms, progressive navigation, a
 #### Scenario: View does not refill source result
 - **WHEN** view operations reduce the visible row count below the source limit
 - **THEN** the viewer does not request additional source rows automatically
+
 ### Requirement: Column sizing controls
 The system SHALL support fixed, mode, and max column width modes plus interactive width and gap adjustments using `z` and `Z` for the former all-column and current-column width commands.
 
@@ -212,6 +221,7 @@ The system SHALL support fixed, mode, and max column width modes plus interactiv
 #### Scenario: Set current column width with modifier
 - **WHEN** a user presses `20Z`
 - **THEN** the current column uses fixed width 20 subject to terminal constraints
+
 ### Requirement: Sort operations
 The system SHALL support ascending and descending lexical, natural, numeric, and type-aware multi-level sort on the current column using the existing keybindings plus composable column sort commands. Numeric sort SHALL treat plain numbers, recognized suffixed numbers, and multi-dot numeric values as numeric values, while leaving non-numeric values after numeric values in ascending order. Shortcut sort operations SHALL maintain an ordered sort list with at most three entries.
 
@@ -274,6 +284,7 @@ The system SHALL support ascending and descending lexical, natural, numeric, and
 #### Scenario: Sorted header indicators
 - **WHEN** a visible column participates in the sort list
 - **THEN** its header displays `▲` for ascending sort or `▼` for descending sort
+
 ### Requirement: Search traversal
 The system SHALL preserve current forward and reverse search traversal results, including wraparound through rows and columns, without mutating table row or cell order during traversal.
 
@@ -288,6 +299,7 @@ The system SHALL preserve current forward and reverse search traversal results, 
 #### Scenario: Reverse search preserves table order
 - **WHEN** a user presses `N` to search backward
 - **THEN** the table row order and cell order remain unchanged after the search completes
+
 ### Requirement: Search match values
 The system SHALL match search queries against both raw cell values and saved-view-rendered cell values.
 
@@ -302,6 +314,7 @@ The system SHALL match search queries against both raw cell values and saved-vie
 #### Scenario: Search highlights matching cell
 - **WHEN** a search query matches either the raw value or rendered value of a cell
 - **THEN** search traversal highlights that cell regardless of which representation matched
+
 ### Requirement: Column visibility controls
 The system SHALL support composable column show and hide commands under the `c` prefix, using `h` for hide, `H` for show, and directional suffixes.
 
@@ -332,6 +345,7 @@ The system SHALL support composable column show and hide commands under the `c` 
 #### Scenario: Hidden column header indicator
 - **WHEN** one or more hidden source columns exist between visible headers or beyond a visible edge
 - **THEN** the header row displays a `|` indicator at that boundary
+
 ### Requirement: Sort persistence in saved views
 The system SHALL serialize active source sort and view sort as separate ordered lists under `source.sort` and `view.sort`.
 
@@ -350,12 +364,14 @@ The system SHALL serialize active source sort and view sort as separate ordered 
 #### Scenario: Search is not persisted
 - **WHEN** a search query is active and the user opens the saved-view modal
 - **THEN** generated YAML omits the search query
+
 ### Requirement: Skip-to-change operations
 The system SHALL support skipping to the next or previous change in row or column value using `[`, `]`, `{`, and `}` with optional numeric modifiers.
 
 #### Scenario: Skip to next row value change
 - **WHEN** a user presses `]`
 - **THEN** the cursor moves downward in the current column to the next row whose value differs from the starting cell
+
 ### Requirement: Clipboard operation
 The system SHALL support yanking the rendered current cell contents with `y` and the raw current cell contents with `Y` when compiled with clipboard support, and SHALL fail non-fatally when clipboard support is disabled or unavailable.
 
@@ -370,6 +386,7 @@ The system SHALL support yanking the rendered current cell contents with `y` and
 #### Scenario: Clipboard unavailable
 - **WHEN** clipboard support is disabled or unavailable and the user presses `y` or `Y`
 - **THEN** the viewer continues running without corrupting state
+
 ### Requirement: Source and View configuration modals
 The interactive runtime SHALL provide separate Source and View configuration modals. Source configuration SHALL own construction of the bounded source result and MAY vary by adapter capability; View configuration SHALL summarize source-neutral local transformation and provide common local actions without changing the source result.
 
@@ -436,6 +453,7 @@ The interactive runtime SHALL provide separate Source and View configuration mod
 #### Scenario: Saved View modal remains distinct
 - **WHEN** the user opens the Saved View YAML modal
 - **THEN** it serializes current runtime Source and View state without replacing either runtime configuration modal
+
 ### Requirement: SQLite source SQL output
 When a SQLite source query is active, the user SHALL be able to inspect and copy the final source SQL together with its bound values or an equivalent executable SQL representation.
 
@@ -450,3 +468,64 @@ When a SQLite source query is active, the user SHALL be able to inspect and copy
 #### Scenario: Identifier and value safety
 - **WHEN** table names, column names, or filter values require quoting
 - **THEN** identifiers are quoted by the SQL renderer and values remain bound parameters in execution metadata
+
+### Requirement: Native base query composition
+For a query-native source, Source Configuration SHALL compose supported source filters, source sorting, and the hard source limit around the native base query using adapter-native semantics. It SHALL NOT parse or rewrite a complete native query using another source's grammar.
+
+#### Scenario: Compose ES|QL source operations
+- **WHEN** an Elasticsearch source filter, sort, or limit is applied
+- **THEN** the adapter appends a parameterized ES|QL stage in the defined source-operation order
+
+#### Scenario: Compose SQLite source operations
+- **WHEN** a SQLite native query receives a source filter, sort, or limit
+- **THEN** the adapter treats the row-producing SQL as a bounded derived-table input and applies parameterized outer SQL
+
+#### Scenario: Native query already contains limiting behavior
+- **WHEN** a user-supplied native query contains its own `LIMIT` or equivalent stage
+- **THEN** that behavior remains part of the opaque base query and Tview still applies its final hard source-result limit
+
+#### Scenario: Unsupported composition
+- **WHEN** an adapter cannot represent a requested source operation safely over the native base query
+- **THEN** Source Configuration rejects the operation without materializing an unbounded remote or local source
+
+#### Scenario: Local view remains separate
+- **WHEN** a view filter, view sort, presentation change, or search is applied
+- **THEN** it operates only over the fixed active native-query result and does not modify or re-execute the native source query
+
+### Requirement: Elasticsearch Source configuration
+When the active source is Elasticsearch, Source Configuration SHALL expose the endpoint's safe identity, selected target or native query, mappings-backed result fields when available, ES|QL-native filter/sort capabilities, limit, partial/extent state, and query provenance.
+
+#### Scenario: Mapping-aware configuration
+- **WHEN** Elasticsearch was opened from a selected index or data stream
+- **THEN** Source Configuration can select fields from its mapping and field-capability catalog
+
+#### Scenario: Query-only configuration
+- **WHEN** Elasticsearch was opened from a complete ES|QL query without `source.table`
+- **THEN** Source Configuration uses the active result columns and does not require a reconstructed mapping target
+
+#### Scenario: Apply ES|QL draft
+- **WHEN** the user applies a valid Elasticsearch source draft
+- **THEN** at most one asynchronous replacement starts and the prior result remains visible until success
+
+### Requirement: Native source query output
+When a query-native source is active, the user SHALL be able to inspect and copy its final native query, language, and bound parameters or an equivalent safe executable representation.
+
+#### Scenario: SQLite query artifact
+- **WHEN** the active query language is SQL
+- **THEN** the query UI labels and displays SQL rather than assuming the artifact was application-generated
+
+#### Scenario: Elasticsearch query artifact
+- **WHEN** the active query language is ES|QL
+- **THEN** the query UI labels and displays ES|QL and its value or identifier parameters
+
+#### Scenario: Source operations change
+- **WHEN** a native base query, source filter, source sort, target selection, or source limit changes
+- **THEN** the displayed artifact is regenerated from the complete active source request
+
+#### Scenario: View operations change
+- **WHEN** only a view filter, view sort, presentation option, or search changes
+- **THEN** the native query artifact remains unchanged and the output identifies those operations as local view behavior
+
+#### Scenario: Secret redaction
+- **WHEN** native query information is displayed, copied, logged, or included in an error
+- **THEN** transport credentials and authorization headers are absent

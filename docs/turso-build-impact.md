@@ -1,3 +1,10 @@
+---
+type: Guide
+title: Turso build and runtime impact
+description: Recorded SQLite dependency, build, and runtime tradeoffs.
+generated: { by: codex/gpt-6, at: 2026-09-07T02:19:31Z }
+---
+
 # Turso build and runtime impact
 
 Tview's default-enabled `sqlite` Cargo feature activates the optional

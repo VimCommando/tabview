@@ -1,18 +1,20 @@
 # Development
 
-This repository is being rewritten as a single Rust crate that builds the
-`tview` binary.
+Tview is maintained as one Rust package. The contributor contract and local
+standards-bundle pointer are in [development policy](docs/development.md).
 
-Run these commands before submitting implementation changes:
+Run the same preflight used by CI:
 
 ```bash
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-features
+bash scripts/check.sh
 ```
 
-The Python implementation has been removed. The Rust crate is the maintained
-implementation.
+For documentation-only changes, use `bash scripts/check.sh docs`.
+For the separate minimum-compiler check, use `bash scripts/check.sh msrv`.
+Install pinned tools using the development policy instructions.
 
-For terminal modal layout and interaction rules, see
-[`docs/modal-style.md`](docs/modal-style.md).
+Every PR declares its OpenSpec association. Associated changes must be synced
+and archived before merge. See the [completion gate](docs/development.md#openspec-completion).
+
+Terminal dialogs follow [modal style](docs/modal-style.md).
+Release work follows the [release process](docs/releases.md).

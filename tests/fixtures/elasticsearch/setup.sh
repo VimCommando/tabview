@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/usr/bin/env bash
 set -eu
 
 endpoint="${TVIEW_ELASTICSEARCH_URL:-http://localhost:19200}"

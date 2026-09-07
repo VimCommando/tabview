@@ -2763,11 +2763,11 @@ mod tests {
         );
         let filename = path.to_string_lossy().into_owned();
         let args = cli::Args::try_parse_from(["tview", filename.as_str()]).expect("arguments");
-        let mut config = cli::Config::from_args(args).expect("configuration");
-        #[cfg(feature = "saved-views")]
-        {
-            config.saved_view = cli::SavedViewSelection::Disabled;
-        }
+        let config = cli::Config {
+            #[cfg(feature = "saved-views")]
+            saved_view: cli::SavedViewSelection::Disabled,
+            ..cli::Config::from_args(args).expect("configuration")
+        };
         let source = ingest::source::InputSource::Path(path);
         let theme_load = theme::ThemeLoad {
             theme: theme::default_theme(),

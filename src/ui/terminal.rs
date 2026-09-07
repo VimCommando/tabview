@@ -1,3 +1,7 @@
+// Windows console handle APIs require FFI. Keep the exception in this module;
+// see docs/development.md for the ownership and restoration contract.
+#![cfg_attr(windows, allow(unsafe_code))]
+
 #[cfg(windows)]
 use std::io::Read;
 use std::io::{self, Write};

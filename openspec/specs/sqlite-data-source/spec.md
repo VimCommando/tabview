@@ -16,6 +16,7 @@ application dependency used for source-query background work in every build.
 #### Scenario: SQLite feature is disabled
 - **WHEN** Tview is compiled without the `sqlite` feature
 - **THEN** Turso is absent from the normal dependency graph, Tokio remains available to file-backed sources, and the binary does not accept `--format sqlite`, expose `--table`, or dispatch the SQLite signature
+
 ### Requirement: SQLite source resolution
 When compiled with the `sqlite` feature, the system SHALL open local
 SQLite-format path inputs through Turso when SQLite is selected explicitly or
@@ -32,6 +33,7 @@ detected from the strong database signature before text decoding.
 #### Scenario: Non-SQLite automatic input
 - **WHEN** a seekable input lacks the SQLite signature and SQLite was not selected
 - **THEN** existing format resolution continues normally
+
 ### Requirement: SQLite relation discovery and selection
 The system SHALL classify SQLite schema objects, expose user-facing ordinary tables and compatible ordinary views as selectable candidates, retain actionable diagnostics for incompatible ordinary views and explicitly requested virtual tables, exclude shadow and internal objects, and open exactly one selected relation. An ordinary view SHALL be selectable only after a non-mutating queryability and result-metadata probe succeeds through the pinned Turso version. Virtual tables SHALL NOT be selectable in this change regardless of module availability.
 
@@ -98,6 +100,7 @@ The system SHALL classify SQLite schema objects, expose user-facing ordinary tab
 #### Scenario: Identifier requires quoting
 - **WHEN** the selected relation name contains spaces, quotes, or SQL-significant characters
 - **THEN** the adapter resolves it from metadata and safely quotes the generated identifier
+
 ### Requirement: Bounded SQLite source query
 Every SQLite table view SHALL be produced from an application-generated source query containing the selected relation, source filters, source sorting, and a positive result limit applied in that order.
 
@@ -116,6 +119,7 @@ Every SQLite table view SHALL be produced from an application-generated source q
 #### Scenario: View filtering reduces visible rows
 - **WHEN** a view filter hides rows from a limited SQLite source result
 - **THEN** the adapter does not fetch additional database rows to refill the visible result
+
 ### Requirement: SQLite-native source operations
 The SQLite adapter SHALL compile supported typed source filters and source sort keys directly into parameterized SQLite `WHERE` and `ORDER BY` behavior without attempting to reproduce Tview view semantics.
 
@@ -134,6 +138,7 @@ The SQLite adapter SHALL compile supported typed source filters and source sort 
 #### Scenario: Complex local operation
 - **WHEN** the user applies regex, rendered-value, natural, semantic-version, IP, date, boolean, or custom numeric behavior as a view operation
 - **THEN** Tview evaluates it only over the bounded SQLite source result
+
 ### Requirement: SQLite result extent
 The SQLite result SHALL distinguish a complete source result from one truncated by the configured source limit and SHALL report visible rows separately.
 
@@ -148,6 +153,7 @@ The SQLite result SHALL distinguish a complete source result from one truncated 
 #### Scenario: Local filter hides rows
 - **WHEN** a view filter leaves 17 visible rows from 1,000 fetched source rows
 - **THEN** status distinguishes 17 visible rows from the 1,000-row limited source result
+
 ### Requirement: SQLite source-query provenance
 Every successfully compiled SQLite source result SHALL retain its logical parameterized SQL, bound values, and a safely rendered copyable SQL statement using the configured limit, independently of any private extra-row probe used for extent detection.
 
@@ -162,6 +168,7 @@ Every successfully compiled SQLite source result SHALL retain its logical parame
 #### Scenario: View-only change
 - **WHEN** only the view filter or view sort changes
 - **THEN** the current source SQL artifact remains unchanged
+
 ### Requirement: Asynchronous SQLite query replacement
 The system SHALL execute SQLite source-query changes asynchronously, retain the last valid result while a replacement is pending, and activate only the latest successful revision.
 
@@ -184,6 +191,7 @@ The system SHALL execute SQLite source-query changes asynchronously, retain the 
 #### Scenario: Post-interactive pending query
 - **WHEN** a user normally quits an interactive transformation while the latest requested source query is pending
 - **THEN** final output preparation awaits that revision and emits no partial output if it fails
+
 ### Requirement: SQLite row identity
 SQLite result rows SHALL use a stable database identity when available and SHALL define identity-dependent behavior when no stable key exists.
 
@@ -198,6 +206,7 @@ SQLite result rows SHALL use a stable database identity when available and SHALL
 #### Scenario: Relation has no stable key
 - **WHEN** an ordinary view is selected or another relation cannot provide stable row identity across source-query replacements
 - **THEN** cursor and mark state are reset rather than mapped by result position
+
 ### Requirement: Tview-enforced read-only behavior
 The SQLite adapter SHALL open the database through Turso core with `OpenFlags::ReadOnly` before creating a connection, keep the raw connection private, expose only typed discovery, schema, source-query, and row-fetch operations, enable and verify `PRAGMA query_only=ON` as defense in depth, and provide no production path for arbitrary or mutating SQL.
 
@@ -228,6 +237,7 @@ The SQLite adapter SHALL open the database through Turso core with `OpenFlags::R
 #### Scenario: Mutation is attempted in a regression test
 - **WHEN** a mutation is submitted through the configured low-level test connection
 - **THEN** Turso rejects it through both storage-level read-only enforcement and query-only confinement
+
 ### Requirement: Incremental limited SQLite store
 The system SHALL fetch and cache the bounded SQLite source result incrementally through `TableStore`.
 
@@ -250,6 +260,7 @@ The system SHALL fetch and cache the bounded SQLite source result incrementally 
 #### Scenario: Output adapter requires complete rows
 - **WHEN** a source-neutral output adapter requests complete rows and stable widths
 - **THEN** the store drains at most the fixed limited source result before serialization
+
 ### Requirement: Typed SQLite values
 The SQLite adapter SHALL map Turso null, integer, real, text, and blob values directly into typed table-model values without first converting them to display text.
 
@@ -264,6 +275,7 @@ The SQLite adapter SHALL map Turso null, integer, real, text, and blob values di
 #### Scenario: Blob remains binary
 - **WHEN** a row contains a blob
 - **THEN** the model preserves its bytes without interpreting them as source text
+
 ### Requirement: SQLite declared types are hints
 The SQLite adapter SHALL preserve a column's raw declared type for inspection and SHALL use SQLite affinity only as an initial logical-type hint. INTEGER, REAL, and TEXT affinity SHALL initially hint `Integer`, `Float`, and `Text`; an explicit `BLOB` declaration SHALL initially hint `Binary`; NUMERIC affinity, no declaration, and `ANY` SHALL initially hint `Unknown`. Runtime Turso values SHALL remain authoritative and SHALL widen the observed column profile when they contradict the hint.
 
@@ -294,6 +306,7 @@ The SQLite adapter SHALL preserve a column's raw declared type for inspection an
 #### Scenario: View expression lacks declaration
 - **WHEN** prepared metadata for a view expression provides no reliable declared type
 - **THEN** the column begins `Unknown` and its profile is inferred from returned values
+
 ### Requirement: SQLite reload and failure behavior
 The system SHALL reopen the selected relation into a new source generation on reload and SHALL report Turso or compatibility failures without corrupting the last valid view.
 
@@ -304,3 +317,79 @@ The system SHALL reopen the selected relation into a new source generation on re
 #### Scenario: Unsupported construct
 - **WHEN** Turso cannot open or query a selected relation
 - **THEN** the error is reported clearly, no database mutation is issued, and any prior valid view remains unchanged
+
+### Requirement: Native SQLite query
+The SQLite adapter SHALL accept `source.query` as one complete, single-statement, read-only, row-producing SQLite query; it SHALL prepare the query through the confined read-only session, expose its result as one implicit relation, and reject statements that mutate state, produce no table result, contain additional statements, or require side effects.
+
+#### Scenario: Read-only select
+- **WHEN** `source.query` is `SELECT id, name FROM users WHERE active = 1`
+- **THEN** the prepared result columns and rows become the opened table
+
+#### Scenario: Read-only common table expression
+- **WHEN** a single row-producing `WITH ... SELECT ...` query is accepted by the confined SQLite engine
+- **THEN** its result opens through the same native-query path
+
+#### Scenario: Mutating statement
+- **WHEN** `source.query` attempts `INSERT`, `UPDATE`, `DELETE`, schema mutation, attachment, or another state-changing operation
+- **THEN** opening fails before any persistent database or sidecar state changes
+
+#### Scenario: Multiple statements
+- **WHEN** `source.query` contains more than one SQL statement
+- **THEN** opening fails instead of executing or ignoring trailing statements
+
+#### Scenario: Non-row-producing statement
+- **WHEN** a prepared query has no tabular result metadata
+- **THEN** opening fails with a clear read-only row-query diagnostic
+
+#### Scenario: Native query bypasses table selection
+- **WHEN** a valid native SQL query is supplied without `source.table`
+- **THEN** its result is treated as the single selected implicit relation and no SQLite relation picker is displayed
+
+### Requirement: Bounded native SQLite query
+Tview SHALL compose its supported source filters, source sorting, and positive source limit over a valid native SQLite base query without changing the base query's internal semantics or escaping read-only confinement.
+
+#### Scenario: Default native query limit
+- **WHEN** a native SQLite query has no configured source limit
+- **THEN** the outer Tview query retains at most 1,000 rows
+
+#### Scenario: Source filter over query result
+- **WHEN** a source filter references an unambiguous native-query result column
+- **THEN** the adapter applies a bound outer predicate before the final Tview source limit
+
+#### Scenario: Source sort over query result
+- **WHEN** a source sort references an unambiguous native-query result column
+- **THEN** the adapter applies safely quoted outer ordering before the final Tview source limit
+
+#### Scenario: Query contains its own limit
+- **WHEN** the native SQL base query contains `LIMIT`
+- **THEN** its limit remains inside the derived result and Tview's hard source limit is still applied outside it
+
+### Requirement: Native SQLite result schema and identity
+Native SQLite query result metadata SHALL define the table columns directly, and stable row identity SHALL be unavailable unless the adapter can prove a unique durable identity from explicit result metadata.
+
+#### Scenario: Query expression column
+- **WHEN** a native query returns an expression or alias
+- **THEN** its prepared result name and conservative declared-type metadata define the corresponding column
+
+#### Scenario: Query changes columns
+- **WHEN** a replacement native SQL query returns a different set or type of columns
+- **THEN** SQLite publishes a new table definition and result atomically
+
+#### Scenario: Identity cannot be proven
+- **WHEN** an arbitrary native query does not expose a provably unique durable key
+- **THEN** source-query replacement resets cursor-following and marks rather than guessing from row position
+
+### Requirement: Native SQLite query provenance
+The SQLite query artifact SHALL distinguish user-supplied base SQL from application-composed outer filtering, sorting, and limiting while exposing the final logical parameterized SQL and safe copyable representation.
+
+#### Scenario: User SQL is active
+- **WHEN** a native SQLite query opens successfully
+- **THEN** query information preserves the user's base text and identifies the final composed SQL used for the bounded result
+
+#### Scenario: Private extent probe
+- **WHEN** execution uses an extra-row probe
+- **THEN** the private probe does not replace the logical configured-limit artifact shown to the user
+
+#### Scenario: Credentials absent
+- **WHEN** query provenance is serialized or displayed
+- **THEN** it contains no future remote SQLite credential material

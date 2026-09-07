@@ -1,4 +1,6 @@
 #![cfg(unix)]
+// PTY process setup and signal delivery require libc; production code stays denied.
+#![allow(unsafe_code)]
 
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;

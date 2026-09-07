@@ -22,6 +22,7 @@ When compiled with the `saved-views` feature, the system SHALL discover user-def
 #### Scenario: Saved views feature disabled
 - **WHEN** the binary is compiled without the `saved-views` feature
 - **THEN** the system does not discover or apply saved views
+
 ### Requirement: Saved view schema
 The system SHALL ship and document a schema for saved-view YAML with `name` and `filenames` at the document root, source-opening and source-query configuration under `source`, and source-independent presentation and local-operation configuration under `view`. `source` SHALL support `format`, `json_path`, `object_mode`, `table`, `schema_scan`, `limit`, `filters`, and `sort`. `view` SHALL support `locale`, `nulls`, `columns`, `filters`, and `sort`, including the existing column labels, visibility, type aliases, formatting, widths, alignment, conditional colors, numeric masks, and null-placement overrides.
 
@@ -40,6 +41,7 @@ The system SHALL ship and document a schema for saved-view YAML with `name` and 
 #### Scenario: Legacy operation field at the root
 - **WHEN** a saved view places `format`, `json_path`, `object_mode`, `table`, `schema_scan`, `limit`, `locale`, `columns`, `filters`, or `sort` at the document root
 - **THEN** schema validation rejects the misplaced field and directs the user to `source` or `view`
+
 ### Requirement: Saved view validation
 The system SHALL validate saved view files structurally and semantically before applying them, including validation of nested source and view configuration.
 
@@ -66,6 +68,7 @@ The system SHALL validate saved view files structurally and semantically before 
 #### Scenario: One view per file
 - **WHEN** a saved view file is loaded
 - **THEN** the system treats the file as exactly one saved view whose canonical name is the file stem
+
 ### Requirement: Filename matching
 The system SHALL match saved views against the opened input basename using exact, glob, and regex filename patterns while following platform filename case behavior.
 
@@ -92,6 +95,7 @@ The system SHALL match saved views against the opened input basename using exact
 #### Scenario: Platform case behavior
 - **WHEN** a saved view filename pattern differs from the opened input basename only by letter case
 - **THEN** the system matches or rejects it according to the platform filename case behavior
+
 ### Requirement: Saved view selection overrides
 When compiled with the `saved-views` feature, the system SHALL apply matching saved views automatically by default and SHALL provide CLI overrides to force a saved view by canonical name or disable saved views for the invocation.
 
@@ -114,6 +118,7 @@ When compiled with the `saved-views` feature, the system SHALL apply matching sa
 #### Scenario: Missing forced view
 - **WHEN** a user runs `tview --view missing data.txt` and no saved view has that name
 - **THEN** the system reports a clear CLI error and does not start the viewer
+
 ### Requirement: Saved source options
 A saved view SHALL apply source-opening and source-query options from `source` before constructing the active source result. Explicit CLI source options SHALL override matching saved values for that invocation.
 
@@ -148,6 +153,7 @@ A saved view SHALL apply source-opening and source-query options from `source` b
 #### Scenario: CLI source option precedence
 - **WHEN** both a saved view and an explicit CLI argument provide the same source option
 - **THEN** the explicit CLI value takes precedence for that invocation
+
 ### Requirement: Column matching
 The system SHALL apply column configuration sparsely using stable canonical source identity where available, with compatible header-label matching for delimited sources and unambiguous fallback matching for structured sources.
 
@@ -174,6 +180,7 @@ The system SHALL apply column configuration sparsely using stable canonical sour
 #### Scenario: Missing configured column
 - **WHEN** a saved view configures a column key that matches no loaded column after a complete schema scan
 - **THEN** the system ignores that column configuration and records a non-fatal warning
+
 ### Requirement: Pending late-column configuration
 The system SHALL retain valid canonical column configuration that does not match the initial provisional schema until the schema becomes complete or the column is discovered.
 
@@ -184,6 +191,7 @@ The system SHALL retain valid canonical column configuration that does not match
 #### Scenario: Configured column never arrives
 - **WHEN** schema discovery reaches the selected table's end without finding a pending canonical column
 - **THEN** the system records the normal non-fatal missing-column warning
+
 ### Requirement: Column display-label override
 A saved view SHALL allow a column to override its rendered display label without changing source identity or raw data.
 
@@ -194,6 +202,7 @@ A saved view SHALL allow a column to override its rendered display label without
 #### Scenario: Duplicate label override
 - **WHEN** label overrides create duplicate rendered labels
 - **THEN** stable source identity remains distinct and ambiguous label-based configuration fallback is disabled for those columns
+
 ### Requirement: Column type metadata
 The system SHALL support string, number, and boolean column type families with subtype aliases for text, date, float, integer, semantic version, IP address, character boolean, bit boolean, and word boolean.
 
@@ -224,6 +233,7 @@ The system SHALL support string, number, and boolean column type families with s
 #### Scenario: Boolean subtype values
 - **WHEN** a column sets `type: word`, `type: bit`, or `type: char`
 - **THEN** the system recognizes `true`/`false` and `yes`/`no` for word booleans, `1`/`0` for bit booleans, and `y`/`n` for character booleans
+
 ### Requirement: Display formatting
 The system SHALL apply display formatting from `view` and `view.columns` to rendered cell values without changing raw cell values.
 
@@ -254,6 +264,7 @@ The system SHALL apply display formatting from `view` and `view.columns` to rend
 #### Scenario: Raw and rendered matching
 - **WHEN** formatting changes the rendered value for a cell
 - **THEN** search and `view.filters` can match either the raw cell value or the rendered cell value
+
 ### Requirement: Column width and alignment metadata
 The system SHALL use saved column width and alignment metadata to initialize the table layout while preserving existing interactive layout controls.
 
@@ -276,6 +287,7 @@ The system SHALL use saved column width and alignment metadata to initialize the
 #### Scenario: Interactive width changes still work
 - **WHEN** a saved view initializes column widths and the user presses existing width adjustment keys
 - **THEN** the system adjusts widths using the existing interactive behavior
+
 ### Requirement: Saved null-placement policy
 A saved view SHALL accept `view.nulls: first|last` and `view.columns.<key>.nulls: first|last`, with column configuration overriding the view default and omission using the built-in `last` default.
 
@@ -298,6 +310,7 @@ A saved view SHALL accept `view.nulls: first|last` and `view.columns.<key>.nulls
 #### Scenario: Serialize null placement
 - **WHEN** the view or a column has an explicit null-placement policy
 - **THEN** generated YAML writes it under `view.nulls` or `view.columns.<key>.nulls` and omits it for an inheriting column
+
 ### Requirement: Column visibility metadata
 The system SHALL use saved column visibility metadata to initialize which columns are shown in the table viewport.
 
@@ -312,6 +325,7 @@ The system SHALL use saved column visibility metadata to initialize which column
 #### Scenario: Hidden column remains available to data operations
 - **WHEN** a saved view hides a column
 - **THEN** the system preserves that column's raw values for reload, sorting metadata, active filters, and future show-column commands
+
 ### Requirement: Saved view serialization
 The system SHALL serialize the current runtime configuration as saved-view YAML conforming to the nested schema, with derived source-query output excluded from persisted configuration.
 
@@ -354,6 +368,7 @@ The system SHALL serialize the current runtime configuration as saved-view YAML 
 #### Scenario: Derived SQL is not persisted
 - **WHEN** a SQLite source exposes the SQL generated from saved source operations
 - **THEN** serialization persists the structured source operations rather than a duplicated generated SQL string
+
 ### Requirement: Saved view writing
 The system SHALL save the current runtime view configuration to `config_dir/tview/views` from the view modal.
 
@@ -384,6 +399,7 @@ The system SHALL save the current runtime view configuration to `config_dir/tvie
 #### Scenario: No-view disables saving
 - **WHEN** the user invoked `tview --no-view data.csv`
 - **THEN** saved view authoring and saving are disabled for that session
+
 ### Requirement: Non-fatal saved view failures
 The system SHALL treat saved view loading, validation, matching, and application failures as non-fatal unless the user explicitly requests a missing view through `--view`.
 
@@ -394,6 +410,7 @@ The system SHALL treat saved view loading, validation, matching, and application
 #### Scenario: No matching view
 - **WHEN** no saved view matches the opened input
 - **THEN** the system opens the input with existing default behavior and does not report an error
+
 ### Requirement: Column conditional color metadata
 The system SHALL allow saved view column definitions to include conditional color formatting rules that apply to rendered cell styles without changing raw or rendered cell values.
 
@@ -408,6 +425,7 @@ The system SHALL allow saved view column definitions to include conditional colo
 #### Scenario: Invalid conditional color is non fatal
 - **WHEN** a saved view column defines an invalid conditional color rule
 - **THEN** the system ignores that rule, records a non-fatal warning, and continues applying the rest of the saved view
+
 ### Requirement: Conditional color precedence
 The system SHALL resolve multiple conditional color rules for a column deterministically using saved view order.
 
@@ -422,6 +440,7 @@ The system SHALL resolve multiple conditional color rules for a column determini
 #### Scenario: Selection preserves readability
 - **WHEN** a conditionally colored cell is also the selected cell
 - **THEN** the selected-cell theme background or modifier is preserved and the conditional color is applied only where it remains readable
+
 ### Requirement: Gradient conditional colors
 The system SHALL support numerical `gradient` conditional colors with `mode: fixed` and `mode: auto`.
 
@@ -444,6 +463,7 @@ The system SHALL support numerical `gradient` conditional colors with `mode: fix
 #### Scenario: Auto gradient ignores non numeric values
 - **WHEN** an auto gradient column contains values that cannot be parsed as numbers
 - **THEN** those values are ignored when calculating the column minimum and maximum and receive no gradient color unless another rule matches
+
 ### Requirement: Match conditional colors
 The system SHALL support universal `match` conditional colors for discrete values across string, number, and boolean columns.
 
@@ -462,6 +482,7 @@ The system SHALL support universal `match` conditional colors for discrete value
 #### Scenario: Multiple match entries
 - **WHEN** a column defines one `match` rule with multiple value/color entries
 - **THEN** the system evaluates entries in saved-view order and applies the first matching entry color
+
 ### Requirement: Range conditional colors
 The system SHALL support numerical `range` conditional colors for explicit numeric intervals where unmatched values are left uncolored.
 
@@ -480,6 +501,7 @@ The system SHALL support numerical `range` conditional colors for explicit numer
 #### Scenario: Range leaves gaps uncolored
 - **WHEN** a numeric column defines only ranges for `<10` and `>=90`
 - **THEN** parseable values from `10` through values lower than `90` receive no color from those range rules
+
 ### Requirement: Identifier conditional colors
 The system SHALL support string-mode `identifiers` conditional colors that assign unique rendered column values to generated colors from theme-level or view-level color families.
 
@@ -498,6 +520,7 @@ The system SHALL support string-mode `identifiers` conditional colors that assig
 #### Scenario: View override identifier colors
 - **WHEN** a column defines `identifiers: { colors: [cyan, "palette(198)", "#25A39AFF"] }`
 - **THEN** identifier colors for that column are generated from the view-defined color families instead of the active theme families
+
 ### Requirement: Saved object mode
 A saved view SHALL accept `source.object_mode: auto|record|entries` as a format-neutral source-opening option, validate it in the shipped schema and semantic parser, and apply it before an object-capable adapter constructs its table, with explicit CLI values taking precedence.
 
@@ -528,6 +551,7 @@ A saved view SHALL accept `source.object_mode: auto|record|entries` as a format-
 #### Scenario: Omit mode for non-object source
 - **WHEN** saved-view YAML is generated for an array, scalar, or row stream
 - **THEN** it omits `source.object_mode`
+
 ### Requirement: Saved views in non-interactive output
 When compiled with saved-view support, batch output SHALL perform the same saved-view selection and apply nested `source` configuration before opening and nested `view` configuration before emitting stdout.
 
@@ -558,6 +582,7 @@ When compiled with saved-view support, batch output SHALL perform the same saved
 #### Scenario: Interactive transformation starts from saved view
 - **WHEN** `--interactive` and `--output <format>` are combined
 - **THEN** the TUI starts from nested saved configuration and final output uses subsequent live changes
+
 ### Requirement: Layered saved operations
 Saved views SHALL represent source filtering and sorting separately from view filtering and sorting. Source operations SHALL determine the bounded source result before `source.limit`; view operations SHALL transform only that result.
 
@@ -576,6 +601,7 @@ Saved views SHALL represent source filtering and sorting separately from view fi
 #### Scenario: Search is transient
 - **WHEN** search is active while a saved view is serialized
 - **THEN** search remains a transient navigation operation and is omitted from both sections
+
 ### Requirement: Relational saved-view column matching
 The system SHALL project relational column source identities into deterministic keys under `view.columns` without using display labels as runtime identity.
 
@@ -594,3 +620,56 @@ The system SHALL project relational column source identities into deterministic 
 #### Scenario: Serialize selected table
 - **WHEN** the current view is opened from a SQLite table and saved-view YAML is generated
 - **THEN** the YAML includes `source.format: sqlite`, `source.table`, and canonical relational keys under `view.columns`
+
+### Requirement: Saved native source query
+The nested saved-view schema SHALL accept `source.query` as native query text interpreted by `source.format`, with explicit CLI `--query` taking precedence and `source.table` remaining mutually exclusive.
+
+#### Scenario: Saved ES|QL
+- **WHEN** a matching saved view sets `source.format: elasticsearch` and `source.query: FROM logs-* | LIMIT 25`
+- **THEN** source opening executes that text as ES|QL without displaying the Elasticsearch target picker
+
+#### Scenario: Saved SQLite SQL
+- **WHEN** a matching saved view sets `source.format: sqlite` and a valid read-only `source.query`
+- **THEN** source opening executes the query through the confined SQLite native-query path
+
+#### Scenario: Saved table and query conflict
+- **WHEN** a saved source contains both `table` and `query`
+- **THEN** saved-view validation reports the conflict and does not choose one silently
+
+#### Scenario: CLI query precedence
+- **WHEN** a saved view contains `source.query` and the user supplies `--query`
+- **THEN** the CLI query replaces the saved query for that invocation
+
+#### Scenario: Serialize native query
+- **WHEN** the active source was opened from a user-supplied native query
+- **THEN** generated saved-view YAML persists the configured base query under `source.query` rather than only the derived composed artifact
+
+### Requirement: Saved remote source target
+Saved-view matching and serialization SHALL support the safe textual identity of a remote positional source target while excluding URL userinfo, credentials, authorization headers, and other transport secrets.
+
+#### Scenario: Match Elasticsearch endpoint
+- **WHEN** a saved view targets an Elasticsearch endpoint and its safe target pattern matches the invocation
+- **THEN** normal saved-view selection and source-option merging apply
+
+#### Scenario: Serialize remote target
+- **WHEN** a saved view is generated for a remote source
+- **THEN** its matching target uses the endpoint's safe non-secret representation
+
+#### Scenario: Secret-bearing URL
+- **WHEN** a supplied remote URL contains user information or another secret-bearing component
+- **THEN** generated YAML, diagnostics, and query artifacts omit or redact that component
+
+### Requirement: Saved native query serialization
+Saved-view serialization SHALL persist source-native input configuration separately from derived query provenance.
+
+#### Scenario: Source operations around native query
+- **WHEN** a native base query has source filters, source sort, or source limit
+- **THEN** YAML stores the base under `source.query` and structured operations under their existing source fields
+
+#### Scenario: Derived ES|QL is excluded
+- **WHEN** Elasticsearch query provenance includes application-composed stages
+- **THEN** generated YAML does not duplicate the final composed ES|QL as a second configuration value
+
+#### Scenario: Derived SQLite SQL is excluded
+- **WHEN** SQLite query provenance includes an outer bounded query
+- **THEN** generated YAML does not replace the configured base query with the derived SQL

@@ -30,9 +30,9 @@ An active source result SHALL report whether it is known complete, limited, or p
 ### Requirement: Atomic asynchronous source replacement
 Source-query execution SHALL be revisioned so slow or superseded asynchronous results cannot overwrite newer operation state, and a successful replacement SHALL atomically publish both the result schema and row store.
 
-#### Scenario: Current revision completes with stable schema
-- **WHEN** the latest source query completes successfully with the current result schema
-- **THEN** its store, extent, provenance, cursor reconciliation, and view transform are published together
+#### Scenario: Current revision completes
+- **WHEN** the latest source query completes successfully
+- **THEN** its result schema, store, extent, provenance, cursor reconciliation, and view transform are published together
 
 #### Scenario: Current revision changes schema
 - **WHEN** the latest native query completes successfully with added, removed, renamed, reordered, or retyped result columns
