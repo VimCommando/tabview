@@ -94,19 +94,19 @@ printf '\n#### Scenario: Later behavior\n- **WHEN** extra input arrives\n- **THE
 commit; expect_gate pass feature
 # Release gates reject unpublished history, mismatched tags, and stale lockfiles.
 new_repo release
-cp "$root/scripts/check-release.sh" "$repo/scripts/"
+cp "$root/scripts/release-check.sh" "$repo/scripts/"
 printf '[package]\nname = "tview"\nversion = "0.1.0"\n' > "$repo/Cargo.toml"
 printf '[[package]]\nname = "tview"\nversion = "0.1.0"\n' > "$repo/Cargo.lock"
 printf '# Changelog\n\n## [Unreleased]\n- Pending.\n' > "$repo/CHANGELOG.md"
 commit; git -C "$repo" tag v0.1.0
-if bash "$repo/scripts/check-release.sh" v0.1.0 > "$suite/result" 2>&1; then echo 'Unreleased history accepted' >&2; exit 1; fi
+if bash "$repo/scripts/release-check.sh" v0.1.0 > "$suite/result" 2>&1; then echo 'Unreleased history accepted' >&2; exit 1; fi
 printf '\n## [0.1.0] - 2026-09-06\n\n### Added\n- Initial release.\n' >> "$repo/CHANGELOG.md"
 commit
-if bash "$repo/scripts/check-release.sh" v0.1.0 > "$suite/result" 2>&1; then echo 'Stale tag accepted' >&2; exit 1; fi
+if bash "$repo/scripts/release-check.sh" v0.1.0 > "$suite/result" 2>&1; then echo 'Stale tag accepted' >&2; exit 1; fi
 # Replacing a tag is restricted to this temporary fixture repository.
 git -C "$repo" tag -f v0.1.0 > /dev/null
-bash "$repo/scripts/check-release.sh" v0.1.0 > "$suite/result"
-if bash "$repo/scripts/check-release.sh" v0.2.0 > "$suite/result" 2>&1; then echo 'Mismatched tag accepted' >&2; exit 1; fi
+bash "$repo/scripts/release-check.sh" v0.1.0 > "$suite/result"
+if bash "$repo/scripts/release-check.sh" v0.2.0 > "$suite/result" 2>&1; then echo 'Mismatched tag accepted' >&2; exit 1; fi
 printf '[[package]]\nname = "tview"\nversion = "0.2.0"\n' > "$repo/Cargo.lock"
-if bash "$repo/scripts/check-release.sh" v0.1.0 > "$suite/result" 2>&1; then echo 'Stale lockfile accepted' >&2; exit 1; fi
+if bash "$repo/scripts/release-check.sh" v0.1.0 > "$suite/result" 2>&1; then echo 'Stale lockfile accepted' >&2; exit 1; fi
 echo 'Repository checks: 10 OpenSpec and 5 release cases passed'

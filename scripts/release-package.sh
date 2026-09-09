@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd -- "$(dirname -- "$0")/.."
-# shellcheck source=scripts/tool-versions.sh
-source scripts/tool-versions.sh
-target=${1:?Usage: package-release.sh TARGET DESTINATION [BINARY]}
+# shellcheck source=scripts/tools-versions.sh
+source scripts/tools-versions.sh
+target=${1:?Usage: release-package.sh TARGET DESTINATION [BINARY]}
 destination=${2:?Destination required}
 version=$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)
 case "$target" in

@@ -51,9 +51,9 @@ jobs:
             fi
           fi
           echo "code=$code" >> "$GITHUB_OUTPUT"
-      - run: bash scripts/check.sh docs
-      - run: bash scripts/check.sh scripts
-      - run: bash scripts/check.sh specs
+      - run: bash scripts/preflight.sh docs
+      - run: bash scripts/preflight.sh scripts
+      - run: bash scripts/preflight.sh specs
       - name: PR contract and OpenSpec completion
         if: github.event_name == 'pull_request'
         env:
@@ -86,7 +86,7 @@ jobs:
       - run: |
           source scripts/tool-versions.sh
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
-      - run: bash scripts/check.sh rust
+      - run: bash scripts/preflight.sh rust
 
   msrv:
     needs: checks
@@ -106,7 +106,7 @@ jobs:
       - run: |
           source scripts/tool-versions.sh
           rustup toolchain install "$RUST_MSRV" --profile minimal
-      - run: bash scripts/check.sh msrv
+      - run: bash scripts/preflight.sh msrv
 
   platform:
     needs: checks
@@ -151,7 +151,7 @@ jobs:
           source scripts/tool-versions.sh
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           docker compose -f tests/fixtures/elasticsearch/docker-compose.yml up -d --wait
-          bash tests/fixtures/elasticsearch/setup.sh
+          bash tests/fixtures/elasticsearch/fixture-setup.sh
           rustup run "$RUST_TOOLCHAIN" cargo test --locked --features elasticsearch --test elasticsearch_live -- --ignored
         env:
           TVIEW_ELASTICSEARCH_URL: http://localhost:19200

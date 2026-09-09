@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd -- "$(dirname -- "$0")/.."
-tag=${1:?Usage: check-release.sh TAG}
+tag=${1:?Usage: release-check.sh TAG}
 version=$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)
 pattern='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
 if [[ ! "$tag" =~ $pattern ]] || [ "$tag" != "v$version" ]; then

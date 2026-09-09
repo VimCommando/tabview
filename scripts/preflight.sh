@@ -2,14 +2,14 @@
 set -euo pipefail
 repo_root=$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_root"
-# shellcheck source=scripts/tool-versions.sh
-source scripts/tool-versions.sh
+# shellcheck source=scripts/tools-versions.sh
+source scripts/tools-versions.sh
 mode=${1:-all}
 rust() { rustup run "$RUST_TOOLCHAIN" cargo "$@"; }
 docs() {
   test "$(okf --version)" = "okf $OKF_VERSION (OKF spec v0.2)" || { echo "Install okf $OKF_VERSION" >&2; exit 1; }
   okf validate docs/
-  bash scripts/check-docs-links.sh
+  bash scripts/docs-links-check.sh
   # All authored concepts must be discoverable from the bundle-root index.
   for file in docs/*.md; do
     case "$file" in docs/index.md|docs/log.md) continue ;; esac
@@ -18,7 +18,7 @@ docs() {
 }
 shell_checks() {
   shellcheck scripts/*.sh examples/*.sh tests/fixtures/elasticsearch/*.sh
-  bash scripts/test-checks.sh
+  bash scripts/checks-test.sh
   actionlint .github/workflows/*.yml
 }
 specs() {

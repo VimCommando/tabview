@@ -34,9 +34,9 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           git merge-base --is-ancestor HEAD origin/main
-          bash scripts/check-release.sh "$TAG" > release-notes.md
-      - run: bash scripts/check.sh
-      - run: bash scripts/check.sh msrv
+          bash scripts/release-check.sh "$TAG" > release-notes.md
+      - run: bash scripts/preflight.sh
+      - run: bash scripts/preflight.sh msrv
       - name: Verify crates.io package
         run: |
           source scripts/tool-versions.sh
@@ -71,7 +71,7 @@ jobs:
           source scripts/tool-versions.sh
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup run "$RUST_TOOLCHAIN" cargo test --locked --quiet
-          bash scripts/package-release.sh "$TARGET" dist
+          bash scripts/release-package.sh "$TARGET" dist
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-${{ matrix.target }}

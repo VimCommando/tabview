@@ -1,11 +1,11 @@
 ---
 type: Guide
-title: Development and repository policy
+title: Contributor guide
 description: Ownership, compiler support, checks, and documentation boundaries.
-generated: { by: codex/gpt-6, at: 2026-09-09T06:23:34Z }
+generated: { by: codex/gpt-5, at: 2026-09-09T16:37:31Z }
 ---
 
-# Development and repository policy
+# Contributor guide
 
 CommandZero maintains this independently released Rust rewrite of Tabview.
 The upstream MIT license and attribution remain in [LICENSE.txt](../LICENSE.txt).
@@ -43,14 +43,14 @@ required.
 
 ## Local preflight and CI
 
-Install the versions in [tool-versions.sh](../scripts/tool-versions.sh):
+Install the versions in [tools-versions.sh](../scripts/tools-versions.sh):
 
 ```bash
 rustup toolchain install 1.97.1 --profile minimal --component rustfmt,clippy
 rustup toolchain install 1.90.0 --profile minimal
 cargo install okf --version 0.2.7 --locked
 npm install --global @fission-ai/openspec@1.11.0
-bash scripts/check.sh
+bash scripts/preflight.sh
 ```
 
 Also install ShellCheck, ripgrep, and Actionlint 1.7.7.
@@ -113,7 +113,7 @@ authored concepts and the reserved index. `openspec/` contains specification wor
 and validation boundary. Build tools, schemas, and
 transient reports stay outside `docs/`.
 
-Run `bash scripts/check.sh docs` for the complete bundle. It uses pinned OKF,
+Run `bash scripts/preflight.sh docs` for the complete bundle. It uses pinned OKF,
 checks local authored links, and checks that every concept appears in the index.
 There is no additional local frontmatter schema. Do not use automatic fixes in CI.
 Preserve imported source bodies and attribution. Use actual source artifacts and

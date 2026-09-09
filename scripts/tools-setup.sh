@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 cd -- "$(dirname -- "$0")/.."
-# shellcheck source=scripts/tool-versions.sh
-source scripts/tool-versions.sh
+# shellcheck source=scripts/tools-versions.sh
+source scripts/tools-versions.sh
 rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
 rustup toolchain install "$RUST_MSRV" --profile minimal
 if ! okf --version 2>/dev/null | rg -Fq "okf $OKF_VERSION "; then

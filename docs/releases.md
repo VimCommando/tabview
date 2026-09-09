@@ -83,8 +83,8 @@ open a formula PR, and pass supported-host installation tests before merge.
 ## Local release checks
 
 ```bash
-bash scripts/check-release.sh v0.1.0
-bash scripts/package-release.sh aarch64-apple-darwin dist
+bash scripts/release-check.sh v0.1.0
+bash scripts/release-package.sh aarch64-apple-darwin dist
 ```
 
 The first command requires a dated release section and a tag pointing at HEAD.
