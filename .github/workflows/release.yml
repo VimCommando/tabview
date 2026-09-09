@@ -28,7 +28,7 @@ jobs:
         with:
           node-version: '22'
       - run: sudo apt-get update && sudo apt-get install -y shellcheck ripgrep
-      - run: bash scripts/install-check-tools.sh
+      - run: bash scripts/tools-setup.sh
       - name: Validate reviewed tag
         env:
           TAG: ${{ inputs.tag }}
@@ -39,7 +39,7 @@ jobs:
       - run: bash scripts/preflight.sh msrv
       - name: Verify crates.io package
         run: |
-          source scripts/tool-versions.sh
+          source scripts/tools-versions.sh
           rustup run "$RUST_TOOLCHAIN" cargo publish --locked --dry-run
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -68,7 +68,7 @@ jobs:
         env:
           TARGET: ${{ matrix.target }}
         run: |
-          source scripts/tool-versions.sh
+          source scripts/tools-versions.sh
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup run "$RUST_TOOLCHAIN" cargo test --locked --quiet
           bash scripts/release-package.sh "$TARGET" dist

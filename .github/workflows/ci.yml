@@ -34,9 +34,9 @@ jobs:
             ~/.cargo/git
             ~/.cargo/bin/okf
             ~/.cargo/bin/actionlint
-          key: tools-${{ runner.os }}-${{ hashFiles('scripts/tool-versions.sh') }}
+          key: tools-${{ runner.os }}-${{ hashFiles('scripts/tools-versions.sh') }}
       - run: sudo apt-get update && sudo apt-get install -y shellcheck ripgrep
-      - run: bash scripts/install-check-tools.sh
+      - run: bash scripts/tools-setup.sh
       - id: scope
         env:
           BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
@@ -84,7 +84,7 @@ jobs:
             target
           key: rust-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - run: |
-          source scripts/tool-versions.sh
+          source scripts/tools-versions.sh
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal --component rustfmt,clippy
       - run: bash scripts/preflight.sh rust
 
@@ -102,9 +102,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: msrv-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'scripts/tool-versions.sh') }}
+          key: msrv-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'scripts/tools-versions.sh') }}
       - run: |
-          source scripts/tool-versions.sh
+          source scripts/tools-versions.sh
           rustup toolchain install "$RUST_MSRV" --profile minimal
       - run: bash scripts/preflight.sh msrv
 
@@ -128,7 +128,7 @@ jobs:
             target
           key: platform-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - run: |
-          source scripts/tool-versions.sh
+          source scripts/tools-versions.sh
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           rustup run "$RUST_TOOLCHAIN" cargo test --locked --test interactive_output --quiet
 
@@ -148,7 +148,7 @@ jobs:
             target
           key: live-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml') }}
       - run: |
-          source scripts/tool-versions.sh
+          source scripts/tools-versions.sh
           rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
           docker compose -f tests/fixtures/elasticsearch/docker-compose.yml up -d --wait
           bash tests/fixtures/elasticsearch/fixture-setup.sh
