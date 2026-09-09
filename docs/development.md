@@ -2,7 +2,7 @@
 type: Guide
 title: Development and repository policy
 description: Ownership, compiler support, checks, and documentation boundaries.
-generated: { by: codex/gpt-6, at: 2026-09-07T05:29:37Z }
+generated: { by: codex/gpt-6, at: 2026-09-09T06:23:34Z }
 ---
 
 # Development and repository policy
@@ -16,9 +16,9 @@ measured dependency boundary calls for a split.
 ## Standards adoption
 
 This repository adopts the applicable repository-management standards for its
-Rust CLI and TUI. The workspace bundle is normally checked out beside this
-repository at `../repo-man`; its entry point is `../repo-man/index.md`.
-Follow the nearest parent AGENTS.md pointer if the checkout differs. Obtain a
+Rust CLI and TUI. The local standards bundle starts at
+`~/.agents/memory/repo-man/index.md`, relative to the contributor's home directory.
+Follow the nearest parent AGENTS.md pointer if the location differs. Obtain a
 usable local copy before changing policy. Shared documents that remain proposals
 are not automatically new product promises. The decisions recorded here define
 this repository's implementation of those standards.

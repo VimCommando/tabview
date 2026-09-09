@@ -32,7 +32,10 @@ while IFS= read -r id; do
     echo "$id: expected exactly one preserved archive" >&2; exit 1
   fi
   archive=${archives[0]}
-  test -s "$archive/proposal.md" && test -s "$archive/tasks.md" || { echo "$id: missing archive artifacts" >&2; exit 1; }
+  if [ ! -s "$archive/proposal.md" ] || [ ! -s "$archive/tasks.md" ]; then
+    echo "$id: missing archive artifacts" >&2
+    exit 1
+  fi
   deltas=("$archive"/specs/*/spec.md)
   if [ ! -f "${deltas[0]}" ]; then
     test -s "$archive/no-spec-deltas.md" || { echo "$id: document why this change has no spec deltas" >&2; exit 1; }

@@ -22,7 +22,10 @@ fi
 mkdir -p "$destination"
 destination=$(CDPATH='' cd -- "$destination" && pwd)
 name="tview-v$version-$target.tar.gz"
-[ ! -e "$destination/$name" ] && [ ! -e "$destination/$name.sha256" ] || { echo 'Refusing to replace an existing artifact' >&2; exit 1; }
+if [ -e "$destination/$name" ] || [ -e "$destination/$name.sha256" ]; then
+  echo 'Refusing to replace an existing artifact' >&2
+  exit 1
+fi
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 mkdir "$work/package" "$work/extracted" "$work/config"

@@ -4,7 +4,10 @@ cd -- "$(dirname -- "$0")/.."
 tag=${1:?Usage: check-release.sh TAG}
 version=$(awk -F '"' '/^version = / { print $2; exit }' Cargo.toml)
 pattern='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-[0-9A-Za-z-]+(\.[0-9A-Za-z-]+)*)?$'
-[[ "$tag" =~ $pattern ]] && [ "$tag" = "v$version" ] || { echo 'Tag must match the manifest version' >&2; exit 1; }
+if [[ ! "$tag" =~ $pattern ]] || [ "$tag" != "v$version" ]; then
+  echo 'Tag must match the manifest version' >&2
+  exit 1
+fi
 [ "$(git rev-parse "$tag^{commit}")" = "$(git rev-parse HEAD)" ] || { echo 'Tag must point at HEAD' >&2; exit 1; }
 lock_version=$(awk -F '"' '/^name = "tview"$/ { found=1; next } found && /^version = / { print $2; exit }' Cargo.lock)
 [ "$version" = "$lock_version" ] || { echo 'Lockfile version differs' >&2; exit 1; }
