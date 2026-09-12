@@ -1,6 +1,6 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
-use std::io::BufRead;
+use std::io::{BufRead, Cursor};
 use std::process::Stdio;
 
 #[cfg(feature = "elasticsearch")]
@@ -123,8 +123,7 @@ fn jsonl_output_frames_each_row_and_handles_late_columns() {
         .get_output()
         .stdout
         .clone();
-    let records: Vec<serde_json::Value> = output
-        .as_slice()
+    let records: Vec<serde_json::Value> = Cursor::new(output.as_slice())
         .lines()
         .map(|line| serde_json::from_str(&line.expect("line")).expect("JSONL record"))
         .collect();
