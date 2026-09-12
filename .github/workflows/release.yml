@@ -34,7 +34,7 @@ jobs:
           TAG: ${{ inputs.tag }}
         run: |
           git merge-base --is-ancestor HEAD origin/main
-          bash scripts/release-check.sh "$TAG" > release-notes.md
+          bash scripts/release-check.sh "$TAG" > "$RUNNER_TEMP/release-notes.md"
       - run: bash scripts/preflight.sh
       - run: bash scripts/preflight.sh msrv
       - name: Verify crates.io package
@@ -44,7 +44,7 @@ jobs:
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: release-notes
-          path: release-notes.md
+          path: ${{ runner.temp }}/release-notes.md
 
   build:
     needs: preflight
