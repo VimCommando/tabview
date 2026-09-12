@@ -1,6 +1,6 @@
 use assert_cmd::Command;
 use predicates::prelude::*;
-use std::io::BufRead;
+use std::io::{BufRead, Cursor};
 use std::process::Stdio;
 
 #[cfg(feature = "elasticsearch")]
@@ -89,6 +89,86 @@ fn stdin_pipeline_uses_data_stream_without_terminal_access() {
         .success()
         .stdout("A  B\n1  2\n3  4\n")
         .stderr("");
+}
+
+#[test]
+fn json_output_preserves_labels_controls_and_unclipped_display_values() {
+    let file = fixture("Name,Name\n\"a\nb\",long-value\n", ".csv");
+    let output = tview_command()
+        .args(["--output", "json", "--width", "2"])
+        .arg(file.path())
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let document: serde_json::Value = serde_json::from_slice(&output).expect("JSON document");
+    assert_eq!(
+        document,
+        serde_json::json!({
+            "columns": ["Name", "Name"], "rows": [["a\nb", "long-value"]]
+        })
+    );
+}
+
+#[test]
+fn jsonl_output_frames_each_row_and_handles_late_columns() {
+    let output = tview_command()
+        .args(["--format", "ndjson", "--output", "jsonl", "-"])
+        .write_stdin("{\"a\":1}\n{\"a\":2,\"b\":true}\n")
+        .assert()
+        .success()
+        .stderr("")
+        .get_output()
+        .stdout
+        .clone();
+    let records: Vec<serde_json::Value> = Cursor::new(output.as_slice())
+        .lines()
+        .map(|line| serde_json::from_str(&line.expect("line")).expect("JSONL record"))
+        .collect();
+    assert_eq!(
+        records,
+        vec![
+            serde_json::json!({"columns": ["a", "b"], "values": ["1", ""]}),
+            serde_json::json!({"columns": ["a", "b"], "values": ["2", "true"]}),
+        ]
+    );
+    assert!(output.ends_with(b"\n"));
+}
+
+#[test]
+fn structured_output_rejects_ansi_and_leaves_stdout_empty_on_source_failure() {
+    for format in ["json", "jsonl"] {
+        tview_command()
+            .args(["--output", format, "--color", "always", "-"])
+            .write_stdin("A\nvalue\n")
+            .assert()
+            .code(1)
+            .stdout("");
+        tview_command()
+            .args(["--format", "json", "--output", format, "-"])
+            .write_stdin("[{ broken]")
+            .assert()
+            .code(1)
+            .stdout("");
+    }
+}
+
+#[test]
+fn version_and_usage_have_stable_exit_codes() {
+    tview_command()
+        .arg("--version")
+        .assert()
+        .code(0)
+        .stdout(concat!("tview ", env!("CARGO_PKG_VERSION"), "\n"))
+        .stderr("");
+    tview_command().arg("--help").assert().code(0).stderr("");
+    tview_command()
+        .args(["--output", "invalid", "-"])
+        .assert()
+        .code(2)
+        .stdout("");
 }
 
 #[test]

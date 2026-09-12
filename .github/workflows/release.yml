@@ -1,0 +1,110 @@
+name: Release draft
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Reviewed version tag, for example v0.1.0
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  preflight:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.tag }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '22'
+      - run: sudo apt-get update && sudo apt-get install -y shellcheck ripgrep
+      - run: bash scripts/tools-setup.sh
+      - name: Validate reviewed tag
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          git merge-base --is-ancestor HEAD origin/main
+          bash scripts/release-check.sh "$TAG" > "$RUNNER_TEMP/release-notes.md"
+      - run: bash scripts/preflight.sh
+      - run: bash scripts/preflight.sh msrv
+      - name: Verify crates.io package
+        run: |
+          source scripts/tools-versions.sh
+          rustup run "$RUST_TOOLCHAIN" cargo publish --locked --dry-run
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-notes
+          path: ${{ runner.temp }}/release-notes.md
+
+  build:
+    needs: preflight
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ inputs.tag }}
+          persist-credentials: false
+      - name: Native tests and packaging
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          source scripts/tools-versions.sh
+          rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal
+          rustup run "$RUST_TOOLCHAIN" cargo test --locked --quiet
+          bash scripts/release-package.sh "$TARGET" dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  draft:
+    needs: [preflight, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Verify complete matrix and create draft
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ inputs.tag }}
+        working-directory: artifacts
+        run: |
+          for target in aarch64-apple-darwin x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu; do
+            archive="tview-$TAG-$target.tar.gz"
+            test -f "$archive"
+            sha256sum --check "$archive.sha256"
+          done
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            echo 'Release exists; recover missing assets manually without replacing bytes'
+            exit 1
+          fi
+          flags=()
+          case "$TAG" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$TAG" --verify-tag --draft "${flags[@]}" \
+            --title "$TAG" --notes-file release-notes.md ./*.tar.gz ./*.sha256

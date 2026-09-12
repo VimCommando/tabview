@@ -27,6 +27,10 @@ The Rust executable SHALL accept `--format auto|delimited|json|ndjson`, using `a
 - **WHEN** a user supplies an HTTP(S) target without explicit or saved format
 - **THEN** startup fails clearly rather than guessing a remote adapter
 
+#### Scenario: SQLite feature is disabled
+- **WHEN** a user runs a binary compiled without `sqlite`
+- **THEN** `--format sqlite` is rejected as unavailable and `--table` is exposed only if another enabled source feature supports relation selection
+
 #### Scenario: Feature-disabled format
 - **WHEN** a user requests a format whose Cargo feature is disabled
 - **THEN** that format is rejected as unavailable and its source-specific dispatch is absent
@@ -34,13 +38,6 @@ The Rust executable SHALL accept `--format auto|delimited|json|ndjson`, using `a
 #### Scenario: Incompatible delimiter option
 - **WHEN** a user combines `--format json` with `--delimiter`
 - **THEN** argument or source-option validation rejects the incompatible combination with a clear error
-
-## RENAMED Requirements
-
-- FROM: `SQLite table selection argument`
-- TO: `Relation selection argument`
-
-## MODIFIED Requirements
 
 ### Requirement: Relation selection argument
 When at least one relational or query-native source feature is enabled, the Rust executable SHALL accept `--table <name>` as a generic relation or target selector. The resolved adapter SHALL define which catalog entries are selectable and SHALL reject the option for non-relational sources.
@@ -64,6 +61,10 @@ When at least one relational or query-native source feature is enabled, the Rust
 #### Scenario: Table option on non-relational input
 - **WHEN** a user supplies `--table` for delimited, JSON, NDJSON, or stdin input
 - **THEN** startup fails with a clear message that the resolved source does not support relation selection
+
+#### Scenario: Delimited option on SQLite input
+- **WHEN** a user supplies `--encoding`, `--delimiter`, `--quoting`, or `--quote-char` for SQLite input
+- **THEN** startup fails with a clear message identifying the incompatible option
 
 #### Scenario: Classified unsupported relation
 - **WHEN** a selected adapter recognizes a name but classifies it as unavailable
@@ -93,3 +94,8 @@ When at least one native-query source feature is enabled, the Rust executable SH
 #### Scenario: Query feature unavailable
 - **WHEN** all compiled source adapters lack native-query support
 - **THEN** `--query` is omitted from the compiled CLI surface
+
+## RENAMED Requirements
+
+- FROM: `### Requirement: SQLite table selection argument`
+- TO: `### Requirement: Relation selection argument`

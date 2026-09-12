@@ -10,6 +10,8 @@ use crate::view::{ColumnAlignment, TableView};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
 pub enum OutputFormat {
     Table,
+    Json,
+    Jsonl,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, ValueEnum)]
@@ -147,6 +149,82 @@ impl OutputAdapter for FixedWidthTableAdapter {
 fn adapter(format: OutputFormat) -> Box<dyn OutputAdapter> {
     match format {
         OutputFormat::Table => Box::<FixedWidthTableAdapter>::default(),
+        OutputFormat::Json => Box::new(JsonAdapter { lines: false }),
+        OutputFormat::Jsonl => Box::new(JsonAdapter { lines: true }),
+    }
+}
+
+/// Serializes the displayed values without terminal styling or width clipping.
+/// Positional cells preserve duplicate labels and headerless input.
+struct JsonAdapter {
+    lines: bool,
+}
+
+impl OutputAdapter for JsonAdapter {
+    fn requirements(&self) -> OutputRequirements {
+        OutputRequirements {
+            complete_rows: true,
+            rendered_values: true,
+            ..OutputRequirements::default()
+        }
+    }
+
+    fn supports_color(&self) -> bool {
+        false
+    }
+
+    fn write(
+        &self,
+        prepared: &PreparedOutput<'_>,
+        _color: ColorOutput,
+        writer: &mut dyn Write,
+    ) -> io::Result<()> {
+        let columns: Vec<&str> = if prepared.header_visible {
+            prepared
+                .header
+                .iter()
+                .map(|cell| cell.text.as_str())
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !self.lines {
+            writer.write_all(b"{\"columns\":")?;
+            serde_json::to_writer(&mut *writer, &columns)?;
+            writer.write_all(b",\"rows\":[")?;
+        }
+        for index in 0..prepared.rows.len() {
+            let row: Vec<String> = prepared
+                .rows
+                .row(index)
+                .into_iter()
+                .map(|cell| cell.text)
+                .collect();
+            if self.lines {
+                #[derive(serde::Serialize)]
+                struct Record<'a> {
+                    columns: &'a [&'a str],
+                    values: &'a [String],
+                }
+                serde_json::to_writer(
+                    &mut *writer,
+                    &Record {
+                        columns: &columns,
+                        values: &row,
+                    },
+                )?;
+                writer.write_all(b"\n")?;
+            } else {
+                if index != 0 {
+                    writer.write_all(b",")?;
+                }
+                serde_json::to_writer(&mut *writer, &row)?;
+            }
+        }
+        if !self.lines {
+            writer.write_all(b"]}\n")?;
+        }
+        Ok(())
     }
 }
 
@@ -674,29 +752,31 @@ view:
 
     #[test]
     fn broken_pipe_is_clean_but_other_writer_errors_fail() {
-        let mut view = TableView::classify(rows(&[&["A"], &["1"]]), Viewport::new(10, 4));
-        write_view(
-            OutputFormat::Table,
-            ColorOutput::Never,
-            &mut view,
-            &crate::theme::default_theme(),
-            &mut FailingWriter {
-                kind: io::ErrorKind::BrokenPipe,
-            },
-        )
-        .expect("broken pipe");
+        for format in [OutputFormat::Table, OutputFormat::Json, OutputFormat::Jsonl] {
+            let mut view = TableView::classify(rows(&[&["A"], &["1"]]), Viewport::new(10, 4));
+            write_view(
+                format,
+                ColorOutput::Never,
+                &mut view,
+                &crate::theme::default_theme(),
+                &mut FailingWriter {
+                    kind: io::ErrorKind::BrokenPipe,
+                },
+            )
+            .expect("broken pipe");
 
-        let error = write_view(
-            OutputFormat::Table,
-            ColorOutput::Never,
-            &mut view,
-            &crate::theme::default_theme(),
-            &mut FailingWriter {
-                kind: io::ErrorKind::Other,
-            },
-        )
-        .expect_err("other error");
-        assert!(error.downcast_ref::<io::Error>().is_some());
+            let error = write_view(
+                format,
+                ColorOutput::Never,
+                &mut view,
+                &crate::theme::default_theme(),
+                &mut FailingWriter {
+                    kind: io::ErrorKind::Other,
+                },
+            )
+            .expect_err("other error");
+            assert!(error.downcast_ref::<io::Error>().is_some());
+        }
     }
 
     #[test]

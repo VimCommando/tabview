@@ -1,3 +1,10 @@
+---
+type: Guide
+title: Modal style
+description: Layout and keyboard interaction rules for terminal modal dialogs.
+generated: { by: codex/gpt-6, at: 2026-09-07T02:19:31Z }
+---
+
 # Modal Style
 
 Use these rules for terminal modal dialogs.

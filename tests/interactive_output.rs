@@ -1,4 +1,6 @@
 #![cfg(unix)]
+// PTY process setup and signal delivery require libc; production code stays denied.
+#![allow(unsafe_code)]
 
 use std::io::{Read, Write};
 use std::os::unix::process::CommandExt;
@@ -19,7 +21,8 @@ fn run_in_pty(command: &str, keys: &[u8]) -> Output {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     let mut script = Command::new("script");
     #[cfg(target_os = "linux")]
-    script.args(["-q", "-c", command, "/dev/null"]);
+    // util-linux script needs -e to propagate the command's exit status.
+    script.args(["-q", "-e", "-c", command, "/dev/null"]);
     #[cfg(not(target_os = "linux"))]
     script.args(["-q", "/dev/null", "/bin/sh", "-c", command]);
     let mut child = script
@@ -109,7 +112,7 @@ fn cancelled_interactive_transform_does_not_export() {
         format!("echo $$ > {pid_file}; exec {binary} -i -o table {input} > {destination}");
     let mut script = Command::new("script");
     #[cfg(target_os = "linux")]
-    script.args(["-q", "-c", &command, "/dev/null"]);
+    script.args(["-q", "-e", "-c", &command, "/dev/null"]);
     #[cfg(not(target_os = "linux"))]
     script.args(["-q", "/dev/null", "/bin/sh", "-c", &command]);
     let child = script

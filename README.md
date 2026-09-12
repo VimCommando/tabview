@@ -62,24 +62,22 @@ contents of that cell are shown next to it.
 
 ## Installation
 
-Install the latest published release:
+Install from crates.io:
 
 ```sh
 cargo install tview
 ```
 
-Install from a local checkout:
-
-```sh
-cargo install --path .
-```
-
-Build with clipboard support:
+Enable optional integrations:
 
 ```sh
 cargo install tview --features clipboard
 cargo install tview --features elasticsearch
 ```
+
+For development, install from a local checkout with `cargo install --path . --locked`.
+See [release platforms and publication](docs/releases.md) and
+[migration from Tabview](docs/migration.md).
 
 ## Usage
 
@@ -140,8 +138,10 @@ waits for EOF so late rows and columns are included. Redirect output to a
 different path from the input: shells truncate redirection targets before Tview starts.
 The current `table` format is fixed-width text and does not preserve CSV or JSON
 syntax, so write it to a text destination rather than replacing the source.
-Future serializers such as CSV and Markdown can be added as new `--output`
-values without changing `--interactive`.
+Use `--output json` for a JSON document or `--output jsonl` for one JSON record
+per row. Both export displayed strings without width clipping or ANSI styling.
+Their schemas, framing, and exit codes are in the [CLI contract](docs/cli-contract.md).
+Use `tview --version` to print the package version.
 
 `--format auto|delimited|json|ndjson|sqlite|elasticsearch` defaults to `auto`.
 An unambiguous URL scheme can select a source format: `libsql://` resolves to
@@ -659,3 +659,6 @@ cargo clippy --all-targets --all-features -- -D warnings
 | `[num]]` | Skip to the next row value change. |
 | `[num]{` | Skip to the previous column value change. |
 | `[num]}` | Skip to the next column value change. |
+
+Contributor checks and policy are in [contributing guide](docs/contributing.md).
+The authored documentation starts at [docs/index.md](docs/index.md).
